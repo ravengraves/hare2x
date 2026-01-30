@@ -1,0 +1,9 @@
+// for loop sum
+
+export fn main() void = {
+	let sum: i32 = 0;
+	for (let i: i32 = 0; i < 10; i += 1) {
+		sum = sum + i;
+	};
+	assert(sum == 45);
+};

@@ -1,0 +1,31 @@
+// nullable_match_narrowing.pka - phase4 nullable match narrowing
+
+type point = struct {
+	x: i32,
+	y: i32,
+};
+
+fn get_x(p: nullable *point) i32 = {
+	match (p) {
+	case let q: *point => return q.x;
+	case null => return -1;
+	};
+};
+
+fn get_y_expr(p: nullable *point) i32 = {
+	let v: i32 = match (p) {
+	case let q: *point =>
+		yield q.y;
+	case null =>
+		yield 0;
+	};
+	return v;
+};
+
+export fn main() void = {
+	let p = point { x = 1, y = 2 };
+	assert(get_x(&p) == 1);
+	assert(get_x(null) == -1);
+	assert(get_y_expr(&p) == 2);
+	assert(get_y_expr(null) == 0);
+};

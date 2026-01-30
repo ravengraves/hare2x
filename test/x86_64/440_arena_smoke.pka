@@ -1,0 +1,40 @@
+// arena_smoke.pka - phase4 arena/global struct smoke test
+
+const ARENA_SIZE: size = 64;
+let arena_buf: [64]u8 = [0...];
+let arena_used: size = 0;
+
+type pair = struct {
+	a: i32,
+	b: i32,
+};
+
+fn align8(n: size) size = {
+	return (n + 7) & ~7z;
+};
+
+fn arena_alloc(sz: size) nullable *u8 = {
+	let aligned = align8(sz);
+	if (arena_used + aligned > ARENA_SIZE) {
+		return null;
+	};
+	let ptr = &arena_buf[arena_used];
+	arena_used += aligned;
+	return ptr;
+};
+
+export fn main() void = {
+	arena_used = 0;
+	let r = arena_alloc(8);
+	match (r) {
+	case let p: *u8 => {
+		let q = p: *pair;
+		q.a = 11;
+		q.b = 22;
+		assert(q.a == 11);
+		assert(q.b == 22);
+	};
+	case null =>
+		assert(false);
+	};
+};

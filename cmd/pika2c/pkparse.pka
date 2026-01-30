@@ -689,7 +689,72 @@ fn p_primary(p: *parser) *tnode = {
 		};
 		return str_node;
 	};
-	if (k == TK_CHAR) { return p_cap_lit(p, N_CHAR); };
+	if (k == TK_CHAR) {
+		tok_nn = m_need(&p.c, TK_CHAR);
+		let char_val: u32 = 0;
+		let char_ref = tok_nn.ref;
+		if (char_ref.length >= 2) {
+			let char_i = 1z;
+			let char_end = char_ref.length - 1;
+			let char_c0 = p.t.src[char_ref.pos + char_i];
+			if (char_c0 == '\\' && char_i + 1 < char_end) {
+				let char_next = p.t.src[char_ref.pos + char_i + 1];
+				if (char_next == 'n') { char_val = '\n': u32; }
+				else if (char_next == 'r') { char_val = '\r': u32; }
+				else if (char_next == 't') { char_val = '\t': u32; }
+				else if (char_next == '0') { char_val = 0; }
+				else if (char_next == '\\') { char_val = '\\': u32; }
+				else if (char_next == '\'') { char_val = '\'': u32; }
+				else if (char_next == 'x' && char_i + 3 < char_end) {
+					let char_hex_val: u32 = 0;
+					let char_hex_i = 0z;
+					let char_hex_pos = char_ref.pos + char_i + 2;
+					for (char_hex_i < 2) {
+						let char_hex_c = p.t.src[char_hex_pos + char_hex_i];
+						char_hex_val <<= 4;
+						if (char_hex_c >= '0' && char_hex_c <= '9') { char_hex_val |= (char_hex_c - '0'): u32; }
+						else if (char_hex_c >= 'a' && char_hex_c <= 'f') { char_hex_val |= (char_hex_c - 'a' + 10): u32; }
+						else if (char_hex_c >= 'A' && char_hex_c <= 'F') { char_hex_val |= (char_hex_c - 'A' + 10): u32; };
+						char_hex_i += 1;
+					};
+					char_val = char_hex_val;
+				} else if ((char_next == 'o' || char_next == 'O') && (char_i + 5 < char_end)) {
+					let char_oct_count = 4z;
+					if (char_next == 'O') { char_oct_count = 8z; };
+					let char_oct_val: u32 = 0;
+					let char_oct_i = 0z;
+					let char_oct_pos = char_ref.pos + char_i + 2;
+					for (char_oct_i < char_oct_count) {
+						let char_oct_c = p.t.src[char_oct_pos + char_oct_i];
+						char_oct_val <<= 3;
+						if (char_oct_c >= '0' && char_oct_c <= '7') { char_oct_val |= (char_oct_c - '0'): u32; };
+						char_oct_i += 1;
+					};
+					char_val = char_oct_val;
+				} else if ((char_next == 'u' || char_next == 'U') && (char_i + 5 < char_end)) {
+					let char_u_count = 4z;
+					if (char_next == 'U') { char_u_count = 8z; };
+					let char_u_val: u32 = 0;
+					let char_u_i = 0z;
+					let char_u_pos = char_ref.pos + char_i + 2;
+					for (char_u_i < char_u_count) {
+						let char_u_c = p.t.src[char_u_pos + char_u_i];
+						char_u_val <<= 4;
+						if (char_u_c >= '0' && char_u_c <= '9') { char_u_val |= (char_u_c - '0'): u32; }
+						else if (char_u_c >= 'a' && char_u_c <= 'f') { char_u_val |= (char_u_c - 'a' + 10): u32; }
+						else if (char_u_c >= 'A' && char_u_c <= 'F') { char_u_val |= (char_u_c - 'A' + 10): u32; };
+						char_u_i += 1;
+					};
+					char_val = char_u_val;
+				} else {
+					char_val = char_next: u32;
+				};
+			} else {
+				char_val = char_c0: u32;
+			};
+		};
+		return t_new_ref_int(p.t, N_CHAR, tok_nn.ref, char_val: i64);
+	};
 	if (k == TK_VOID) { return p_cap_lit(p, N_T_PRIM); };
 	if (k == TK_TRUE) { m_any(&p.c); return t_new_int(p.t, N_BOOL, 1); };
 	if (k == TK_FALSE) { m_any(&p.c); return t_new_int(p.t, N_BOOL, 0); };

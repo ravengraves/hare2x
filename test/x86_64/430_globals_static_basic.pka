@@ -1,0 +1,25 @@
+// globals_static_basic.pka - phase4 globals/statics smoke test
+
+const GLOBAL_CONST: i32 = 7;
+let global_counter: i32 = 0;
+
+fn bump() i32 = {
+	global_counter += 1;
+	return global_counter;
+};
+
+fn static_bump() i32 = {
+	static let s: i32 = 100;
+	s += 2;
+	return s;
+};
+
+export fn main() void = {
+	assert(GLOBAL_CONST == 7);
+	assert(bump() == 1);
+	assert(bump() == 2);
+	let a = static_bump();
+	let b = static_bump();
+	assert(a == 102);
+	assert(b == 104);
+};

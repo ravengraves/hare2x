@@ -1,0 +1,37 @@
+// nested loops with arrays, break/continue, and indexed stores
+
+export fn main() void = {
+	let arr: [16]i32 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+	let out: [16]i32 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+	let acc: i32 = 0;
+	let rows: i32 = 4;
+	let cols: i32 = 4;
+
+	for (let i: i32 = 0; i < rows; i += 1) {
+		for (let j: i32 = 0; j < cols; j += 1) {
+			if (j == 2) { continue; };
+			let idx: i32 = i * cols + j;
+			let val: i32 = arr[idx];
+			out[idx] = val + i + j;
+			acc += val;
+			if (i == 2) {
+				if (j == 1) { break; };
+			};
+		};
+		if (i == 2) { break; };
+	};
+
+	assert(acc == 37);
+	assert(out[0] == 0);
+	assert(out[1] == 2);
+	assert(out[3] == 6);
+	assert(out[4] == 5);
+	assert(out[5] == 7);
+	assert(out[7] == 11);
+	assert(out[8] == 10);
+	assert(out[9] == 12);
+	assert(out[2] == 0);
+	assert(out[6] == 0);
+	assert(out[10] == 0);
+	assert(out[15] == 0);
+};

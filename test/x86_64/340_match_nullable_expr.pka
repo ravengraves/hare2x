@@ -1,0 +1,76 @@
+// Nested match-expression test for nullable pointers (x86_64)
+use rt;
+
+type point = struct { x: i32, y: i32 };
+
+type node = struct {
+    v: i32,
+    next: nullable *node,
+};
+
+type box = struct {
+    p: nullable *point,
+    n: nullable *node,
+};
+
+fn sum_point(p: nullable *point) i32 = {
+    // Nested match expression with explicit yields
+    let s: i32 = match (p) {
+    case let q: *point =>
+        yield q.x + q.y;
+    case null =>
+        yield 0: i32;
+    };
+    return s;
+};
+
+fn third_value(n: nullable *node) i32 = {
+    let v: i32 = match (n) {
+    case let a: *node =>
+        yield match (a.next) {
+        case let b: *node =>
+            yield match (b.next) {
+            case let c: *node =>
+                yield c.v;
+            case null =>
+                yield -1: i32;
+            };
+        case null =>
+            yield -1: i32;
+        };
+    case null =>
+        yield -1: i32;
+    };
+    return v;
+};
+
+export fn main() void = {
+    let p = point { x = 7, y = 9 };
+    let n3 = node { v = 30, next = null };
+    let n2 = node { v = 20, next = &n3 };
+    let n1 = node { v = 10, next = &n2 };
+
+    let b1 = box { p = &p, n = &n1 };
+    let b2 = box { p = null, n = null };
+
+    let sum1: i32 = match (b1.p) {
+    case let pp: *point =>
+        yield sum_point(&p) + sum_point(pp);
+    case null =>
+        yield 0: i32;
+    };
+    assert(sum1 == 32);
+
+    let sum2: i32 = match (b2.p) {
+    case let pp2: *point =>
+        yield pp2.x + pp2.y;
+    case null =>
+        yield 0: i32;
+    };
+    assert(sum2 == 0);
+
+    let t1 = third_value(b1.n);
+    let t2 = third_value(b2.n);
+    assert(t1 == 30);
+    assert(t2 == -1);
+};

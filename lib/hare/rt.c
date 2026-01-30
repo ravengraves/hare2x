@@ -413,7 +413,7 @@ void rt_abort_fixed(hare_str* path, uint64_t line, uint64_t col, uint64_t i) {
 
 /* Simple bump allocator - replace with real allocator if needed */
 /* or use _c::malloc / _c::free and link to cstdlib */
-static uint8_t heap[16 * 1024 * 1024];  /* 16MB static heap */
+static uint8_t heap[64 * 1024 * 1024];  /* 64MB static heap */
 static size_t heap_used = 0;
 
 void* rt_calloc(size_t nmemb, size_t size) {

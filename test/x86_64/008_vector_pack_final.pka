@@ -1,0 +1,75 @@
+// vector_pack_final.pka - final pack/unpack reuse coverage
+
+export fn main() void = {
+	let a0: f32 = 1.0f32;
+	let a1: f32 = 2.0f32;
+	let a2: f32 = 3.0f32;
+	let a3: f32 = 4.0f32;
+	let b0: f32 = 10.0f32;
+	let b1: f32 = 20.0f32;
+	let b2: f32 = 30.0f32;
+	let b3: f32 = 40.0f32;
+	let c0: f32 = 100.0f32;
+	let c1: f32 = 200.0f32;
+	let c2: f32 = 300.0f32;
+	let c3: f32 = 400.0f32;
+	let d0: f32 = 1000.0f32;
+	let d1: f32 = 2000.0f32;
+	let d2: f32 = 3000.0f32;
+	let d3: f32 = 4000.0f32;
+
+	let r0: f32 = a0 + b0;
+	let r1: f32 = a1 + b1;
+	let r2: f32 = a2 + b2;
+	let r3: f32 = a3 + b3;
+
+	let s0: f32 = r0 + c0;
+	let s1: f32 = r1 + c1;
+	let s2: f32 = r2 + c2;
+	let s3: f32 = r3 + c3;
+
+	let t0: f32 = r0 + d0;
+	let t1: f32 = r1 + d1;
+	let t2: f32 = r2 + d2;
+	let t3: f32 = r3 + d3;
+
+	let u0: f32 = s0 + t0;
+	let u1: f32 = s1 + t1;
+	let u2: f32 = s2 + t2;
+	let u3: f32 = s3 + t3;
+
+	let sumf: f32 = u0 + u1 + u2 + u3;
+	assert(sumf == 11220.0f32);
+
+	let i0: i32 = 1;
+	let i1: i32 = 2;
+	let i2: i32 = 3;
+	let i3: i32 = 4;
+	let k0: i32 = 5;
+	let k1: i32 = 6;
+	let k2: i32 = 7;
+	let k3: i32 = 8;
+
+	let j0: i32 = i0 + k0;
+	let j1: i32 = i1 + k1;
+	let j2: i32 = i2 + k2;
+	let j3: i32 = i3 + k3;
+
+	let l0: i32 = j0 + 1;
+	let l1: i32 = j1 + 1;
+	let l2: i32 = j2 + 1;
+	let l3: i32 = j3 + 1;
+
+	let m0: i32 = j0 + 2;
+	let m1: i32 = j1 + 2;
+	let m2: i32 = j2 + 2;
+	let m3: i32 = j3 + 2;
+
+	let n0: i32 = l0 + m0;
+	let n1: i32 = l1 + m1;
+	let n2: i32 = l2 + m2;
+	let n3: i32 = l3 + m3;
+
+	let sumi: i32 = n0 + n1 + n2 + n3;
+	assert(sumi == 84);
+};

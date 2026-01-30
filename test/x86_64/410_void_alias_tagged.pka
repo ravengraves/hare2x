@@ -1,0 +1,18 @@
+// void_alias_tagged.pka - phase4 void alias tagged smoke test
+
+export type err = !void;
+export type opt = (i32 | err);
+
+fn unwrap_or(v: opt, fallback: i32) i32 = {
+	match (v) {
+	case i32 => return v: i32;
+	case err => return fallback;
+	};
+};
+
+export fn main() void = {
+	let ok: opt = 11: opt;
+	let bad: opt = err;
+	assert(unwrap_or(ok, 0) == 11);
+	assert(unwrap_or(bad, -1) == -1);
+};

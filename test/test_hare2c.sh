@@ -9,6 +9,7 @@ CC=${CC:-clang}
 CFLAGS="-std=c11 -Wall -Wextra -Wconversion -Wfloat-conversion -Wno-overlength-strings \
         -Wno-gnu-auto-type -Wno-gnu-statement-expression -Wno-parentheses-equality \
         -Wno-implicit-int-conversion -Wno-unused-function -Wno-unused-variable \
+        -Wno-unused-parameter -Wno-sign-compare -Wno-unused-value \
         -O0 -ffast-math -ffunction-sections -fdata-sections -fno-builtin"
 
 pass() { printf "${GREEN}PASS${NC}\n"; PASS=$((PASS + 1)); }

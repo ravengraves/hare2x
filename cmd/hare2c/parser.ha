@@ -940,11 +940,11 @@ fn parse_array_literal(p: *parser, line: u32, col: u16) *node = {
 // Parse struct literal: TypeName { field = val, ... }
 fn parse_struct_literal(p: *parser, type_name_ptr: *u8, type_name_len: size, line: u32, col: u16) *node = {
 	// Already consumed TypeName {
-	let fields: [32]nullable *node = [null...];
+	let fields: [128]nullable *node = [null...];
 	let nfields = 0z;
 
 	for (!at(p, token_kind::RBRACE)) {
-		if (nfields >= 32) {
+		if (nfields >= 128) {
 			die_parse(p, "too many struct fields");
 		};
 
@@ -1333,11 +1333,11 @@ export fn parse_type(p: *parser) *node = {
 		advance(p);
 		expect(p, token_kind::LBRACE);
 
-		let fields: [64]nullable *node = [null...];
+		let fields: [128]nullable *node = [null...];
 		let nfields = 0z;
 
 		for (!at(p, token_kind::RBRACE)) {
-			if (nfields >= 64) {
+			if (nfields >= 128) {
 				die_parse(p, "too many struct fields");
 			};
 

@@ -1,0 +1,16 @@
+use rt;
+
+export fn main() void = {
+	let a: [4]i32 = [0...];
+	assert(a[0] == 0, "fill zero[0]");
+	assert(a[3] == 0, "fill zero[3]");
+
+	let b: [4]i32 = [1...];
+	assert(b[0] == 1, "fill one[0]");
+	assert(b[3] == 1, "fill one[3]");
+
+	let c: [6]i32 = [0, 1, 2, 3...];
+	assert(c[0] == 0, "fill last[0]");
+	assert(c[3] == 3, "fill last[3]");
+	assert(c[5] == 3, "fill last[5]");
+};

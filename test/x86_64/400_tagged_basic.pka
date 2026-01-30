@@ -1,0 +1,17 @@
+// tagged_basic.pka - phase4 tagged union smoke test
+
+export type number = (i32 | f32);
+
+fn as_i32(n: number) i32 = {
+	match (n) {
+	case i32 => return n: i32;
+	case f32 => return (n: f32): i32;
+	};
+};
+
+export fn main() void = {
+	let a: number = 7: number;
+	let b: number = 3.5f32: number;
+	assert(as_i32(a) == 7);
+	assert(as_i32(b) == 3);
+};

@@ -3136,25 +3136,31 @@ export fn emit_stmt(ctx: *transform_ctx, n: *node) void = {
 						emit_node(ctx, arr_lit.elems[i]);
 					};
 
-					if (is_zero_fill) {
-						// C11: remaining elements are zero-initialized automatically
+					if (!is_zero_fill) {
+						// Emit a portable fill loop instead of GNU range designators.
 						if (arr_lit.nelems == 0) {
-							// Pure zero fill: just use {0}
+							// Ensure a non-empty initializer for C11.
 							strbuf_append(sb, "0");
 						};
-						// else: {a, b, c} - rest auto-zeros
-					} else {
-						// Non-zero fill requires GNU C designated initializer: [start ... end] = value
-						if (arr_lit.nelems > 0) {
-							strbuf_append(sb, ", ");
-						};
-						strbuf_append(sb, "[");
+						strbuf_append(sb, "};\n");
+						strbuf_append(sb, "for (size_t __i = ");
 						strbuf_append_uint(sb, arr_lit.nelems);
-						strbuf_append(sb, " ... (");
+						strbuf_append(sb, "; __i < ");
 						emit_node(ctx, unwrap(arr_typ.length));
-						strbuf_append(sb, ")-1] = ");
+						strbuf_append(sb, "; __i += 1) { ");
+						strbuf_append_bytes(sb, d.name_ptr, d.name_len);
+						strbuf_append(sb, "[__i] = ");
 						emit_node(ctx, fill_node);
+						strbuf_append(sb, "; }\n");
+						return;
 					};
+
+					// C11: remaining elements are zero-initialized automatically
+					if (arr_lit.nelems == 0) {
+						// Pure zero fill: just use {0}
+						strbuf_append(sb, "0");
+					};
+					// else: {a, b, c} - rest auto-zeros
 					strbuf_append(sb, "};");
 					return;
 				};
@@ -5911,6 +5917,17 @@ export fn emit_unit(ctx: *transform_ctx, unit: *node) void = {
 		if (decl.kind == node_kind::N_TYPEDEF) {
 			let td = decl.data: *n_typedef_data;
 			add_typedef(ctx, td.name_ptr, td.name_len, td.typ);
+		};
+	};
+	// Pre-register function return types so field access can infer pointer depth
+	for (let i = 0z; i < d.ndecls; i += 1) {
+		let decl = d.decls[i];
+		if (decl.kind == node_kind::N_FN) {
+			let fd = decl.data: *n_fn_data;
+			if (fd.ret_type != null) {
+				let rt = unwrap(fd.ret_type);
+				add_fn_ret_type(ctx, fd.name_ptr, fd.name_len, rt);
+			};
 		};
 	};
 

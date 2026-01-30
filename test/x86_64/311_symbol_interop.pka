@@ -1,0 +1,22 @@
+use rt;
+
+export @symbol("my_c_function") fn my_c_function() i32 = {
+	return 42;
+};
+
+@symbol("compute_sum") fn compute_sum(a: i32, b: i32) i32 = {
+	return a + b;
+};
+
+fn regular_func() i32 = {
+	return 100;
+};
+
+export fn main() void = {
+	let x = my_c_function();
+	assert(x == 42);
+	let y = compute_sum(10, 20);
+	assert(y == 30);
+	let z = regular_func();
+	assert(z == 100);
+};

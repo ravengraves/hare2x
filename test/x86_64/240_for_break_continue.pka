@@ -1,0 +1,15 @@
+// for loop with break/continue
+
+export fn main() void = {
+	let sum: i32 = 0;
+	for (let i: i32 = 0; i < 10; i += 1) {
+		if (i == 5) {
+			continue;
+		};
+		if (i == 8) {
+			break;
+		};
+		sum = sum + i;
+	};
+	assert(sum == 23);
+};

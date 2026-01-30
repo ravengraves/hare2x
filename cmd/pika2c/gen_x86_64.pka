@@ -1,0 +1,132 @@
+// gen_x86_64.pka - x86_64 emitter helpers (shared)
+
+fn x86_emit_jmp(em: *emitter, op: str, id: i64) void = {
+	emit_s(em, "\t");
+	emit_s(em, op);
+	emit_s(em, " .L");
+	e_i(em, id);
+	e_nl(em);
+};
+
+fn x86_emit_ins(em: *emitter, s: str) void = {
+	emit_s(em, "\t");
+	emit_s(em, s);
+	e_nl(em);
+};
+
+fn x86_emit_ins_pre_i_suf(em: *emitter, pre: str, v: i64, suf: str) void = {
+	emit_s(em, "\t");
+	emit_s(em, pre);
+	e_i(em, v);
+	emit_s(em, suf);
+	e_nl(em);
+};
+
+fn x86_emit_ins_b(em: *emitter, fmt: str, v: bref) void = {
+	emit_s(em, "\t");
+	ef1_b(em, fmt, v);
+	e_nl(em);
+};
+
+fn x86_emit_ins2_i(em: *emitter, fmt: str, a: i64, b: i64) void = {
+	emit_s(em, "\t");
+	ef2_i(em, fmt, a, b);
+	e_nl(em);
+};
+
+fn x86_emit_ins2_b(em: *emitter, fmt: str, a: bref, b: bref) void = {
+	emit_s(em, "\t");
+	ef2_b(em, fmt, a, b);
+	e_nl(em);
+};
+
+fn x86_emit_reg_reg(em: *emitter, op: str, src: str, dst: str) void = {
+	emit_s(em, "\t");
+	emit_s(em, op);
+	emit_s(em, " %");
+	emit_s(em, src);
+	emit_s(em, ", %");
+	emit_s(em, dst);
+	e_nl(em);
+};
+
+fn x86_emit_reg(em: *emitter, op: str, reg: str) void = {
+	emit_s(em, "\t");
+	emit_s(em, op);
+	emit_s(em, " %");
+	emit_s(em, reg);
+	e_nl(em);
+};
+
+fn x86_emit_mov_imm(em: *emitter, reg: str, imm: i64) void = {
+	emit_s(em, "\tmovq $");
+	e_i(em, imm);
+	emit_s(em, ", %");
+	emit_s(em, reg);
+	e_nl(em);
+};
+
+fn x86_emit_label(em: *emitter, id: i64) void = {
+	emit_s(em, ".L");
+	e_i(em, id);
+	e_c(em, ':');
+	e_nl(em);
+};
+
+fn x86_emit_label_ref(em: *emitter, id: i64) void = {
+	emit_s(em, ".L");
+	e_i(em, id);
+};
+
+fn x86_emit_zero_gpr(em: *emitter, idx: u8) void = {
+	let r32 = x86_gpr_name(idx, 32);
+	x86_emit_reg_reg(em, "xorl", r32, r32);
+};
+
+fn x86_emit_mem_to_reg(em: *emitter, op: str, off: i64, reg: str) void = {
+	emit_s(em, "\t");
+	emit_s(em, op);
+	emit_s(em, " -");
+	e_i(em, off);
+	emit_s(em, "(%rbp), %");
+	emit_s(em, reg);
+	e_nl(em);
+};
+
+fn x86_emit_reg_to_mem(em: *emitter, op: str, reg: str, off: i64) void = {
+	emit_s(em, "\t");
+	emit_s(em, op);
+	emit_s(em, " %");
+	emit_s(em, reg);
+	emit_s(em, ", -");
+	e_i(em, off);
+	emit_s(em, "(%rbp)");
+	e_nl(em);
+};
+
+fn x86_emit_mem_addr_to_reg(em: *emitter, op: str, addr_reg: str, dst_reg: str) void = {
+	emit_s(em, "\t");
+	emit_s(em, op);
+	emit_s(em, " (%");
+	emit_s(em, addr_reg);
+	emit_s(em, "), %");
+	emit_s(em, dst_reg);
+	e_nl(em);
+};
+
+fn x86_emit_reg_to_mem_addr(em: *emitter, op: str, src_reg: str, addr_reg: str) void = {
+	emit_s(em, "\t");
+	emit_s(em, op);
+	emit_s(em, " %");
+	emit_s(em, src_reg);
+	emit_s(em, ", (%");
+	emit_s(em, addr_reg);
+	emit_s(em, ")");
+	e_nl(em);
+};
+
+fn x86_emit_byte(em: *emitter, b: u8) void = {
+	emit_s(em, "\t.byte ");
+	e_u(em, b: u64);
+	e_nl(em);
+};

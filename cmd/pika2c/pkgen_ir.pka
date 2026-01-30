@@ -1,0 +1,2379 @@
+// pkgen_ir.pka - Pika IR (phase 1 scaffolding)
+
+use rt;
+
+// Scalar types for IR values
+// (keep small integers for compact storage)
+def IR_T_INVALID: u16 = 0;
+def IR_T_I8: u16 = 1;
+def IR_T_I16: u16 = 2;
+def IR_T_I32: u16 = 3;
+def IR_T_I64: u16 = 4;
+def IR_T_U8: u16 = 5;
+def IR_T_U16: u16 = 6;
+def IR_T_U32: u16 = 7;
+def IR_T_U64: u16 = 8;
+def IR_T_F32: u16 = 9;
+def IR_T_F64: u16 = 10;
+def IR_T_PTR: u16 = 11;
+
+// IR op kinds
+def IR_OP_CONST: u16 = 1;
+def IR_OP_COPY: u16 = 2;
+def IR_OP_BIN: u16 = 3;
+def IR_OP_UN: u16 = 4;
+def IR_OP_CMP: u16 = 5;
+def IR_OP_LABEL: u16 = 6;
+def IR_OP_JUMP: u16 = 7;
+def IR_OP_BRANCH: u16 = 8;
+def IR_OP_CALL: u16 = 9;
+def IR_OP_RET: u16 = 10;
+def IR_OP_LOAD: u16 = 11;
+def IR_OP_STORE: u16 = 12;
+def IR_OP_ADDR: u16 = 13;
+def IR_OP_PACK: u16 = 14;
+def IR_OP_UNPACK: u16 = 15;
+def IR_OP_CAST: u16 = 16;
+def IR_DEP_NONE: u32 = 0xffffffffu32;
+def IR_DFG_CHUNK: u32 = 64;
+
+// IR call kinds (aux for IR_OP_CALL)
+def IR_CALL_ABORT_FIXED: u16 = 1;
+def IR_CALL_QUAL: u16 = 2;
+
+// Binop kinds
+
+def IR_BIN_ADD: u16 = 1;
+def IR_BIN_SUB: u16 = 2;
+def IR_BIN_MUL: u16 = 3;
+def IR_BIN_DIV: u16 = 4;
+def IR_BIN_MOD: u16 = 5;
+def IR_BIN_AND: u16 = 6;
+def IR_BIN_OR: u16 = 7;
+def IR_BIN_XOR: u16 = 8;
+def IR_BIN_SHL: u16 = 9;
+def IR_BIN_SHR: u16 = 10;
+
+// Unop kinds
+def IR_UN_NEG: u16 = 1;
+def IR_UN_NOT: u16 = 2;
+def IR_UN_BITNOT: u16 = 3;
+
+// Cmp kinds
+def IR_CMP_EQ: u16 = 1;
+def IR_CMP_NE: u16 = 2;
+def IR_CMP_LT: u16 = 3;
+def IR_CMP_LE: u16 = 4;
+def IR_CMP_GT: u16 = 5;
+def IR_CMP_GE: u16 = 6;
+
+// Virtual register
+
+type ir_vreg = struct {
+	id: u32,
+	ty: u16,
+	width: u8,
+};
+
+// Single IR op node
+
+type ir_op = struct {
+	kind: u16,
+	aux: u16,
+	dst: ir_vreg,
+	a: ir_vreg,
+	b: ir_vreg,
+	imm: i64,
+	cond: u16,
+	target: u32,
+	target2: u32,
+	arg_start: size,
+	arg_count: size,
+	sym: bref,
+	sym2: bref,
+};
+
+// Function IR
+
+type ir_func = struct {
+	name: bref,
+	params_start: size,
+	params_len: size,
+	result_ty: u16,
+	has_result: bool,
+	ops_start: size,
+	ops_len: size,
+	vreg_base: u32,
+	next_vreg: u32, // count within function
+	supported: bool,
+};
+
+// IR context (static pools)
+
+type ir_ctx = struct {
+	funcs: [256]ir_func,
+	func_count: size,
+	ops: [65536]ir_op,
+	op_count: size,
+	params: [4096]ir_vreg,
+	param_count: size,
+	args: [8192]ir_vreg,
+	arg_count: size,
+	vreg_types: [8192]u16,
+	vreg_widths: [8192]u8,
+	next_vreg_id: u32,
+	current_fn: size,
+	src: *[*]u8,
+	src_len: size,
+	vec_pack_reuse: [256]u32,
+	vec_unpack_drop: [256]u32,
+	unsupported_count: size,
+	unsupported_fn: size,
+	unsupported_op: size,
+	unsupported_reason: u16,
+};
+
+let ir_ctx_global: ir_ctx = ir_ctx {
+	funcs = [ir_func { name = bref { pos = 0, length = 0 }, params_start = 0, params_len = 0,
+		result_ty = IR_T_INVALID, has_result = false,
+		ops_start = 0, ops_len = 0, vreg_base = 0, next_vreg = 0, supported = false }...],
+	func_count = 0,
+	ops = [ir_op { kind = 0, aux = 0, dst = ir_vreg { id = 0, ty = 0, width = 0 },
+		a = ir_vreg { id = 0, ty = 0, width = 0 },
+		b = ir_vreg { id = 0, ty = 0, width = 0 },
+		imm = 0, cond = 0, target = 0, target2 = 0,
+		arg_start = 0, arg_count = 0, sym = bref { pos = 0, length = 0 },
+		sym2 = bref { pos = 0, length = 0 } }...],
+	op_count = 0,
+	params = [ir_vreg { id = 0, ty = 0, width = 0 }...],
+	param_count = 0,
+	args = [ir_vreg { id = 0, ty = 0, width = 0 }...],
+	arg_count = 0,
+	vreg_types = [0...],
+	vreg_widths = [0...],
+	next_vreg_id = 0,
+	current_fn = 0,
+	src = (&placeholder_byte): *[*]u8,
+	src_len = 0,
+	vec_pack_reuse = [0...],
+	vec_unpack_drop = [0...],
+	unsupported_count = 0,
+	unsupported_fn = 0,
+	unsupported_op = 0,
+	unsupported_reason = 0,
+};
+
+let ir_ops_tmp: [65536]ir_op = [ir_op { kind = 0, aux = 0, dst = ir_vreg { id = 0, ty = 0, width = 0 },
+	a = ir_vreg { id = 0, ty = 0, width = 0 },
+	b = ir_vreg { id = 0, ty = 0, width = 0 },
+	imm = 0, cond = 0, target = 0, target2 = 0,
+	arg_start = 0, arg_count = 0, sym = bref { pos = 0, length = 0 },
+	sym2 = bref { pos = 0, length = 0 } }...];
+
+let ir_vec_marks: [65536]u8 = [0...];
+let ir_vec_chunk: [65536]u32 = [0...];
+let ir_vec_use_count: [65536]u32 = [0...];
+let ir_vec_use_single: [65536]u32 = [IR_DEP_NONE...];
+let ir_vec_def_op: [65536]u32 = [IR_DEP_NONE...];
+let ir_vec_skip_ops: [65536]u8 = [0...];
+let ir_dfg_dep0: [65536]u32 = [IR_DEP_NONE...];
+let ir_dfg_dep1: [65536]u32 = [IR_DEP_NONE...];
+let ir_dfg_redef: [65536]u8 = [0...];
+
+fn ir_reset(ctx: *ir_ctx, src: *[*]u8, src_len: size) void = {
+	ctx.func_count = 0;
+	ctx.op_count = 0;
+	ctx.param_count = 0;
+	ctx.arg_count = 0;
+	ctx.next_vreg_id = 0;
+	ctx.current_fn = 0;
+	ctx.src = src;
+	ctx.src_len = src_len;
+	let i = 0z;
+	for (i < len(ctx.vec_pack_reuse)) {
+		ctx.vec_pack_reuse[i] = 0;
+		ctx.vec_unpack_drop[i] = 0;
+		i += 1;
+	};
+	ctx.unsupported_count = 0;
+	ctx.unsupported_fn = 0;
+	ctx.unsupported_op = 0;
+	ctx.unsupported_reason = 0;
+};
+
+fn ir_begin_func(ctx: *ir_ctx, name: bref, result_ty: u16, has_result: bool) *ir_func = {
+	let idx = ctx.func_count;
+	if (idx >= 256) { abort("ir: too many functions"); };
+	ctx.func_count += 1;
+	let f: *ir_func = &ctx.funcs[idx];
+	f.name = name;
+	f.params_start = ctx.param_count;
+	f.params_len = 0;
+	f.result_ty = result_ty;
+	f.has_result = has_result;
+	f.ops_start = ctx.op_count;
+	f.ops_len = 0;
+	f.vreg_base = ctx.next_vreg_id;
+	f.next_vreg = 0;
+	f.supported = true;
+	ctx.current_fn = idx;
+	return f;
+};
+
+fn ir_end_func(ctx: *ir_ctx) void = {
+	let f: *ir_func = &ctx.funcs[ctx.current_fn];
+	f.ops_len = ctx.op_count - f.ops_start;
+};
+
+fn ir_mark_unsupported(ctx: *ir_ctx) void = {
+	let f: *ir_func = &ctx.funcs[ctx.current_fn];
+	f.supported = false;
+	ctx.unsupported_count += 1;
+	ctx.unsupported_fn = ctx.current_fn;
+	ctx.unsupported_op = ctx.op_count;
+};
+
+fn ir_new_vreg(ctx: *ir_ctx, ty: u16, width: u8) ir_vreg = {
+	let f: *ir_func = &ctx.funcs[ctx.current_fn];
+	let id = ctx.next_vreg_id;
+	ctx.next_vreg_id += 1;
+	f.next_vreg += 1;
+	if (id: size >= len(ctx.vreg_types)) { abort("ir: too many vregs"); };
+	ctx.vreg_types[id: size] = ty;
+	ctx.vreg_widths[id: size] = width;
+	return ir_vreg { id = id, ty = ty, width = width };
+};
+
+fn ir_emit_op(ctx: *ir_ctx, op: ir_op) void = {
+	if (ctx.op_count >= len(ctx.ops)) { abort("ir: op buffer full"); };
+	ctx.ops[ctx.op_count] = op;
+	ctx.op_count += 1;
+};
+
+fn ir_add_param(ctx: *ir_ctx, v: ir_vreg) void = {
+	if (ctx.param_count >= len(ctx.params)) { abort("ir: too many params"); };
+	ctx.params[ctx.param_count] = v;
+	ctx.param_count += 1;
+	let f: *ir_func = &ctx.funcs[ctx.current_fn];
+	f.params_len += 1;
+};
+
+fn ir_vreg_invalid() ir_vreg = {
+	return ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 };
+};
+
+fn ir_scalar_from_type(g: *codegen, ty: *tnode) u16 = {
+	let resolved = resolve_alias_type(g, ty);
+	if (resolved == null) {
+		if (ty.kind == N_T_ALIAS) {
+			if (bref_match(ty.ref, "i8", g.t.src)) { return IR_T_I8; };
+			if (bref_match(ty.ref, "i16", g.t.src)) { return IR_T_I16; };
+			if (bref_match(ty.ref, "i32", g.t.src)) { return IR_T_I32; };
+			if (bref_match(ty.ref, "i64", g.t.src)) { return IR_T_I64; };
+			if (bref_match(ty.ref, "int", g.t.src)) { return IR_T_I64; };
+			if (bref_match(ty.ref, "u8", g.t.src)) { return IR_T_U8; };
+			if (bref_match(ty.ref, "u16", g.t.src)) { return IR_T_U16; };
+			if (bref_match(ty.ref, "u32", g.t.src)) { return IR_T_U32; };
+			if (bref_match(ty.ref, "u64", g.t.src)) { return IR_T_U64; };
+			if (bref_match(ty.ref, "uint", g.t.src)) { return IR_T_U64; };
+			if (bref_match(ty.ref, "f32", g.t.src)) { return IR_T_F32; };
+			if (bref_match(ty.ref, "f64", g.t.src)) { return IR_T_F64; };
+			if (bref_match(ty.ref, "bool", g.t.src)) { return IR_T_U8; };
+			if (bref_match(ty.ref, "size", g.t.src)) { return IR_T_U64; };
+			if (bref_match(ty.ref, "uintptr", g.t.src)) { return IR_T_PTR; };
+		};
+		return IR_T_INVALID;
+	};
+	let r: *tnode = unwrap(resolved);
+	let depth = 0;
+	for (depth < 8 && r.kind == N_T_QUAL) {
+		let inner = t_first(r);
+		if (inner == null) { return IR_T_INVALID; };
+		r = unwrap(inner);
+		depth += 1;
+		if (r.kind == N_T_ALIAS) {
+			let resolved2 = resolve_alias_type(g, r);
+			if (resolved2 == null) { return IR_T_INVALID; };
+			r = unwrap(resolved2);
+		};
+	};
+	if (r.kind == N_T_PTR) { return IR_T_PTR; };
+	if (r.kind != N_T_PRIM) { return IR_T_INVALID; };
+	let tok = r.ival: u16;
+	if (tok == TK_I8) { return IR_T_I8; };
+	if (tok == TK_I16) { return IR_T_I16; };
+	if (tok == TK_I32) { return IR_T_I32; };
+	if (tok == TK_I64) { return IR_T_I64; };
+	if (tok == TK_U8) { return IR_T_U8; };
+	if (tok == TK_U16) { return IR_T_U16; };
+	if (tok == TK_U32) { return IR_T_U32; };
+	if (tok == TK_U64) { return IR_T_U64; };
+	if (tok == TK_PRIM_INT) { return IR_T_I64; };
+	if (tok == TK_PRIM_UINT) { return IR_T_U64; };
+	if (tok == TK_SIZE) { return IR_T_U64; };
+	if (tok == TK_F32) { return IR_T_F32; };
+	if (tok == TK_F64) { return IR_T_F64; };
+	if (tok == TK_PRIM_BOOL) { return IR_T_U8; };
+	// Some N_T_PRIM nodes only carry ref (name) instead of token.
+	if (bref_match(r.ref, "i8", g.t.src)) { return IR_T_I8; };
+	if (bref_match(r.ref, "i16", g.t.src)) { return IR_T_I16; };
+	if (bref_match(r.ref, "i32", g.t.src)) { return IR_T_I32; };
+	if (bref_match(r.ref, "i64", g.t.src)) { return IR_T_I64; };
+	if (bref_match(r.ref, "int", g.t.src)) { return IR_T_I64; };
+	if (bref_match(r.ref, "u8", g.t.src)) { return IR_T_U8; };
+	if (bref_match(r.ref, "u16", g.t.src)) { return IR_T_U16; };
+	if (bref_match(r.ref, "u32", g.t.src)) { return IR_T_U32; };
+	if (bref_match(r.ref, "u64", g.t.src)) { return IR_T_U64; };
+	if (bref_match(r.ref, "uint", g.t.src)) { return IR_T_U64; };
+	if (bref_match(r.ref, "size", g.t.src)) { return IR_T_U64; };
+	if (bref_match(r.ref, "uintptr", g.t.src)) { return IR_T_PTR; };
+	if (bref_match(r.ref, "f32", g.t.src)) { return IR_T_F32; };
+	if (bref_match(r.ref, "f64", g.t.src)) { return IR_T_F64; };
+	if (bref_match(r.ref, "bool", g.t.src)) { return IR_T_U8; };
+	return IR_T_INVALID;
+};
+
+fn ir_scalar_from_expr(g: *codegen, n: *tnode) u16 = {
+	let t = get_expr_type(g, n);
+	if (t == null) { return IR_T_INVALID; };
+	return ir_scalar_from_type(g, unwrap(t));
+};
+
+fn ir_type_prim_size(g: *codegen, ty: *tnode) i64 = {
+	let resolved = resolve_alias_type(g, ty);
+	if (resolved == null) {
+		if (ty.kind == N_T_ALIAS) {
+			if (bref_match(ty.ref, "i8", g.t.src) || bref_match(ty.ref, "u8", g.t.src) || bref_match(ty.ref, "bool", g.t.src)) { return 1; };
+			if (bref_match(ty.ref, "i16", g.t.src) || bref_match(ty.ref, "u16", g.t.src)) { return 2; };
+			if (bref_match(ty.ref, "i32", g.t.src) || bref_match(ty.ref, "u32", g.t.src) || bref_match(ty.ref, "f32", g.t.src)) { return 4; };
+			if (bref_match(ty.ref, "i64", g.t.src) || bref_match(ty.ref, "u64", g.t.src) || bref_match(ty.ref, "f64", g.t.src)) { return 8; };
+			if (bref_match(ty.ref, "int", g.t.src) || bref_match(ty.ref, "uint", g.t.src)) { return 8; };
+			if (bref_match(ty.ref, "size", g.t.src) || bref_match(ty.ref, "uintptr", g.t.src)) { return 8; };
+		};
+		return 8;
+	};
+	let r: *tnode = unwrap(resolved);
+	let depth = 0;
+	for (depth < 8 && r.kind == N_T_QUAL) {
+		let inner = t_first(r);
+		if (inner == null) { return 8; };
+		r = unwrap(inner);
+		depth += 1;
+		if (r.kind == N_T_ALIAS) {
+			let resolved2 = resolve_alias_type(g, r);
+			if (resolved2 == null) { return 8; };
+			r = unwrap(resolved2);
+		};
+	};
+	if (r.kind == N_T_PTR) { return 8; };
+	if (r.kind != N_T_PRIM) { return 8; };
+	let tok = r.ival: u16;
+	if (tok == TK_I8 || tok == TK_U8 || tok == TK_PRIM_BOOL) { return 1; };
+	if (tok == TK_I16 || tok == TK_U16) { return 2; };
+	if (tok == TK_I32 || tok == TK_U32 || tok == TK_F32) { return 4; };
+	if (tok == TK_I64 || tok == TK_U64 || tok == TK_F64) { return 8; };
+	if (tok == TK_SIZE || tok == TK_UINTPTR) { return 8; };
+	// Some N_T_PRIM nodes only carry ref (name) instead of token.
+	if (bref_match(r.ref, "i8", g.t.src) || bref_match(r.ref, "u8", g.t.src) || bref_match(r.ref, "bool", g.t.src)) { return 1; };
+	if (bref_match(r.ref, "i16", g.t.src) || bref_match(r.ref, "u16", g.t.src)) { return 2; };
+	if (bref_match(r.ref, "i32", g.t.src) || bref_match(r.ref, "u32", g.t.src) || bref_match(r.ref, "f32", g.t.src)) { return 4; };
+	if (bref_match(r.ref, "i64", g.t.src) || bref_match(r.ref, "u64", g.t.src) || bref_match(r.ref, "f64", g.t.src)) { return 8; };
+	if (bref_match(r.ref, "int", g.t.src) || bref_match(r.ref, "uint", g.t.src)) { return 8; };
+	if (bref_match(r.ref, "size", g.t.src) || bref_match(r.ref, "uintptr", g.t.src)) { return 8; };
+	return 8;
+};
+
+fn ir_type_elem_size(g: *codegen, ty: *tnode) i64 = {
+	let resolved = resolve_alias_type(g, ty);
+	if (resolved == null) { return ir_type_prim_size(g, ty); };
+	let r: *tnode = unwrap(resolved);
+	let depth = 0;
+	for (depth < 8 && r.kind == N_T_QUAL) {
+		let inner = t_first(r);
+		if (inner == null) { return 8; };
+		r = unwrap(inner);
+		depth += 1;
+		if (r.kind == N_T_ALIAS) {
+			let resolved2 = resolve_alias_type(g, r);
+			if (resolved2 == null) { return 8; };
+			r = unwrap(resolved2);
+		};
+	};
+	if (r.kind == N_T_PTR) { return 8; };
+	if (r.kind == N_T_PRIM) { return ir_type_prim_size(g, r); };
+	if (r.kind == N_T_STRUCT) {
+		let count: i64 = 0;
+		let f = t_first(r);
+		for (f != null) { count += 1; f = unwrap(f).next; };
+		if (count == 0) { return 8; };
+		return count * 8;
+	};
+	return 8;
+};
+
+fn ir_struct_field_offset(g: *codegen, ty: *tnode, field: bref) i64 = {
+	let resolved = resolve_alias_type(g, ty);
+	if (resolved == null) { return -1; };
+	let r: *tnode = unwrap(resolved);
+	if (r.kind != N_T_STRUCT) { return -1; };
+	let idx: i64 = 0;
+	let f = t_first(r);
+	for (f != null) {
+		let field_n: *tnode = unwrap(f);
+		if (bref_eq(field_n.ref, field, g.t.src)) { return idx * 8; };
+		idx += 1;
+		f = field_n.next;
+	};
+	return -1;
+};
+
+fn ir_struct_field_type(g: *codegen, ty: *tnode, field: bref) nullable *tnode = {
+	let resolved = resolve_alias_type(g, ty);
+	if (resolved == null) { return null; };
+	let r: *tnode = unwrap(resolved);
+	if (r.kind != N_T_STRUCT) { return null; };
+	let f = t_first(r);
+	for (f != null) {
+		let field_n: *tnode = unwrap(f);
+		if (bref_eq(field_n.ref, field, g.t.src)) {
+			return t_first(field_n);
+		};
+		f = field_n.next;
+	};
+	return null;
+};
+
+// --------------------------------------------------------------------------
+// IR builder (phase 1: minimal lowering for arithmetic + control flow)
+// --------------------------------------------------------------------------
+
+let ir_vars_entries: [2048]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+
+fn ir_vars_init(d: *dict, src: *[*]u8) void = {
+	d.cap = 2048;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&ir_vars_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn ir_var_set(d: *dict, name: bref, v: ir_vreg) void = {
+	let id = (v.id: u64) + 1;
+	dict_set_bref(d, name, id);
+};
+
+fn ir_var_get(ctx: *ir_ctx, d: *dict, name: bref) ir_vreg = {
+	let id = dict_get_bref(d, name);
+	if (id == 0) {
+		ctx.unsupported_reason = 1;
+		return ir_vreg_invalid();
+	};
+	let v_id = (id - 1): u32;
+	let ty: u16 = IR_T_INVALID;
+	let width: u8 = 1;
+	if (v_id: size < len(ctx.vreg_types)) { ty = ctx.vreg_types[v_id: size]; };
+	if (v_id: size < len(ctx.vreg_widths)) { width = ctx.vreg_widths[v_id: size]; };
+	return ir_vreg { id = v_id, ty = ty, width = width };
+};
+
+type ir_builder = struct {
+	ctx: *ir_ctx,
+	g: *codegen,
+	vars: dict,
+	label_id: u32,
+	loop_depth: size,
+	break_labels: [64]u32,
+	continue_labels: [64]u32,
+};
+
+type ir_expr_frame = struct {
+	node: nullable *tnode,
+	state: u8,
+	lhs: ir_vreg,
+	rhs: ir_vreg,
+	want_addr: bool,
+	base_is_ptr: bool,
+	elem_size: i64,
+	res_ty: u16,
+	arg_count: u8,
+	arg_index: u8,
+	arg_nodes: [16]uintptr,
+	arg_vregs: [16]ir_vreg,
+};
+
+type ir_stmt_frame = struct {
+	node: *tnode,
+	state: u8,
+	else_node: nullable *tnode,
+	label_else: u32,
+	label_end: u32,
+	loop_cond: nullable *tnode,
+	loop_after: nullable *tnode,
+	loop_body: nullable *tnode,
+	label_cond: u32,
+	label_step: u32,
+	label_loop_end: u32,
+	while_style: bool,
+};
+
+fn ir_new_label(b: *ir_builder) u32 = {
+	b.label_id += 1;
+	return b.label_id;
+};
+
+fn ir_emit_label(b: *ir_builder, id: u32) void = {
+	let op = ir_op { kind = IR_OP_LABEL, aux = 0, dst = ir_vreg_invalid(),
+		a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = 0,
+		cond = 0, target = id, target2 = 0, arg_start = 0, arg_count = 0,
+		sym = bref_empty(), sym2 = bref_empty() };
+	ir_emit_op(b.ctx, op);
+};
+
+fn ir_emit_jump(b: *ir_builder, id: u32) void = {
+	let op = ir_op { kind = IR_OP_JUMP, aux = 0, dst = ir_vreg_invalid(),
+		a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = 0,
+		cond = 0, target = id, target2 = 0, arg_start = 0, arg_count = 0,
+		sym = bref_empty(), sym2 = bref_empty() };
+	ir_emit_op(b.ctx, op);
+};
+
+fn ir_emit_branch(b: *ir_builder, cond: ir_vreg, t_id: u32, f_id: u32) void = {
+	let op = ir_op { kind = IR_OP_BRANCH, aux = 0, dst = ir_vreg_invalid(),
+		a = cond, b = ir_vreg_invalid(), imm = 0,
+		cond = 0, target = t_id, target2 = f_id, arg_start = 0, arg_count = 0,
+		sym = bref_empty(), sym2 = bref_empty() };
+	ir_emit_op(b.ctx, op);
+};
+
+fn ir_emit_abort_fixed_call(b: *ir_builder, n: *tnode) void = {
+	let g = b.g;
+	let lc = pos_to_line_col(n.ref.pos, g.t.src, g.t.src_len);
+	let v_path = ir_new_vreg(b.ctx, IR_T_PTR, 1);
+	let v_line = ir_new_vreg(b.ctx, IR_T_U64, 1);
+	let v_col = ir_new_vreg(b.ctx, IR_T_U64, 1);
+	let v_code = ir_new_vreg(b.ctx, IR_T_U64, 1);
+	let op_path = ir_op { kind = IR_OP_CONST, aux = 0, dst = v_path,
+		a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = 0,
+		cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+		sym = bref_empty(), sym2 = bref_empty() };
+	let op_line = ir_op { kind = IR_OP_CONST, aux = 0, dst = v_line,
+		a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = lc.line: i64,
+		cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+		sym = bref_empty(), sym2 = bref_empty() };
+	let op_col = ir_op { kind = IR_OP_CONST, aux = 0, dst = v_col,
+		a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = lc.col: i64,
+		cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+		sym = bref_empty(), sym2 = bref_empty() };
+	let op_code = ir_op { kind = IR_OP_CONST, aux = 0, dst = v_code,
+		a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = 6,
+		cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+		sym = bref_empty(), sym2 = bref_empty() };
+	ir_emit_op(b.ctx, op_path);
+	ir_emit_op(b.ctx, op_line);
+	ir_emit_op(b.ctx, op_col);
+	ir_emit_op(b.ctx, op_code);
+	let start = b.ctx.arg_count;
+	if (start + 4 > len(b.ctx.args)) { abort("ir: call args overflow"); };
+	b.ctx.args[start + 0] = v_path;
+	b.ctx.args[start + 1] = v_line;
+	b.ctx.args[start + 2] = v_col;
+	b.ctx.args[start + 3] = v_code;
+	b.ctx.arg_count += 4;
+	let op_call = ir_op { kind = IR_OP_CALL, aux = IR_CALL_ABORT_FIXED, dst = ir_vreg_invalid(),
+		a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = 0,
+		cond = 0, target = 0, target2 = 0, arg_start = start, arg_count = 4,
+		sym = bref_empty(), sym2 = bref_empty() };
+	ir_emit_op(b.ctx, op_call);
+};
+
+fn ir_bin_kind(op: u16) u16 = {
+	if (op == TK_PLUS) { return IR_BIN_ADD; };
+	if (op == TK_MINUS) { return IR_BIN_SUB; };
+	if (op == TK_STAR) { return IR_BIN_MUL; };
+	if (op == TK_SLASH) { return IR_BIN_DIV; };
+	if (op == TK_PERCENT) { return IR_BIN_MOD; };
+	if (op == TK_AMP) { return IR_BIN_AND; };
+	if (op == TK_PIPE) { return IR_BIN_OR; };
+	if (op == TK_CARET) { return IR_BIN_XOR; };
+	if (op == TK_SHL) { return IR_BIN_SHL; };
+	if (op == TK_SHR) { return IR_BIN_SHR; };
+	return 0;
+};
+
+fn ir_cmp_kind(op: u16) u16 = {
+	if (op == TK_EQ_EQ) { return IR_CMP_EQ; };
+	if (op == TK_NE) { return IR_CMP_NE; };
+	if (op == TK_LT) { return IR_CMP_LT; };
+	if (op == TK_LE) { return IR_CMP_LE; };
+	if (op == TK_GT) { return IR_CMP_GT; };
+	if (op == TK_GE) { return IR_CMP_GE; };
+	return 0;
+};
+
+fn ir_un_kind(op: u16) u16 = {
+	if (op == TK_MINUS) { return IR_UN_NEG; };
+	if (op == TK_BANG) { return IR_UN_NOT; };
+	if (op == TK_TILDE) { return IR_UN_BITNOT; };
+	return 0;
+};
+
+fn ir_vec_lane_count(ty: u16) u8 = {
+	if (ty == IR_T_F32 || ty == IR_T_I32 || ty == IR_T_U32) { return 4; };
+	if (ty == IR_T_F64 || ty == IR_T_I64 || ty == IR_T_U64 || ty == IR_T_PTR) { return 2; };
+	return 1;
+};
+
+fn ir_vec_bin_supported(ty: u16, aux: u16) bool = {
+	if (ty == IR_T_F32 || ty == IR_T_F64) {
+		return aux == IR_BIN_ADD || aux == IR_BIN_SUB || aux == IR_BIN_MUL || aux == IR_BIN_DIV;
+	};
+	if (ty == IR_T_I32 || ty == IR_T_U32) {
+		return aux == IR_BIN_ADD || aux == IR_BIN_SUB || aux == IR_BIN_MUL
+			|| aux == IR_BIN_AND || aux == IR_BIN_OR || aux == IR_BIN_XOR;
+	};
+	if (ty == IR_T_I64 || ty == IR_T_U64 || ty == IR_T_PTR) {
+		return aux == IR_BIN_ADD || aux == IR_BIN_SUB
+			|| aux == IR_BIN_AND || aux == IR_BIN_OR || aux == IR_BIN_XOR;
+	};
+	return false;
+};
+
+fn ir_vec_can_group(op: ir_op) bool = {
+	if (op.kind != IR_OP_BIN) { return false; };
+	if (op.dst.ty == IR_T_INVALID || op.a.ty == IR_T_INVALID || op.b.ty == IR_T_INVALID) { return false; };
+	if (op.dst.width != 1 || op.a.width != 1 || op.b.width != 1) { return false; };
+	if (op.dst.ty != op.a.ty || op.dst.ty != op.b.ty) { return false; };
+	return ir_vec_bin_supported(op.dst.ty, op.aux);
+};
+
+fn ir_expr(b: *ir_builder, root: *tnode, want_addr: bool) ir_vreg = {
+	let g = b.g;
+	let stack: [256]ir_expr_frame = [ir_expr_frame {
+		node = null,
+		state = 0,
+		lhs = ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 },
+		rhs = ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 },
+		want_addr = false,
+		base_is_ptr = false,
+		elem_size = 0,
+		res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...],
+	}...];
+	let sp: size = 0;
+	stack[sp] = ir_expr_frame { node = root, state = 0, lhs = ir_vreg_invalid(), rhs = ir_vreg_invalid(),
+		want_addr = want_addr, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+	sp += 1;
+	let last = ir_vreg_invalid();
+	for (sp > 0) {
+		let idx = sp - 1;
+		let fr: *ir_expr_frame = &stack[idx];
+		let node_opt = fr.node;
+		if (node_opt == null) {
+			ir_mark_unsupported(b.ctx);
+			sp -= 1;
+			last = ir_vreg_invalid();
+			continue;
+		};
+		let n: *tnode = unwrap(node_opt);
+		let k = n.kind;
+		b.ctx.unsupported_reason = k: u16;
+		if (fr.state == 0) {
+			if (k == N_INT || k == N_BOOL || k == N_CHAR) {
+				if (fr.want_addr) { ir_mark_unsupported(b.ctx); sp -= 1; last = ir_vreg_invalid(); continue; };
+				let ty_int = ir_scalar_from_expr(g, n);
+				if (ty_int == IR_T_INVALID) { ty_int = IR_T_I64; };
+				let dst_int = ir_new_vreg(b.ctx, ty_int, 1);
+				let op_int = ir_op { kind = IR_OP_CONST, aux = 0, dst = dst_int,
+					a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = n.ival,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_int);
+				last = dst_int;
+				sp -= 1;
+				continue;
+			};
+			if (k == N_FLOAT) {
+				if (fr.want_addr) { ir_mark_unsupported(b.ctx); sp -= 1; last = ir_vreg_invalid(); continue; };
+				let ty_float = ir_scalar_from_expr(g, n);
+				if (ty_float == IR_T_INVALID) { ty_float = IR_T_F64; };
+				let dst_float = ir_new_vreg(b.ctx, ty_float, 1);
+				let op_float = ir_op { kind = IR_OP_CONST, aux = 0, dst = dst_float,
+					a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = 0,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = n.ref, sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_float);
+				last = dst_float;
+				sp -= 1;
+				continue;
+			};
+			if (k == N_ID) {
+				if (fr.want_addr) {
+					if (dict_get_bref(&g.globals, n.ref) != 0) { ir_mark_unsupported(b.ctx); };
+					let dst_addr = ir_new_vreg(b.ctx, IR_T_PTR, 1);
+					let op_addr = ir_op { kind = IR_OP_ADDR, aux = 0, dst = dst_addr,
+						a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = 0,
+						cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+						sym = n.ref, sym2 = bref_empty() };
+					ir_emit_op(b.ctx, op_addr);
+					last = dst_addr;
+				} else {
+					let v_id = ir_var_get(b.ctx, &b.vars, n.ref);
+					if (v_id.ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); };
+					last = v_id;
+				};
+				sp -= 1;
+				continue;
+			};
+			if (k == N_UN) {
+				let un_op0 = n.ival: u16;
+				if (fr.want_addr && un_op0 != TK_STAR && un_op0 != TK_AMP) {
+					ir_mark_unsupported(b.ctx);
+					last = ir_vreg_invalid();
+					sp -= 1;
+					continue;
+				};
+				let un_inner = t_first_nn(n);
+				if (un_op0 == TK_AMP) {
+					fr.state = 1;
+					if (sp >= len(stack)) { abort("ir_expr stack overflow"); };
+					stack[sp] = ir_expr_frame { node = un_inner, state = 0, lhs = ir_vreg_invalid(),
+						rhs = ir_vreg_invalid(), want_addr = true, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+					sp += 1;
+				} else {
+					fr.state = 1;
+					if (sp >= len(stack)) { abort("ir_expr stack overflow"); };
+					stack[sp] = ir_expr_frame { node = un_inner, state = 0, lhs = ir_vreg_invalid(),
+						rhs = ir_vreg_invalid(), want_addr = false, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+					sp += 1;
+				};
+				continue;
+			};
+			if (k == N_CAST) {
+				if (fr.want_addr) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				fr.state = 1;
+				let cast_inner = t_first_nn(n);
+				if (sp >= len(stack)) { abort("ir_expr stack overflow"); };
+				stack[sp] = ir_expr_frame { node = cast_inner, state = 0, lhs = ir_vreg_invalid(),
+					rhs = ir_vreg_invalid(), want_addr = false, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+				sp += 1;
+				continue;
+			};
+			if (k == N_FLD || k == N_IDX) {
+				let base_node = t_first_nn(n);
+				let base_ty_opt = get_expr_type(g, base_node);
+				if (base_ty_opt == null) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				let base_ty = unwrap(base_ty_opt);
+				let base_res = resolve_alias_type(g, base_ty);
+				if (base_res == null) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				let base_res_node: *tnode = unwrap(base_res);
+				if (base_res_node.kind == N_T_SLICE ||
+					(base_res_node.kind == N_T_PRIM && type_is_str(base_res_node, g.t.src))) {
+					ir_mark_unsupported(b.ctx);
+					last = ir_vreg_invalid();
+					sp -= 1;
+					continue;
+				};
+				let base_is_ptr = false;
+				if (base_res_node.kind == N_T_PTR) {
+					base_is_ptr = true;
+					base_ty = t_first_nn(base_res_node);
+					if (base_ty.kind == N_T_SLICE ||
+						(base_ty.kind == N_T_PRIM && type_is_str(base_ty, g.t.src))) {
+						ir_mark_unsupported(b.ctx);
+						last = ir_vreg_invalid();
+						sp -= 1;
+						continue;
+					};
+				};
+				fr.base_is_ptr = base_is_ptr;
+				if (k == N_FLD) {
+					let off = ir_struct_field_offset(g, base_ty, n.ref);
+					if (off < 0) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+					fr.elem_size = off;
+					let fty_opt = ir_struct_field_type(g, base_ty, n.ref);
+					if (fty_opt != null) { fr.res_ty = ir_scalar_from_type(g, unwrap(fty_opt)); }
+					else { fr.res_ty = ir_scalar_from_type(g, base_ty); };
+					if (fr.res_ty == IR_T_INVALID) {
+						let infer_ty = ir_scalar_from_expr(g, n);
+						if (infer_ty != IR_T_INVALID) { fr.res_ty = infer_ty; };
+					};
+					if (!fr.want_addr && fr.res_ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				} else {
+					let elem_ty_opt = t_first(base_ty);
+					if (elem_ty_opt == null) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+					let elem_ty = unwrap(elem_ty_opt);
+					fr.elem_size = ir_type_elem_size(g, elem_ty);
+					fr.res_ty = ir_scalar_from_type(g, elem_ty);
+					if (fr.res_ty == IR_T_INVALID) {
+						let infer_ty_idx = ir_scalar_from_expr(g, n);
+						if (infer_ty_idx != IR_T_INVALID) { fr.res_ty = infer_ty_idx; };
+					};
+					if (!fr.want_addr && fr.res_ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				};
+				fr.state = 1;
+				let base_want_addr = !base_is_ptr;
+				if (sp >= len(stack)) { abort("ir_expr stack overflow"); };
+					stack[sp] = ir_expr_frame { node = base_node, state = 0, lhs = ir_vreg_invalid(),
+						rhs = ir_vreg_invalid(), want_addr = base_want_addr, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+				sp += 1;
+				continue;
+			};
+			if (k == N_BIN) {
+				if (fr.want_addr) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				fr.state = 1;
+				let bin_lhs = t_first_nn(n);
+				if (sp >= len(stack)) { abort("ir_expr stack overflow"); };
+				stack[sp] = ir_expr_frame { node = bin_lhs, state = 0, lhs = ir_vreg_invalid(), rhs = ir_vreg_invalid(),
+					want_addr = false, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+				sp += 1;
+				continue;
+			};
+			if (k == N_CALL) {
+				if (fr.want_addr) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				let call_fn_node = t_first(n);
+				if (call_fn_node == null) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				let call_fn: *tnode = unwrap(call_fn_node);
+				fr.arg_count = 0;
+				fr.arg_index = 0;
+				let call_param_opt: nullable *tnode = null;
+				let call_fn_def_ptr = 0u64;
+				if (call_fn.kind == N_ID) { call_fn_def_ptr = dict_get_bref(&g.globals, call_fn.ref); };
+				if (call_fn_def_ptr != 0) {
+					let call_fn_def: *tnode = call_fn_def_ptr: uintptr: *tnode;
+					if (call_fn_def.kind == N_FN) { call_param_opt = g_skip_symbol(call_fn_def); };
+				};
+				let call_arg_iter = call_fn.next;
+				let call_arg_opt = call_arg_iter;
+				let call_have_defaults = call_param_opt != null;
+				if (call_have_defaults) {
+					for (true) {
+						let call_info = call_arg_next(g, call_fn.ref, &call_param_opt, &call_arg_opt);
+						if (call_info.arg == null && call_info.param == null) { break; };
+						if (fr.arg_count >= len(fr.arg_nodes): u8) {
+							err_bref(call_fn.ref, g.t.src, g.t.src_len, "too many call args for IR");
+						};
+						let call_arg_node: *tnode = unwrap(call_info.arg);
+						fr.arg_nodes[fr.arg_count: size] = call_arg_node: uintptr;
+						fr.arg_count += 1;
+					};
+				} else {
+					for (call_arg_iter != null) {
+						if (fr.arg_count >= len(fr.arg_nodes): u8) {
+							err_bref(call_fn.ref, g.t.src, g.t.src_len, "too many call args for IR");
+						};
+						let call_arg_node2: *tnode = unwrap(call_arg_iter);
+						fr.arg_nodes[fr.arg_count: size] = call_arg_node2: uintptr;
+						fr.arg_count += 1;
+						call_arg_iter = call_arg_node2.next;
+					};
+				};
+				fr.state = 1;
+				if (fr.arg_count > 0) {
+					fr.arg_index = 0;
+					let first_arg: *tnode = fr.arg_nodes[0]: *tnode;
+					if (sp >= len(stack)) { abort("ir_expr stack overflow"); };
+					stack[sp] = ir_expr_frame { node = first_arg, state = 0, lhs = ir_vreg_invalid(), rhs = ir_vreg_invalid(),
+						want_addr = false, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+					sp += 1;
+				} else {
+					fr.state = 2;
+				};
+				continue;
+			};
+			ir_mark_unsupported(b.ctx);
+			last = ir_vreg_invalid();
+			sp -= 1;
+			continue;
+		};
+		if (fr.state == 1) {
+			if (k == N_UN) {
+				fr.lhs = last;
+				fr.state = 2;
+				continue;
+			};
+			if (k == N_CAST) {
+				fr.lhs = last;
+				fr.state = 2;
+				continue;
+			};
+			if (k == N_FLD) {
+				let base_ptr = last;
+				let addr = base_ptr;
+				if (fr.elem_size != 0) {
+					let off_v_fld = ir_new_vreg(b.ctx, IR_T_I64, 1);
+					let op_off_fld = ir_op { kind = IR_OP_CONST, aux = 0, dst = off_v_fld,
+						a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = fr.elem_size,
+						cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+						sym = bref_empty(), sym2 = bref_empty() };
+					ir_emit_op(b.ctx, op_off_fld);
+					let addr_v_fld = ir_new_vreg(b.ctx, IR_T_PTR, 1);
+					let op_add_fld = ir_op { kind = IR_OP_BIN, aux = IR_BIN_ADD, dst = addr_v_fld,
+						a = base_ptr, b = off_v_fld, imm = 0,
+						cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+						sym = bref_empty(), sym2 = bref_empty() };
+					ir_emit_op(b.ctx, op_add_fld);
+					addr = addr_v_fld;
+				};
+				if (fr.want_addr) {
+					last = addr;
+					sp -= 1;
+					continue;
+				};
+				let dst_ty_fld = fr.res_ty;
+				let dst_ld_fld = ir_new_vreg(b.ctx, dst_ty_fld, 1);
+				let op_load_fld = ir_op { kind = IR_OP_LOAD, aux = 0, dst = dst_ld_fld,
+					a = addr, b = ir_vreg_invalid(), imm = 0,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_load_fld);
+				last = dst_ld_fld;
+				sp -= 1;
+				continue;
+			};
+			if (k == N_IDX) {
+				fr.lhs = last;
+				fr.state = 2;
+				let idx_node = t_next_nn(t_first_nn(n));
+				if (sp >= len(stack)) { abort("ir_expr stack overflow"); };
+				stack[sp] = ir_expr_frame { node = idx_node, state = 0, lhs = ir_vreg_invalid(), rhs = ir_vreg_invalid(),
+					want_addr = false, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+				sp += 1;
+				continue;
+			};
+			if (k == N_BIN) {
+				fr.lhs = last;
+				if (fr.lhs.ty == IR_T_INVALID) {
+					let lhs_node_fix = t_first_nn(n);
+					let lhs_fix_ty = ir_scalar_from_expr(g, lhs_node_fix);
+					if (lhs_fix_ty != IR_T_INVALID) {
+						fr.lhs.ty = lhs_fix_ty;
+						if (fr.lhs.id: size < len(b.ctx.vreg_types)) { b.ctx.vreg_types[fr.lhs.id: size] = lhs_fix_ty; };
+					};
+				};
+				fr.state = 2;
+				let bin_rhs = t_next_nn(t_first_nn(n));
+				if (sp >= len(stack)) { abort("ir_expr stack overflow"); };
+				stack[sp] = ir_expr_frame { node = bin_rhs, state = 0, lhs = ir_vreg_invalid(), rhs = ir_vreg_invalid(),
+					want_addr = false, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+				sp += 1;
+				continue;
+			};
+			if (k == N_CALL) {
+				fr.arg_vregs[fr.arg_index: size] = last;
+				fr.arg_index += 1;
+				if (fr.arg_index < fr.arg_count) {
+					let next_arg: *tnode = fr.arg_nodes[fr.arg_index: size]: *tnode;
+					if (sp >= len(stack)) { abort("ir_expr stack overflow"); };
+					stack[sp] = ir_expr_frame { node = next_arg, state = 0, lhs = ir_vreg_invalid(), rhs = ir_vreg_invalid(),
+						want_addr = false, base_is_ptr = false, elem_size = 0, res_ty = IR_T_INVALID,
+		arg_count = 0,
+		arg_index = 0,
+		arg_nodes = [0...],
+		arg_vregs = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...] };
+					sp += 1;
+				} else {
+					fr.state = 2;
+				};
+				continue;
+			};
+		} else if (fr.state == 2) {
+			if (k == N_UN) {
+				let un_op = n.ival: u16;
+				if (un_op == TK_AMP) {
+					last = fr.lhs;
+					sp -= 1;
+					continue;
+				};
+				if (un_op == TK_STAR) {
+					if (fr.want_addr) {
+						last = fr.lhs;
+						sp -= 1;
+						continue;
+					};
+					let dst_un_ptr_ty = ir_scalar_from_expr(g, n);
+					if (dst_un_ptr_ty == IR_T_INVALID || fr.lhs.ty == IR_T_INVALID) {
+						ir_mark_unsupported(b.ctx);
+						last = ir_vreg_invalid();
+						sp -= 1;
+						continue;
+					};
+					let dst_un_ptr = ir_new_vreg(b.ctx, dst_un_ptr_ty, 1);
+					let op_load_un = ir_op { kind = IR_OP_LOAD, aux = 0, dst = dst_un_ptr,
+						a = fr.lhs, b = ir_vreg_invalid(), imm = 0,
+						cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+						sym = bref_empty(), sym2 = bref_empty() };
+					ir_emit_op(b.ctx, op_load_un);
+					last = dst_un_ptr;
+					sp -= 1;
+					continue;
+				};
+				let kind = ir_un_kind(un_op);
+				let is_float_un = fr.lhs.ty == IR_T_F32 || fr.lhs.ty == IR_T_F64;
+				if (kind == 0 || fr.lhs.ty == IR_T_INVALID || (is_float_un && kind != IR_UN_NEG)) {
+					ir_mark_unsupported(b.ctx);
+					last = ir_vreg_invalid();
+					sp -= 1;
+					continue;
+				};
+				let dst_unop_ty = ir_scalar_from_expr(g, n);
+				if (dst_unop_ty == IR_T_INVALID) { dst_unop_ty = fr.lhs.ty; };
+				if (dst_unop_ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				let dst_unop = ir_new_vreg(b.ctx, dst_unop_ty, 1);
+				let op_un = ir_op { kind = IR_OP_UN, aux = kind, dst = dst_unop,
+					a = fr.lhs, b = ir_vreg_invalid(), imm = 0,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_un);
+				last = dst_unop;
+				sp -= 1;
+				continue;
+			};
+			if (k == N_CAST) {
+				if (fr.lhs.ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				let cast_ty_node = t_next_nn(t_first_nn(n));
+				let dst_cast_ty: u16 = IR_T_INVALID;
+				if (cast_ty_node != null) { dst_cast_ty = ir_scalar_from_type(g, cast_ty_node); };
+				if (dst_cast_ty == IR_T_INVALID) { dst_cast_ty = fr.lhs.ty; };
+				if (dst_cast_ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				let dst_cast = ir_new_vreg(b.ctx, dst_cast_ty, 1);
+				let op_cast = ir_op { kind = IR_OP_CAST, aux = 0, dst = dst_cast,
+					a = fr.lhs, b = ir_vreg_invalid(), imm = 0,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_cast);
+				last = dst_cast;
+				sp -= 1;
+				continue;
+			};
+			if (k == N_IDX) {
+				fr.rhs = last;
+				if (fr.elem_size <= 0) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				let off_v_idx = ir_new_vreg(b.ctx, IR_T_I64, 1);
+				let op_off_idx = ir_op { kind = IR_OP_CONST, aux = 0, dst = off_v_idx,
+					a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = fr.elem_size,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_off_idx);
+				let mul_v = ir_new_vreg(b.ctx, IR_T_I64, 1);
+				let op_mul = ir_op { kind = IR_OP_BIN, aux = IR_BIN_MUL, dst = mul_v,
+					a = fr.rhs, b = off_v_idx, imm = 0,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_mul);
+				let addr_v_idx = ir_new_vreg(b.ctx, IR_T_PTR, 1);
+				let op_add_idx = ir_op { kind = IR_OP_BIN, aux = IR_BIN_ADD, dst = addr_v_idx,
+					a = fr.lhs, b = mul_v, imm = 0,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_add_idx);
+				if (fr.want_addr) {
+					last = addr_v_idx;
+					sp -= 1;
+					continue;
+				};
+				let dst_ty_idx = fr.res_ty;
+				let dst_ld_idx = ir_new_vreg(b.ctx, dst_ty_idx, 1);
+				let op_load_idx = ir_op { kind = IR_OP_LOAD, aux = 0, dst = dst_ld_idx,
+					a = addr_v_idx, b = ir_vreg_invalid(), imm = 0,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_load_idx);
+				last = dst_ld_idx;
+				sp -= 1;
+				continue;
+			};
+			if (k == N_CALL) {
+				let call_start = b.ctx.arg_count;
+				if (call_start + fr.arg_count > len(b.ctx.args)) { abort("ir: call args overflow"); };
+				let ai = 0z;
+				for (ai < fr.arg_count: size) {
+					b.ctx.args[call_start + ai] = fr.arg_vregs[ai];
+					ai += 1;
+				};
+				b.ctx.arg_count += fr.arg_count;
+				let dst_call = ir_vreg_invalid();
+				let ret_ty_opt = get_expr_type(g, n);
+				if (ret_ty_opt != null && !type_is_void(unwrap(ret_ty_opt), g.t.src)) {
+					let call_ty = ir_scalar_from_type(g, unwrap(ret_ty_opt));
+					if (call_ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+					dst_call = ir_new_vreg(b.ctx, call_ty, 1);
+				};
+				let call_fn_node2 = t_first(n);
+				if (call_fn_node2 == null) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+				let call_fn2: *tnode = unwrap(call_fn_node2);
+				let call_aux: u16 = 0;
+				let call_sym = bref_empty();
+				let call_sym2 = bref_empty();
+				if (call_fn2.kind == N_ID) {
+					call_sym = call_fn2.ref;
+				} else if (call_fn2.kind == N_QUAL_ID) {
+					let mod_ref = bref_empty();
+					let mem_ref = bref_empty();
+					if (!qual_id_parts(g, call_fn2, &mod_ref, &mem_ref)) { ir_mark_unsupported(b.ctx); last = ir_vreg_invalid(); sp -= 1; continue; };
+					call_aux = IR_CALL_QUAL;
+					call_sym = mod_ref;
+					call_sym2 = mem_ref;
+				} else {
+					ir_mark_unsupported(b.ctx);
+					last = ir_vreg_invalid();
+					sp -= 1;
+					continue;
+				};
+				let op_call = ir_op { kind = IR_OP_CALL, aux = call_aux, dst = dst_call,
+					a = ir_vreg_invalid(), b = ir_vreg_invalid(), imm = 0,
+					cond = 0, target = 0, target2 = 0, arg_start = call_start, arg_count = fr.arg_count: size,
+					sym = call_sym, sym2 = call_sym2 };
+				ir_emit_op(b.ctx, op_call);
+				last = dst_call;
+				sp -= 1;
+				continue;
+			};
+			if (k == N_BIN) {
+				fr.rhs = last;
+				if (fr.rhs.ty == IR_T_INVALID) {
+					let rhs_node_fix = t_next_nn(t_first_nn(n));
+					let rhs_fix_ty = ir_scalar_from_expr(g, rhs_node_fix);
+					if (rhs_fix_ty != IR_T_INVALID) {
+						fr.rhs.ty = rhs_fix_ty;
+						if (fr.rhs.id: size < len(b.ctx.vreg_types)) { b.ctx.vreg_types[fr.rhs.id: size] = rhs_fix_ty; };
+					};
+				};
+				let bin_op = n.ival: u16;
+				if (fr.lhs.ty == IR_T_INVALID || fr.rhs.ty == IR_T_INVALID) {
+					let infer_bin_ty = ir_scalar_from_expr(g, n);
+					if (infer_bin_ty != IR_T_INVALID) {
+						if (fr.lhs.ty == IR_T_INVALID) {
+							fr.lhs.ty = infer_bin_ty;
+							if (fr.lhs.id: size < len(b.ctx.vreg_types)) { b.ctx.vreg_types[fr.lhs.id: size] = infer_bin_ty; };
+						};
+						if (fr.rhs.ty == IR_T_INVALID) {
+							fr.rhs.ty = infer_bin_ty;
+							if (fr.rhs.id: size < len(b.ctx.vreg_types)) { b.ctx.vreg_types[fr.rhs.id: size] = infer_bin_ty; };
+						};
+					};
+					// Fall back to the other operand type if one side is still unknown.
+					if (fr.lhs.ty == IR_T_INVALID && fr.rhs.ty != IR_T_INVALID) {
+						fr.lhs.ty = fr.rhs.ty;
+						if (fr.lhs.id: size < len(b.ctx.vreg_types)) { b.ctx.vreg_types[fr.lhs.id: size] = fr.rhs.ty; };
+					};
+					if (fr.rhs.ty == IR_T_INVALID && fr.lhs.ty != IR_T_INVALID) {
+						fr.rhs.ty = fr.lhs.ty;
+						if (fr.rhs.id: size < len(b.ctx.vreg_types)) { b.ctx.vreg_types[fr.rhs.id: size] = fr.lhs.ty; };
+					};
+				};
+				if (fr.lhs.ty == IR_T_INVALID || fr.rhs.ty == IR_T_INVALID) {
+					b.ctx.unsupported_reason = 1001;
+					ir_mark_unsupported(b.ctx);
+					last = ir_vreg_invalid();
+					sp -= 1;
+					continue;
+				};
+				let cmp_kind = ir_cmp_kind(bin_op);
+				if (cmp_kind != 0) {
+					let dst_cmp = ir_new_vreg(b.ctx, IR_T_U8, 1);
+					let op_cmp = ir_op { kind = IR_OP_CMP, aux = cmp_kind, dst = dst_cmp,
+						a = fr.lhs, b = fr.rhs, imm = 0,
+						cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+						sym = bref_empty(), sym2 = bref_empty() };
+					ir_emit_op(b.ctx, op_cmp);
+					last = dst_cmp;
+					sp -= 1;
+					continue;
+				};
+				let bin_kind = ir_bin_kind(bin_op);
+				if (bin_kind == 0) {
+					b.ctx.unsupported_reason = 1002;
+					ir_mark_unsupported(b.ctx);
+					last = ir_vreg_invalid();
+					sp -= 1;
+					continue;
+				};
+				let is_float_bin = fr.lhs.ty == IR_T_F32 || fr.lhs.ty == IR_T_F64;
+				if (is_float_bin && (bin_kind == IR_BIN_AND || bin_kind == IR_BIN_OR || bin_kind == IR_BIN_XOR
+					|| bin_kind == IR_BIN_SHL || bin_kind == IR_BIN_SHR || bin_kind == IR_BIN_MOD)) {
+					ir_mark_unsupported(b.ctx);
+					last = ir_vreg_invalid();
+					sp -= 1;
+					continue;
+				};
+				let dst_bin_ty = ir_scalar_from_expr(g, n);
+				if (dst_bin_ty == IR_T_INVALID) {
+					dst_bin_ty = fr.lhs.ty;
+					if (dst_bin_ty == IR_T_INVALID) { dst_bin_ty = fr.rhs.ty; };
+				};
+				if (dst_bin_ty == IR_T_INVALID) {
+					b.ctx.unsupported_reason = 1003;
+					ir_mark_unsupported(b.ctx);
+					last = ir_vreg_invalid();
+					sp -= 1;
+					continue;
+				};
+				let dst_bin = ir_new_vreg(b.ctx, dst_bin_ty, 1);
+				let op_bin = ir_op { kind = IR_OP_BIN, aux = bin_kind, dst = dst_bin,
+					a = fr.lhs, b = fr.rhs, imm = 0,
+					cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, op_bin);
+				last = dst_bin;
+				sp -= 1;
+				continue;
+			};
+		};
+	};
+	return last;
+};
+
+fn ir_stmt(b: *ir_builder, n: *tnode) void = {
+	// Non-recursive scaffold: only handle leaf statements for now.
+	let stmt_kind = n.kind;
+	b.ctx.unsupported_reason = stmt_kind: u16;
+	if (stmt_kind == N_LET) {
+		let let_child = t_first(n);
+		let let_has_type = false;
+		let let_ty: nullable *tnode = null;
+		let let_init: nullable *tnode = null;
+		let init_ty_opt: nullable *tnode = null;
+		match (let_child) {
+		case let c: *tnode =>
+			if (is_type_kind(c.kind)) {
+				let_has_type = true;
+				let_ty = c;
+				let_init = c.next;
+			} else {
+				let_init = c;
+			};
+		case null => void;
+		};
+		let let_vty: u16 = IR_T_INVALID;
+		if (let_has_type && let_ty != null) {
+			let let_ty_res = ir_scalar_from_type(b.g, unwrap(let_ty));
+			let_vty = let_ty_res;
+			if (let_vty == IR_T_INVALID) {
+				let ty_node = unwrap(let_ty);
+				let depth = 0;
+				for (depth < 8 && ty_node.kind == N_T_QUAL) {
+					let inner = t_first(ty_node);
+					if (inner == null) { break; };
+					ty_node = unwrap(inner);
+					depth += 1;
+				};
+				if (ty_node.kind == N_T_PRIM) {
+					let tok = ty_node.ival: u16;
+					if (tok == TK_I8) { let_vty = IR_T_I8; }
+					else if (tok == TK_I16) { let_vty = IR_T_I16; }
+					else if (tok == TK_I32) { let_vty = IR_T_I32; }
+					else if (tok == TK_I64) { let_vty = IR_T_I64; }
+					else if (tok == TK_U8) { let_vty = IR_T_U8; }
+					else if (tok == TK_U16) { let_vty = IR_T_U16; }
+					else if (tok == TK_U32) { let_vty = IR_T_U32; }
+					else if (tok == TK_U64) { let_vty = IR_T_U64; }
+					else if (tok == TK_PRIM_INT) { let_vty = IR_T_I64; }
+					else if (tok == TK_PRIM_UINT) { let_vty = IR_T_U64; }
+					else if (tok == TK_SIZE) { let_vty = IR_T_U64; }
+					else if (tok == TK_F32) { let_vty = IR_T_F32; }
+					else if (tok == TK_F64) { let_vty = IR_T_F64; }
+					else if (tok == TK_PRIM_BOOL) { let_vty = IR_T_U8; };
+				} else if (ty_node.kind == N_T_ALIAS) {
+					if (bref_match(ty_node.ref, "i8", b.g.t.src)) { let_vty = IR_T_I8; }
+					else if (bref_match(ty_node.ref, "i16", b.g.t.src)) { let_vty = IR_T_I16; }
+					else if (bref_match(ty_node.ref, "i32", b.g.t.src)) { let_vty = IR_T_I32; }
+					else if (bref_match(ty_node.ref, "i64", b.g.t.src)) { let_vty = IR_T_I64; }
+					else if (bref_match(ty_node.ref, "int", b.g.t.src)) { let_vty = IR_T_I64; }
+					else if (bref_match(ty_node.ref, "u8", b.g.t.src)) { let_vty = IR_T_U8; }
+					else if (bref_match(ty_node.ref, "u16", b.g.t.src)) { let_vty = IR_T_U16; }
+					else if (bref_match(ty_node.ref, "u32", b.g.t.src)) { let_vty = IR_T_U32; }
+					else if (bref_match(ty_node.ref, "u64", b.g.t.src)) { let_vty = IR_T_U64; }
+					else if (bref_match(ty_node.ref, "uint", b.g.t.src)) { let_vty = IR_T_U64; }
+					else if (bref_match(ty_node.ref, "f32", b.g.t.src)) { let_vty = IR_T_F32; }
+					else if (bref_match(ty_node.ref, "f64", b.g.t.src)) { let_vty = IR_T_F64; }
+					else if (bref_match(ty_node.ref, "bool", b.g.t.src)) { let_vty = IR_T_U8; }
+					else if (bref_match(ty_node.ref, "size", b.g.t.src)) { let_vty = IR_T_U64; }
+					else if (bref_match(ty_node.ref, "uintptr", b.g.t.src)) { let_vty = IR_T_PTR; };
+				};
+			};
+		} else if (let_init != null) {
+			init_ty_opt = get_expr_type(b.g, unwrap(let_init));
+			if (init_ty_opt != null) { let_vty = ir_scalar_from_type(b.g, unwrap(init_ty_opt)); };
+		};
+		let let_dst = ir_new_vreg(b.ctx, let_vty, 1);
+		ir_var_set(&b.vars, n.ref, let_dst);
+		if (let_init != null) {
+			let let_src = ir_expr(b, unwrap(let_init), false);
+			if (let_vty == IR_T_INVALID && let_src.ty != IR_T_INVALID) {
+				let_vty = let_src.ty;
+				if (let_dst.id: size < len(b.ctx.vreg_types)) { b.ctx.vreg_types[let_dst.id: size] = let_vty; };
+				let_dst.ty = let_vty;
+			};
+			let let_op = ir_op { kind = IR_OP_COPY, aux = 0, dst = let_dst,
+				a = let_src, b = ir_vreg_invalid(), imm = 0, cond = 0,
+				target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+				sym = bref_empty(), sym2 = bref_empty() };
+			ir_emit_op(b.ctx, let_op);
+		};
+		let let_type_node: nullable *tnode = null;
+		if (let_has_type && let_ty != null) { let_type_node = let_ty; }
+		else if (init_ty_opt != null) { let_type_node = init_ty_opt; };
+		if (let_type_node != null) { vars_register(b.g, n.ref, unwrap(let_type_node): uintptr: u64); };
+		return;
+	};
+	if (stmt_kind == N_ASGN) {
+		let asgn_target = t_first_nn(n);
+		let asgn_value = t_next_nn(asgn_target);
+		let asgn_tok = n.ival: u16;
+		if (asgn_tok != TK_EQ) { ir_mark_unsupported(b.ctx); return; };
+		if (asgn_target.kind == N_ID) {
+			let asgn_dst = ir_var_get(b.ctx, &b.vars, asgn_target.ref);
+			if (asgn_dst.ty != IR_T_INVALID) {
+				let asgn_src_copy = ir_expr(b, asgn_value, false);
+				let asgn_ir = ir_op { kind = IR_OP_COPY, aux = 0, dst = asgn_dst,
+					a = asgn_src_copy, b = ir_vreg_invalid(), imm = 0, cond = 0,
+					target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+					sym = bref_empty(), sym2 = bref_empty() };
+				ir_emit_op(b.ctx, asgn_ir);
+				return;
+			};
+		};
+		let asgn_addr = ir_expr(b, asgn_target, true);
+		if (asgn_addr.ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); return; };
+		let asgn_src_store = ir_expr(b, asgn_value, false);
+		if (asgn_src_store.ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); return; };
+		let asgn_store = ir_op { kind = IR_OP_STORE, aux = 0, dst = ir_vreg_invalid(),
+			a = asgn_addr, b = asgn_src_store, imm = 0, cond = 0,
+			target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+			sym = bref_empty(), sym2 = bref_empty() };
+		ir_emit_op(b.ctx, asgn_store);
+		return;
+	};
+	if (stmt_kind == N_RET) {
+		let ret_child = t_first(n);
+		let ret_v = ir_vreg_invalid();
+		if (ret_child != null) { ret_v = ir_expr(b, unwrap(ret_child), false); };
+		let ret_op = ir_op { kind = IR_OP_RET, aux = 0, dst = ret_v,
+			a = ret_v, b = ir_vreg_invalid(), imm = 0, cond = 0,
+			target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+			sym = bref_empty(), sym2 = bref_empty() };
+		ir_emit_op(b.ctx, ret_op);
+		return;
+	};
+	if (stmt_kind == N_EXPR_STMT) {
+		let expr_child = t_first(n);
+		if (expr_child != null) {
+			let expr_node = unwrap(expr_child);
+			if (expr_node.kind == N_ASSERT) {
+				let cond_node = t_first_nn(expr_node);
+				let cond_v = ir_expr(b, cond_node, false);
+				if (cond_v.ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); return; };
+				let ok_label = ir_new_label(b);
+				let fail_label = ir_new_label(b);
+				ir_emit_branch(b, cond_v, ok_label, fail_label);
+				ir_emit_label(b, fail_label);
+				ir_emit_abort_fixed_call(b, expr_node);
+				ir_emit_label(b, ok_label);
+				return;
+			};
+			if (expr_node.kind == N_ABORT) {
+				ir_emit_abort_fixed_call(b, expr_node);
+				return;
+			};
+			ir_expr(b, expr_node, false);
+		};
+		return;
+	};
+	ir_mark_unsupported(b.ctx);
+};
+
+fn ir_build_func(g: *codegen, ctx: *ir_ctx, n: *tnode) void = {
+	let ret_type = g_skip_to_ret(n);
+	let has_ret = false;
+	let ret_ty: u16 = IR_T_INVALID;
+	if (ret_type != null) {
+		let rt = unwrap(ret_type);
+		if (!type_is_void(rt, g.t.src)) {
+			has_ret = true;
+			ret_ty = ir_scalar_from_type(g, rt);
+		};
+	};
+	ir_begin_func(ctx, n.ref, ret_ty, has_ret);
+	// Ensure get_expr_type can resolve locals/params during IR build.
+	vars_clear(g);
+	let b = ir_builder {
+		ctx = ctx,
+		g = g,
+		vars = dict { entries = (&ir_vars_entries[0]): *[*]dict_entry, count = 0, cap = 0, src = g.t.src },
+		label_id = 0,
+		loop_depth = 0,
+		break_labels = [0...],
+		continue_labels = [0...],
+	};
+	ir_vars_init(&b.vars, g.t.src);
+	let param = g_skip_symbol(n);
+	for (param != null && unwrap(param).kind == N_PARAM) {
+		let p: *tnode = unwrap(param);
+		let ptype: *tnode = t_first_nn(p);
+		let ty = ir_scalar_from_type(g, ptype);
+		let pv = ir_new_vreg(ctx, ty, 1);
+		ir_add_param(ctx, pv);
+		ir_var_set(&b.vars, p.ref, pv);
+		vars_register(g, p.ref, ptype: uintptr: u64);
+		param = p.next;
+	};
+	if (ret_type != null) {
+		let body: *tnode = t_next_nn(unwrap(ret_type));
+		let stack: [512]ir_stmt_frame = [ir_stmt_frame {
+			node = n,
+			state = 0,
+			else_node = null,
+			label_else = 0,
+			label_end = 0,
+			loop_cond = null,
+			loop_after = null,
+			loop_body = null,
+			label_cond = 0,
+			label_step = 0,
+			label_loop_end = 0,
+			while_style = false,
+		}...];
+		let sp: size = 0;
+		stack[sp] = ir_stmt_frame {
+			node = body,
+			state = 0,
+			else_node = null,
+			label_else = 0,
+			label_end = 0,
+			loop_cond = null,
+			loop_after = null,
+			loop_body = null,
+			label_cond = 0,
+			label_step = 0,
+			label_loop_end = 0,
+			while_style = false,
+		};
+		sp += 1;
+		for (sp > 0) {
+			let idx = sp - 1;
+			let fr: *ir_stmt_frame = &stack[idx];
+			let cur = fr.node;
+			if (fr.state == 0) {
+				let kind0 = cur.kind;
+				if (kind0 == N_BLOCK) {
+					sp -= 1;
+					let blk_child = t_first(cur);
+					let blk_nodes: [256]uintptr = [0...];
+					let blk_count: size = 0;
+					for (blk_child != null) {
+						if (blk_count < len(blk_nodes)) {
+							blk_nodes[blk_count] = blk_child: uintptr;
+							blk_count += 1;
+						};
+						blk_child = unwrap(blk_child).next;
+					};
+					for (blk_count > 0) {
+						blk_count -= 1;
+						if (sp >= len(stack)) { break; };
+						stack[sp] = ir_stmt_frame {
+							node = blk_nodes[blk_count]: *tnode,
+							state = 0,
+							else_node = null,
+							label_else = 0,
+							label_end = 0,
+							loop_cond = null,
+							loop_after = null,
+							loop_body = null,
+							label_cond = 0,
+							label_step = 0,
+							label_loop_end = 0,
+							while_style = false,
+						};
+						sp += 1;
+					};
+					continue;
+				};
+				if (kind0 == N_IF) {
+					let if_cond = t_first_nn(cur);
+					let if_then_block = t_next_nn(if_cond);
+					let if_else_part: nullable *tnode = null;
+					if (if_then_block.next != null) { if_else_part = if_then_block.next; };
+					let if_cond_v = ir_expr(&b, if_cond, false);
+					if (if_cond_v.ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); sp -= 1; continue; };
+					let if_then_label = ir_new_label(&b);
+					let if_else_label = ir_new_label(&b);
+					let if_end_label = ir_new_label(&b);
+					let if_else_target = if_else_label;
+					if (if_else_part == null) { if_else_target = if_end_label; };
+					ir_emit_branch(&b, if_cond_v, if_then_label, if_else_target);
+					ir_emit_label(&b, if_then_label);
+					fr.state = 1;
+					fr.else_node = if_else_part;
+					fr.label_else = if_else_label;
+					fr.label_end = if_end_label;
+					if (sp < len(stack)) {
+						stack[sp] = ir_stmt_frame {
+							node = if_then_block,
+							state = 0,
+							else_node = null,
+							label_else = 0,
+							label_end = 0,
+							loop_cond = null,
+							loop_after = null,
+							loop_body = null,
+							label_cond = 0,
+							label_step = 0,
+							label_loop_end = 0,
+							while_style = false,
+						};
+						sp += 1;
+					};
+					continue;
+				};
+				if (kind0 == N_FOR) {
+					let for_while_style = (cur.flags & F_NULLABLE) != 0;
+					let for_child = t_first(cur);
+					let for_init_node: nullable *tnode = null;
+					let for_cond_node: nullable *tnode = null;
+					let for_after_node: nullable *tnode = null;
+					let for_body_node: nullable *tnode = null;
+					if (for_while_style) {
+						if (for_child != null) {
+							for_cond_node = unwrap(for_child);
+							for_body_node = unwrap(for_child).next;
+						};
+					} else {
+						let for_parts = cur.ival;
+						let for_has_init = (for_parts & 1) != 0;
+						let for_has_cond = (for_parts & 2) != 0;
+						let for_has_after = (for_parts & 4) != 0;
+						if (for_has_init && for_child != null) { for_init_node = unwrap(for_child); for_child = unwrap(for_child).next; };
+						if (for_has_cond && for_child != null) { for_cond_node = unwrap(for_child); for_child = unwrap(for_child).next; };
+						if (for_has_after && for_child != null) { for_after_node = unwrap(for_child); for_child = unwrap(for_child).next; };
+						if (for_child != null) { for_body_node = unwrap(for_child); };
+					};
+					if (for_init_node != null) {
+						let for_init_eval = unwrap(for_init_node);
+						if (for_init_eval.kind == N_LET || for_init_eval.kind == N_ASGN || for_init_eval.kind == N_EXPR_STMT) {
+							ir_stmt(&b, for_init_eval);
+						} else {
+							ir_expr(&b, for_init_eval, false);
+						};
+					};
+					let for_label_cond = ir_new_label(&b);
+					let for_label_step = ir_new_label(&b);
+					let for_label_end = ir_new_label(&b);
+					let for_label_body = ir_new_label(&b);
+					ir_emit_label(&b, for_label_cond);
+					if (for_cond_node != null) {
+						let for_cond_v = ir_expr(&b, unwrap(for_cond_node), false);
+						if (for_cond_v.ty == IR_T_INVALID) { ir_mark_unsupported(b.ctx); sp -= 1; continue; };
+						ir_emit_branch(&b, for_cond_v, for_label_body, for_label_end);
+					} else {
+						ir_emit_jump(&b, for_label_body);
+					};
+					ir_emit_label(&b, for_label_body);
+					if (b.loop_depth < len(b.break_labels)) {
+						b.break_labels[b.loop_depth] = for_label_end;
+						b.continue_labels[b.loop_depth] = for_label_cond;
+						if (!for_while_style) { b.continue_labels[b.loop_depth] = for_label_step; };
+						b.loop_depth += 1;
+					};
+					fr.state = 1;
+					fr.loop_after = for_after_node;
+					fr.loop_body = for_body_node;
+					fr.label_cond = for_label_cond;
+					fr.label_step = for_label_step;
+					fr.label_loop_end = for_label_end;
+					fr.while_style = for_while_style;
+					if (for_body_node != null && sp < len(stack)) {
+						stack[sp] = ir_stmt_frame {
+							node = unwrap(for_body_node),
+							state = 0,
+							else_node = null,
+							label_else = 0,
+							label_end = 0,
+							loop_cond = null,
+							loop_after = null,
+							loop_body = null,
+							label_cond = 0,
+							label_step = 0,
+							label_loop_end = 0,
+							while_style = false,
+						};
+						sp += 1;
+					} else {
+						void;
+					};
+					continue;
+				};
+				if (kind0 == N_BREAK) {
+					if (b.loop_depth == 0) { ir_mark_unsupported(b.ctx); sp -= 1; continue; };
+					let break_lbl = b.break_labels[b.loop_depth - 1];
+					ir_emit_jump(&b, break_lbl);
+					sp -= 1;
+					continue;
+				};
+				if (kind0 == N_CONTINUE) {
+					if (b.loop_depth == 0) { ir_mark_unsupported(b.ctx); sp -= 1; continue; };
+					let cont_lbl = b.continue_labels[b.loop_depth - 1];
+					ir_emit_jump(&b, cont_lbl);
+					sp -= 1;
+					continue;
+				};
+				ir_stmt(&b, cur);
+				sp -= 1;
+				continue;
+			} else if (fr.state == 1) {
+				let kind1 = cur.kind;
+				if (kind1 == N_IF) {
+					if (fr.else_node != null) {
+						ir_emit_jump(&b, fr.label_end);
+						ir_emit_label(&b, fr.label_else);
+						fr.state = 2;
+						if (sp < len(stack)) {
+							stack[sp] = ir_stmt_frame {
+								node = unwrap(fr.else_node),
+								state = 0,
+								else_node = null,
+								label_else = 0,
+								label_end = 0,
+								loop_cond = null,
+								loop_after = null,
+								loop_body = null,
+								label_cond = 0,
+								label_step = 0,
+								label_loop_end = 0,
+								while_style = false,
+							};
+							sp += 1;
+						};
+					} else {
+						ir_emit_label(&b, fr.label_end);
+						sp -= 1;
+					};
+					continue;
+				};
+				if (kind1 == N_FOR) {
+					if (!fr.while_style) {
+						ir_emit_label(&b, fr.label_step);
+						if (fr.loop_after != null) {
+							let after_node_emit = unwrap(fr.loop_after);
+							if (after_node_emit.kind == N_ASGN || after_node_emit.kind == N_EXPR_STMT) {
+								ir_stmt(&b, after_node_emit);
+							} else {
+								ir_expr(&b, after_node_emit, false);
+							};
+						};
+					};
+					ir_emit_jump(&b, fr.label_cond);
+					ir_emit_label(&b, fr.label_loop_end);
+					if (b.loop_depth > 0) { b.loop_depth -= 1; };
+					sp -= 1;
+					continue;
+				};
+				sp -= 1;
+				continue;
+			} else if (fr.state == 2) {
+				if (cur.kind == N_IF) {
+					ir_emit_label(&b, fr.label_end);
+				};
+				sp -= 1;
+				continue;
+			};
+		};
+	};
+	ir_end_func(ctx);
+};
+
+fn ir_build_unit(g: *codegen, unit: *tnode) *ir_ctx = {
+	ir_reset(&ir_ctx_global, g.t.src, g.t.src_len);
+	let decl = t_first(unit);
+	for (decl != null) {
+		let d: *tnode = unwrap(decl);
+		if (d.kind == N_FN && (d.flags & F_EXTERN) == 0) {
+			ir_build_func(g, &ir_ctx_global, d);
+		};
+		decl = d.next;
+	};
+	return &ir_ctx_global;
+};
+
+fn ir_op_is_barrier(op: ir_op) bool = {
+	return op.kind == IR_OP_LABEL || op.kind == IR_OP_JUMP || op.kind == IR_OP_BRANCH
+		|| op.kind == IR_OP_CALL || op.kind == IR_OP_RET || op.kind == IR_OP_STORE
+		|| op.kind == IR_OP_PACK || op.kind == IR_OP_UNPACK;
+};
+
+fn ir_schedule_segment(ctx: *ir_ctx, seg_start: size, seg_end: size, out_cursor: *size) void = {
+	let seg_len = seg_end - seg_start;
+	if (seg_len == 0) { return; };
+	if (seg_len == 1) {
+		ir_ops_tmp[*out_cursor] = ctx.ops[seg_start];
+		*out_cursor += 1;
+		return;
+	};
+	let indeg: [64]u8 = [0...];
+	let dep0_idx: [64]u32 = [IR_DEP_NONE...];
+	let dep1_idx: [64]u32 = [IR_DEP_NONE...];
+	let scheduled: [64]u8 = [0...];
+	let ready: [64]u8 = [0...];
+	let ready_count: size = 0;
+	let i = 0z;
+	for (i < seg_len) {
+		let op_idx = seg_start + i;
+		let d0 = ir_dfg_dep0[op_idx];
+		let d1 = ir_dfg_dep1[op_idx];
+		let idx0: u32 = IR_DEP_NONE;
+		let idx1: u32 = IR_DEP_NONE;
+		if (d0 != IR_DEP_NONE && d0 >= seg_start: u32 && d0 < seg_end: u32) { idx0 = d0 - seg_start: u32; };
+		if (d1 != IR_DEP_NONE && d1 >= seg_start: u32 && d1 < seg_end: u32) { idx1 = d1 - seg_start: u32; };
+		dep0_idx[i] = idx0;
+		dep1_idx[i] = idx1;
+		let dcount: u8 = 0;
+		if (idx0 != IR_DEP_NONE) { dcount += 1; };
+		if (idx1 != IR_DEP_NONE) { dcount += 1; };
+		indeg[i] = dcount;
+		if (dcount == 0) { ready[ready_count] = i: u8; ready_count += 1; };
+		i += 1;
+	};
+	let last_kind: u16 = 0;
+	let last_aux: u16 = 0;
+	let last_ty: u16 = IR_T_INVALID;
+	let scheduled_count: size = 0;
+	for (scheduled_count < seg_len) {
+		if (ready_count == 0) {
+			// Fallback to original order for any unscheduled ops.
+			let k = 0z;
+			for (k < seg_len) {
+				if (scheduled[k] == 0) {
+					ir_ops_tmp[*out_cursor] = ctx.ops[seg_start + k];
+					*out_cursor += 1;
+					scheduled[k] = 1;
+				};
+				k += 1;
+			};
+			return;
+		};
+		let best_pos: size = 0;
+		let best_score: i64 = -9999;
+		let r = 0z;
+		for (r < ready_count) {
+			let seg_idx = ready[r]: size;
+			let op_pick = ctx.ops[seg_start + seg_idx];
+			let score: i64 = 0;
+			if (op_pick.kind != IR_OP_BIN) { score += 10; };
+			if (op_pick.kind == IR_OP_LOAD || op_pick.kind == IR_OP_CONST || op_pick.kind == IR_OP_ADDR) { score += 4; };
+			if (op_pick.kind == IR_OP_BIN && last_kind == IR_OP_BIN && op_pick.aux == last_aux && op_pick.dst.ty == last_ty) {
+				score += 6;
+			};
+			if (score > best_score) {
+				best_score = score;
+				best_pos = r;
+			};
+			r += 1;
+		};
+		let pick_seg = ready[best_pos]: size;
+		ready_count -= 1;
+		ready[best_pos] = ready[ready_count];
+		ir_ops_tmp[*out_cursor] = ctx.ops[seg_start + pick_seg];
+		*out_cursor += 1;
+		scheduled[pick_seg] = 1;
+		scheduled_count += 1;
+		let op_done = ctx.ops[seg_start + pick_seg];
+		last_kind = op_done.kind;
+		last_aux = op_done.aux;
+		last_ty = op_done.dst.ty;
+		let j = 0z;
+		for (j < seg_len) {
+			if (scheduled[j] != 0) { j += 1; continue; };
+			let dec: u8 = 0;
+			if (dep0_idx[j] == pick_seg: u32) { dec += 1; };
+			if (dep1_idx[j] == pick_seg: u32 && dep1_idx[j] != dep0_idx[j]) { dec += 1; };
+			if (dec != 0) {
+				indeg[j] = indeg[j] - dec;
+				if (indeg[j] == 0) {
+					ready[ready_count] = j: u8;
+					ready_count += 1;
+				};
+			};
+			j += 1;
+		};
+	};
+};
+
+fn ir_graph_optimize(ctx: *ir_ctx) void = {
+	let new_op_count: size = 0;
+	let func_idx = 0z;
+	for (func_idx < ctx.func_count) {
+		ctx.current_fn = func_idx;
+		let f: *ir_func = &ctx.funcs[func_idx];
+		let old_start = f.ops_start;
+		let old_end = old_start + f.ops_len;
+		let last_def: [8192]u32 = [IR_DEP_NONE...];
+		let v = 0u32;
+		for (v < f.next_vreg) {
+			let id = f.vreg_base + v;
+			last_def[id: size] = IR_DEP_NONE;
+			v += 1u32;
+		};
+		let scan = old_start;
+		for (scan < old_end) {
+			let op = ctx.ops[scan];
+			let d0 = IR_DEP_NONE;
+			let d1 = IR_DEP_NONE;
+			ir_dfg_redef[scan] = 0;
+			if (op.a.ty != IR_T_INVALID) {
+				let prev = last_def[op.a.id: size];
+				if (prev != IR_DEP_NONE) { d0 = prev; };
+			};
+			if (op.b.ty != IR_T_INVALID) {
+				let prevb = last_def[op.b.id: size];
+				if (prevb != IR_DEP_NONE) { d1 = prevb; };
+			};
+			ir_dfg_dep0[scan] = d0;
+			ir_dfg_dep1[scan] = d1;
+			if (op.dst.ty != IR_T_INVALID) {
+				if (last_def[op.dst.id: size] != IR_DEP_NONE) { ir_dfg_redef[scan] = 1; };
+				last_def[op.dst.id: size] = scan: u32;
+			};
+			scan += 1;
+		};
+		f.ops_start = new_op_count;
+		let win_start = old_start;
+		for (win_start < old_end) {
+			let win_end = win_start + (IR_DFG_CHUNK: size);
+			if (win_end > old_end) { win_end = old_end; };
+			let seg_start = win_start;
+			let i = win_start;
+			for (i < win_end) {
+				let opw = ctx.ops[i];
+				if (ir_op_is_barrier(opw) || ir_dfg_redef[i] != 0) {
+					ir_schedule_segment(ctx, seg_start, i, &new_op_count);
+					ir_ops_tmp[new_op_count] = opw;
+					new_op_count += 1;
+					seg_start = i + 1;
+				};
+				i += 1;
+			};
+			if (seg_start < win_end) { ir_schedule_segment(ctx, seg_start, win_end, &new_op_count); };
+			win_start = win_end;
+		};
+		f.ops_len = new_op_count - f.ops_start;
+		func_idx += 1;
+	};
+	let copy_i = 0z;
+	for (copy_i < new_op_count) {
+		ctx.ops[copy_i] = ir_ops_tmp[copy_i];
+		copy_i += 1;
+	};
+	ctx.op_count = new_op_count;
+};
+
+fn ir_vectorize(ctx: *ir_ctx) void = {
+	let new_op_count: size = 0;
+	let func_idx = 0z;
+	for (func_idx < ctx.func_count) {
+		ctx.current_fn = func_idx;
+		if (func_idx < len(ctx.vec_pack_reuse)) { ctx.vec_pack_reuse[func_idx] = 0u32; };
+		if (func_idx < len(ctx.vec_unpack_drop)) { ctx.vec_unpack_drop[func_idx] = 0u32; };
+		let f: *ir_func = &ctx.funcs[func_idx];
+		let old_start = f.ops_start;
+		let old_end = old_start + f.ops_len;
+		let chunk_id = 0u32;
+		let chunk_len = 0u32;
+		let scan_chunk = old_start;
+		for (scan_chunk < old_end) {
+			let op_chunk = ctx.ops[scan_chunk];
+			if (chunk_len >= IR_DFG_CHUNK) { chunk_id += 1u32; chunk_len = 0u32; };
+			if (op_chunk.kind == IR_OP_LABEL) { chunk_id += 1u32; chunk_len = 0u32; };
+			ir_vec_chunk[scan_chunk] = chunk_id;
+			chunk_len += 1u32;
+			let is_chunk_boundary = op_chunk.kind == IR_OP_CALL || op_chunk.kind == IR_OP_RET
+				|| op_chunk.kind == IR_OP_BRANCH || op_chunk.kind == IR_OP_JUMP;
+			if (is_chunk_boundary) { chunk_id += 1u32; chunk_len = 0u32; };
+			scan_chunk += 1;
+		};
+		f.ops_start = new_op_count;
+		let v = 0u32;
+		let last_def: [8192]u32 = [IR_DEP_NONE...];
+		for (v < f.next_vreg) {
+			let id = f.vreg_base + v;
+			last_def[id: size] = IR_DEP_NONE;
+			v += 1u32;
+		};
+		let op_scan = old_start;
+		for (op_scan < old_end) {
+			ir_vec_marks[op_scan] = 0;
+			let op_def = ctx.ops[op_scan];
+			if (op_def.dst.ty != IR_T_INVALID) { last_def[op_def.dst.id: size] = op_scan: u32; };
+			op_scan += 1;
+		};
+		let i = old_start;
+		for (i < old_end) {
+			if (ir_vec_marks[i] != 0) { i += 1; continue; };
+			let op0 = ctx.ops[i];
+			let chunk0 = ir_vec_chunk[i];
+			if (ir_vec_can_group(op0)) {
+				let lane_max = ir_vec_lane_count(op0.dst.ty);
+				let op0_dep0 = IR_DEP_NONE;
+				let op0_dep1 = IR_DEP_NONE;
+				if (op0.a.ty != IR_T_INVALID) { op0_dep0 = last_def[op0.a.id: size]; };
+				if (op0.b.ty != IR_T_INVALID) { op0_dep1 = last_def[op0.b.id: size]; };
+				let op0_ready = (op0_dep0 == IR_DEP_NONE || op0_dep0 < i: u32)
+					&& (op0_dep1 == IR_DEP_NONE || op0_dep1 < i: u32);
+				if (op0_ready && lane_max > 1) {
+					let group_count: size = 1;
+					let group_ops: [4]ir_op = [op0...];
+					let group_idx: [4]size = [0...];
+					let group_dst: [4]u32 = [0...];
+					group_idx[0] = i;
+					group_dst[0] = op0.dst.id;
+					let j = i + 1;
+					let window_end = i + (IR_DFG_CHUNK: size);
+					if (window_end > old_end) { window_end = old_end; };
+					for (j < window_end && group_count < lane_max: size) {
+						if (ir_vec_chunk[j] != chunk0) { break; };
+						if (ir_vec_marks[j] != 0) { j += 1; continue; };
+						let opn = ctx.ops[j];
+						let is_barrier = opn.kind == IR_OP_LABEL || opn.kind == IR_OP_JUMP || opn.kind == IR_OP_BRANCH
+							|| opn.kind == IR_OP_CALL || opn.kind == IR_OP_RET
+							|| opn.kind == IR_OP_LOAD || opn.kind == IR_OP_STORE
+							|| opn.kind == IR_OP_PACK || opn.kind == IR_OP_UNPACK;
+						if (is_barrier) { break; };
+						if (!ir_vec_can_group(opn)) { j += 1; continue; };
+						if (opn.aux != op0.aux || opn.dst.ty != op0.dst.ty) { j += 1; continue; };
+						let dep0 = IR_DEP_NONE;
+						let dep1 = IR_DEP_NONE;
+						if (opn.a.ty != IR_T_INVALID) { dep0 = last_def[opn.a.id: size]; };
+						if (opn.b.ty != IR_T_INVALID) { dep1 = last_def[opn.b.id: size]; };
+						let op_ready = (dep0 == IR_DEP_NONE || dep0 < i: u32)
+							&& (dep1 == IR_DEP_NONE || dep1 < i: u32);
+						if (!op_ready) { j += 1; continue; };
+						let dep_conflict = false;
+						let g = 0z;
+						for (g < group_count) {
+							let dst_id = group_dst[g];
+							if (opn.a.id == dst_id || opn.b.id == dst_id) { dep_conflict = true; break; };
+							g += 1;
+						};
+						if (dep_conflict) { j += 1; continue; };
+						group_ops[group_count] = opn;
+						group_idx[group_count] = j;
+						group_dst[group_count] = opn.dst.id;
+						group_count += 1;
+						j += 1;
+					};
+					if (group_count >= 2) {
+						let vec_width = group_count: u8;
+						let vec_ty = op0.dst.ty;
+						let vec_lhs = ir_vreg_invalid();
+						let vec_rhs = ir_vreg_invalid();
+						let reuse_lhs = false;
+						let reuse_rhs = false;
+						let reuse_vec_lhs = ir_vreg_invalid();
+						let reuse_vec_rhs = ir_vreg_invalid();
+						let reuse_ok = true;
+						let k = 0z;
+						for (k < group_count) {
+							let arg_lhs = group_ops[k].a;
+							let def_idx = last_def[arg_lhs.id: size];
+							if (def_idx == IR_DEP_NONE) { reuse_ok = false; break; };
+							let def_op = ctx.ops[def_idx: size];
+							if (def_op.kind != IR_OP_UNPACK) { reuse_ok = false; break; };
+							if (def_op.imm != k: i64) { reuse_ok = false; break; };
+							if (def_op.a.ty != vec_ty || def_op.a.width <= 1) { reuse_ok = false; break; };
+							if (k == 0) { reuse_vec_lhs = def_op.a; }
+							else if (def_op.a.id != reuse_vec_lhs.id) { reuse_ok = false; break; };
+							k += 1;
+						};
+						if (reuse_ok && reuse_vec_lhs.ty != IR_T_INVALID) {
+							vec_lhs = reuse_vec_lhs;
+							reuse_lhs = true;
+						};
+						reuse_ok = true;
+						k = 0z;
+						for (k < group_count) {
+							let arg_rhs = group_ops[k].b;
+							let def_idx_rhs = last_def[arg_rhs.id: size];
+							if (def_idx_rhs == IR_DEP_NONE) { reuse_ok = false; break; };
+							let def_op_rhs = ctx.ops[def_idx_rhs: size];
+							if (def_op_rhs.kind != IR_OP_UNPACK) { reuse_ok = false; break; };
+							if (def_op_rhs.imm != k: i64) { reuse_ok = false; break; };
+							if (def_op_rhs.a.ty != vec_ty || def_op_rhs.a.width <= 1) { reuse_ok = false; break; };
+							if (k == 0) { reuse_vec_rhs = def_op_rhs.a; }
+							else if (def_op_rhs.a.id != reuse_vec_rhs.id) { reuse_ok = false; break; };
+							k += 1;
+						};
+						if (reuse_ok && reuse_vec_rhs.ty != IR_T_INVALID) {
+							vec_rhs = reuse_vec_rhs;
+							reuse_rhs = true;
+						};
+						if (!reuse_lhs) { vec_lhs = ir_new_vreg(ctx, vec_ty, vec_width); };
+						if (!reuse_rhs) { vec_rhs = ir_new_vreg(ctx, vec_ty, vec_width); };
+						let vec_dst = ir_new_vreg(ctx, vec_ty, vec_width);
+						let lhs_start = ctx.arg_count;
+						if (!reuse_lhs) {
+							if (lhs_start + group_count > len(ctx.args)) { abort("ir: pack args overflow"); };
+							k = 0z;
+							for (k < group_count) {
+								ctx.args[lhs_start + k] = group_ops[k].a;
+								ir_vec_marks[group_idx[k]] = 1;
+								k += 1;
+							};
+							ctx.arg_count += group_count;
+						} else {
+							k = 0z;
+							for (k < group_count) {
+								ir_vec_marks[group_idx[k]] = 1;
+								k += 1;
+							};
+						};
+						let rhs_start = ctx.arg_count;
+						if (!reuse_rhs) {
+							if (rhs_start + group_count > len(ctx.args)) { abort("ir: pack args overflow"); };
+							k = 0z;
+							for (k < group_count) {
+								ctx.args[rhs_start + k] = group_ops[k].b;
+								k += 1;
+							};
+							ctx.arg_count += group_count;
+						};
+						let op_pack_lhs = ir_op { kind = IR_OP_PACK, aux = 0, dst = vec_lhs,
+							a = group_ops[0].a, b = ir_vreg_invalid(), imm = 0,
+							cond = 0, target = 0, target2 = 0, arg_start = lhs_start, arg_count = group_count,
+							sym = bref_empty(), sym2 = bref_empty() };
+						let op_pack_rhs = ir_op { kind = IR_OP_PACK, aux = 0, dst = vec_rhs,
+							a = group_ops[0].b, b = ir_vreg_invalid(), imm = 0,
+							cond = 0, target = 0, target2 = 0, arg_start = rhs_start, arg_count = group_count,
+							sym = bref_empty(), sym2 = bref_empty() };
+						let op_vec = ir_op { kind = IR_OP_BIN, aux = op0.aux, dst = vec_dst,
+							a = vec_lhs, b = vec_rhs, imm = 0,
+							cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+							sym = bref_empty(), sym2 = bref_empty() };
+						if (!reuse_lhs) { ir_ops_tmp[new_op_count] = op_pack_lhs; new_op_count += 1; };
+						if (!reuse_rhs) { ir_ops_tmp[new_op_count] = op_pack_rhs; new_op_count += 1; };
+						ir_ops_tmp[new_op_count] = op_vec; new_op_count += 1;
+						k = 0z;
+						for (k < group_count) {
+							let lane = k: i64;
+							let op_unpack = ir_op { kind = IR_OP_UNPACK, aux = 0, dst = group_ops[k].dst,
+								a = vec_dst, b = ir_vreg_invalid(), imm = lane,
+								cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+								sym = bref_empty(), sym2 = bref_empty() };
+							ir_ops_tmp[new_op_count] = op_unpack;
+							new_op_count += 1;
+							k += 1;
+						};
+						i += 1;
+						continue;
+					};
+				};
+			};
+			ir_ops_tmp[new_op_count] = op0;
+			new_op_count += 1;
+			i += 1;
+		};
+		f.ops_len = new_op_count - f.ops_start;
+		func_idx += 1;
+	};
+	let copy_i = 0z;
+	for (copy_i < new_op_count) {
+		ctx.ops[copy_i] = ir_ops_tmp[copy_i];
+		copy_i += 1;
+	};
+	ctx.op_count = new_op_count;
+};
+
+fn ir_vec_record_use(v: ir_vreg, op_idx: u32) void = {
+	if (v.ty == IR_T_INVALID) { return; };
+	let id = v.id: size;
+	let c = ir_vec_use_count[id];
+	if (c == 0u32) { ir_vec_use_single[id] = op_idx; }
+	else { ir_vec_use_single[id] = IR_DEP_NONE; };
+	ir_vec_use_count[id] = c + 1u32;
+};
+
+fn ir_optimize_vec_packs(ctx: *ir_ctx) void = {
+	let new_op_count: size = 0;
+	let func_idx = 0z;
+	for (func_idx < ctx.func_count) {
+		ctx.current_fn = func_idx;
+		let f: *ir_func = &ctx.funcs[func_idx];
+		let pack_argc: [512]u8 = [0...];
+		let pack_arg0: [512]u32 = [0...];
+		let pack_arg1: [512]u32 = [0...];
+		let pack_arg2: [512]u32 = [0...];
+		let pack_arg3: [512]u32 = [0...];
+		let pack_dst: [512]ir_vreg = [ir_vreg { id = 0, ty = IR_T_INVALID, width = 0 }...];
+		let pack_count: size = 0;
+		let old_start = f.ops_start;
+		let old_end = old_start + f.ops_len;
+		let v = 0u32;
+		for (v < f.next_vreg) {
+			let id = f.vreg_base + v;
+			ir_vec_use_count[id: size] = 0;
+			ir_vec_use_single[id: size] = IR_DEP_NONE;
+			ir_vec_def_op[id: size] = IR_DEP_NONE;
+			v += 1u32;
+		};
+		let reset_i = old_start;
+		for (reset_i < old_end) {
+			ir_vec_skip_ops[reset_i] = 0;
+			reset_i += 1;
+		};
+		let i = old_start;
+		for (i < old_end) {
+			let op_scan = ctx.ops[i];
+			if (op_scan.kind != IR_OP_PACK) {
+				ir_vec_record_use(op_scan.a, i: u32);
+				ir_vec_record_use(op_scan.b, i: u32);
+			};
+			if (op_scan.arg_count > 0) {
+				let k = 0z;
+				for (k < op_scan.arg_count) {
+					let arg_use = ctx.args[op_scan.arg_start + k];
+					ir_vec_record_use(arg_use, i: u32);
+					k += 1;
+				};
+			};
+			if (op_scan.dst.ty != IR_T_INVALID) { ir_vec_def_op[op_scan.dst.id: size] = i: u32; };
+			i += 1;
+		};
+		f.ops_start = new_op_count;
+		i = old_start;
+		for (i < old_end) {
+			if (ir_vec_skip_ops[i] != 0) { i += 1; continue; };
+			let op_emit = ctx.ops[i];
+			if (op_emit.kind == IR_OP_UNPACK) {
+				if (op_emit.dst.ty != IR_T_INVALID) {
+					let use_id = op_emit.dst.id;
+					if (ir_vec_use_count[use_id: size] == 0u32) {
+						if (func_idx < len(ctx.vec_unpack_drop)) {
+							let cur_drop = ctx.vec_unpack_drop[func_idx];
+							ctx.vec_unpack_drop[func_idx] = cur_drop + 1u32;
+						};
+						i += 1;
+						continue;
+					};
+				};
+			};
+			if (op_emit.kind == IR_OP_PACK && op_emit.arg_count > 0) {
+				let ok = true;
+				let src_vec = ir_vreg_invalid();
+				let lane = 0z;
+				for (lane < op_emit.arg_count) {
+					let arg_pack = ctx.args[op_emit.arg_start + lane];
+					let def_idx_pack = ir_vec_def_op[arg_pack.id: size];
+					if (def_idx_pack == IR_DEP_NONE) { ok = false; break; };
+					let def_op = ctx.ops[def_idx_pack: size];
+					if (def_op.kind != IR_OP_UNPACK) { ok = false; break; };
+					if (def_op.a.ty == IR_T_INVALID || def_op.a.width <= 1) { ok = false; break; };
+					if (def_op.imm != lane: i64) { ok = false; break; };
+					if (lane == 0) { src_vec = def_op.a; }
+					else if (def_op.a.id != src_vec.id) { ok = false; break; };
+					lane += 1;
+				};
+				if (ok && src_vec.ty != IR_T_INVALID) {
+					let copy_op = ir_op { kind = IR_OP_COPY, aux = 1, dst = op_emit.dst,
+						a = src_vec, b = ir_vreg_invalid(), imm = 0,
+						cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+						sym = bref_empty(), sym2 = bref_empty() };
+					if (func_idx < len(ctx.vec_pack_reuse)) {
+						let cur_reuse = ctx.vec_pack_reuse[func_idx];
+						ctx.vec_pack_reuse[func_idx] = cur_reuse + 1u32;
+					};
+					ir_ops_tmp[new_op_count] = copy_op;
+					new_op_count += 1;
+					lane = 0z;
+					for (lane < op_emit.arg_count) {
+						let arg_skip = ctx.args[op_emit.arg_start + lane];
+						let def_idx_skip = ir_vec_def_op[arg_skip.id: size];
+						if (def_idx_skip != IR_DEP_NONE) {
+							if (ir_vec_use_count[arg_skip.id: size] == 1u32 && ir_vec_use_single[arg_skip.id: size] == i: u32) {
+								ir_vec_skip_ops[def_idx_skip: size] = 1;
+							};
+						};
+						lane += 1;
+					};
+					i += 1;
+					continue;
+				};
+				if (op_emit.arg_count <= 4 && pack_count < len(pack_argc)) {
+					let a0 = ctx.args[op_emit.arg_start + 0].id;
+					let a1 = 0u32;
+					let a2 = 0u32;
+					let a3 = 0u32;
+					if (op_emit.arg_count > 1) { a1 = ctx.args[op_emit.arg_start + 1].id; };
+					if (op_emit.arg_count > 2) { a2 = ctx.args[op_emit.arg_start + 2].id; };
+					if (op_emit.arg_count > 3) { a3 = ctx.args[op_emit.arg_start + 3].id; };
+					let found = false;
+					let p = 0z;
+					for (p < pack_count) {
+						if (pack_argc[p] != op_emit.arg_count: u8) { p += 1; continue; };
+						if (pack_arg0[p] != a0 || pack_arg1[p] != a1 || pack_arg2[p] != a2 || pack_arg3[p] != a3) { p += 1; continue; };
+						let src_pack = pack_dst[p];
+						let reuse_op = ir_op { kind = IR_OP_COPY, aux = 2, dst = op_emit.dst,
+							a = src_pack, b = ir_vreg_invalid(), imm = 0,
+							cond = 0, target = 0, target2 = 0, arg_start = 0, arg_count = 0,
+							sym = bref_empty(), sym2 = bref_empty() };
+						if (func_idx < len(ctx.vec_pack_reuse)) {
+							let cur_reuse2 = ctx.vec_pack_reuse[func_idx];
+							ctx.vec_pack_reuse[func_idx] = cur_reuse2 + 1u32;
+						};
+						ir_ops_tmp[new_op_count] = reuse_op;
+						new_op_count += 1;
+						found = true;
+						break;
+					};
+					if (found) { i += 1; continue; };
+					pack_argc[pack_count] = op_emit.arg_count: u8;
+					pack_arg0[pack_count] = a0;
+					pack_arg1[pack_count] = a1;
+					pack_arg2[pack_count] = a2;
+					pack_arg3[pack_count] = a3;
+					pack_dst[pack_count] = op_emit.dst;
+					pack_count += 1;
+				};
+			};
+			ir_ops_tmp[new_op_count] = op_emit;
+			new_op_count += 1;
+			i += 1;
+		};
+		f.ops_len = new_op_count - f.ops_start;
+		func_idx += 1;
+	};
+	let copy_i = 0z;
+	for (copy_i < new_op_count) {
+		ctx.ops[copy_i] = ir_ops_tmp[copy_i];
+		copy_i += 1;
+	};
+	ctx.op_count = new_op_count;
+};
+
+fn ir_reindex_map(ctx: *ir_ctx, old_id: u32, map: *[*]u32, mark: *[*]u8,
+	new_types: *[*]u16, new_widths: *[*]u8, next_id: *u32, local_count: *u32) u32 = {
+	let idx = old_id: size;
+	if (idx >= len(ctx.vreg_types)) { abort("ir: vreg id out of range"); };
+	if (mark[idx] == 0) {
+		let new_id = *next_id + *local_count;
+		if (new_id: size >= len(ctx.vreg_types)) { abort("ir: too many vregs"); };
+		map[idx] = new_id;
+		mark[idx] = 1;
+		new_types[new_id: size] = ctx.vreg_types[idx];
+		new_widths[new_id: size] = ctx.vreg_widths[idx];
+		*local_count = *local_count + 1u32;
+	};
+	return map[idx];
+};
+
+fn ir_reindex_vregs(ctx: *ir_ctx) void = {
+	let new_types: [8192]u16 = [0...];
+	let new_widths: [8192]u8 = [0...];
+	let map: [8192]u32 = [0...];
+	let mark: [8192]u8 = [0...];
+	let next_id: u32 = 0;
+	let func_idx = 0z;
+	for (func_idx < ctx.func_count) {
+		let f: *ir_func = &ctx.funcs[func_idx];
+		// reset mapping marks
+		let mi = 0z;
+		for (mi < len(mark)) {
+			mark[mi] = 0;
+			mi += 1;
+		};
+		let local_count: u32 = 0;
+		// params
+		let p = 0z;
+		for (p < f.params_len) {
+			let pv = ctx.params[f.params_start + p];
+			if (pv.ty != IR_T_INVALID) {
+				let new_id = ir_reindex_map(ctx, pv.id, (&map[0]): *[*]u32, (&mark[0]): *[*]u8,
+					(&new_types[0]): *[*]u16, (&new_widths[0]): *[*]u8, &next_id, &local_count);
+				pv.id = new_id;
+				ctx.params[f.params_start + p] = pv;
+			};
+			p += 1;
+		};
+		// ops + args
+		let op_idx = f.ops_start;
+		let op_end = f.ops_start + f.ops_len;
+		for (op_idx < op_end) {
+			let op = ctx.ops[op_idx];
+			if (op.dst.ty != IR_T_INVALID) {
+				op.dst.id = ir_reindex_map(ctx, op.dst.id, (&map[0]): *[*]u32, (&mark[0]): *[*]u8,
+					(&new_types[0]): *[*]u16, (&new_widths[0]): *[*]u8, &next_id, &local_count);
+			};
+			if (op.a.ty != IR_T_INVALID) {
+				op.a.id = ir_reindex_map(ctx, op.a.id, (&map[0]): *[*]u32, (&mark[0]): *[*]u8,
+					(&new_types[0]): *[*]u16, (&new_widths[0]): *[*]u8, &next_id, &local_count);
+			};
+			if (op.b.ty != IR_T_INVALID) {
+				op.b.id = ir_reindex_map(ctx, op.b.id, (&map[0]): *[*]u32, (&mark[0]): *[*]u8,
+					(&new_types[0]): *[*]u16, (&new_widths[0]): *[*]u8, &next_id, &local_count);
+			};
+			if (op.arg_count > 0) {
+				let k = 0z;
+				for (k < op.arg_count) {
+					let av = ctx.args[op.arg_start + k];
+					if (av.ty != IR_T_INVALID) {
+						av.id = ir_reindex_map(ctx, av.id, (&map[0]): *[*]u32, (&mark[0]): *[*]u8,
+							(&new_types[0]): *[*]u16, (&new_widths[0]): *[*]u8, &next_id, &local_count);
+						ctx.args[op.arg_start + k] = av;
+					};
+					k += 1;
+				};
+			};
+			ctx.ops[op_idx] = op;
+			op_idx += 1;
+		};
+		f.vreg_base = next_id;
+		f.next_vreg = local_count;
+		next_id += local_count;
+		func_idx += 1;
+	};
+	// rewrite global vreg tables
+	let i = 0z;
+	for (i < len(ctx.vreg_types)) {
+		ctx.vreg_types[i] = new_types[i];
+		ctx.vreg_widths[i] = new_widths[i];
+		i += 1;
+	};
+	ctx.next_vreg_id = next_id;
+};

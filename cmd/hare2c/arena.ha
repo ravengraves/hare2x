@@ -6,12 +6,12 @@ use strings;
 // Block size: 2MB (should handle most transpilation workloads)
 def BLOCK_SIZE: size = 2 * 1024 * 1024;
 
-// Maximum blocks (2MB * 8 = 16MB total capacity)
-def MAX_BLOCKS: size = 8;
+// Maximum blocks (2MB * 32 = 64MB total capacity)
+def MAX_BLOCKS: size = 32;
 
 // Arena allocator with large fixed-size blocks
 export type arena = struct {
-	blocks: [8]nullable *[*]u8,
+	blocks: [32]nullable *[*]u8,
 	num_blocks: size,
 	cur_offset: size,
 };
@@ -44,6 +44,19 @@ export fn arena_alloc(a: *arena, n: size) *opaque = {
 			alloc_size = n;
 		};
 		a.blocks[a.num_blocks] = rt::malloc(alloc_size): nullable *[*]u8;
+		if (a.blocks[a.num_blocks] == null) {
+			rt::write(2, strings::toutf8("arena.ha: malloc failed size="): *[*]u8,
+				len("arena.ha: malloc failed size="));
+			write_size(alloc_size);
+			rt::write(2, strings::toutf8(" block="): *[*]u8, len(" block="));
+			write_size(a.num_blocks);
+			rt::write(2, strings::toutf8(" n="): *[*]u8, len(" n="));
+			write_size(n);
+			rt::write(2, strings::toutf8(" cur="): *[*]u8, len(" cur="));
+			write_size(a.cur_offset);
+			rt::write(2, strings::toutf8("\n"): *[*]u8, len("\n"));
+			abort();
+		};
 		a.num_blocks += 1;
 		a.cur_offset = 0;
 	};
@@ -101,6 +114,24 @@ export fn write_int(n: u32) void = {
 	// Use pointer arithmetic to avoid bounds check issue
 	let ptr = &buf: *[*]u8;
 	rt::write(2, (ptr: uintptr + i): *[*]u8, 16 - i);
+};
+
+// Write a size_t to stderr
+export fn write_size(n: size) void = {
+	let buf: [32]u8 = [0...];
+	let i = 31z;
+	if (n == 0) {
+		rt::write(2, strings::toutf8("0"): *[*]u8, 1);
+		return;
+	};
+	for (n > 0) {
+		buf[i] = ('0': u8) + (n % 10): u8;
+		n = n / 10;
+		i -= 1;
+	};
+	i += 1;
+	let ptr = &buf: *[*]u8;
+	rt::write(2, (ptr: uintptr + i): *[*]u8, 32 - i);
 };
 
 // Global source buffer for error context (set by main)

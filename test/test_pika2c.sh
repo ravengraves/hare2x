@@ -8,6 +8,7 @@ RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[0;33m' NC='\033[0m'
 PASS=0 FAIL=0 SKIP=0
 CC=${CC:-clang}
 CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wfloat-conversion -Wno-overlength-strings -Wno-unused-function -Wno-unused-variable -Wno-gnu-auto-type -Wno-gnu-statement-expression -Wno-parentheses-equality -O0 -ffast-math -march=native -mtune=native -fno-builtin"
+ASM_LDFLAGS="-nostdlib -static -fno-pie"
 
 pass() { printf "${GREEN}PASS${NC}\n"; PASS=$((PASS + 1)); }
 fail() { printf "${RED}FAIL${NC} ($1)\n"; FAIL=$((FAIL + 1)); }
@@ -94,6 +95,56 @@ run_runtime_test() {
     fi
 }
 
+run_x86_64_test() {
+    local name="$1"
+    local file="$2"
+    printf "Testing %-40s " "$name (x86_64)..."
+
+    local sfile="$TMPDIR/${name}.s"
+    local binfile="$TMPDIR/${name}.bin"
+
+    if ! { printf '%s\n' '-T x86_64'; cat "$file"; } | "$TMPDIR/pika2c" > "$sfile"; then
+        fail "transpile error"
+        return
+    fi
+
+    if ! $CC $ASM_LDFLAGS "$sfile" lib/pika/rt.c -o "$binfile"; then
+        fail "assemble/link error"
+        return
+    fi
+
+    if ! timeout 5 "$binfile" >/dev/null 2>&1; then
+        fail "runtime error"
+        return
+    fi
+    pass
+}
+
+run_x86_64_runtime_test() {
+    local name="$1"
+    local file="$2"
+    printf "Testing %-40s " "$name (x86_64 runtime fail)..."
+
+    local sfile="$TMPDIR/${name}.s"
+    local binfile="$TMPDIR/${name}.bin"
+
+    if ! { printf '%s\n' '-T x86_64'; cat "$file"; } | "$TMPDIR/pika2c" > "$sfile"; then
+        fail "transpile error"
+        return
+    fi
+
+    if ! $CC $ASM_LDFLAGS "$sfile" lib/pika/rt.c -o "$binfile"; then
+        fail "assemble/link error"
+        return
+    fi
+
+    if "$binfile" 2>/dev/null; then
+        fail "should have aborted"
+    else
+        pass
+    fi
+}
+
 echo "=== pika2c  Success Tests ===" && echo
 for f in test/pika/*.pka; do
     [ -f "$f" ] && run_test "$(basename ${f%.pka})" "$f"
@@ -111,6 +162,31 @@ echo && echo "=== pika2c  Runtime Fail Tests ===" && echo
 for f in test/pika/fail/runtime_*.pka; do
     [ -f "$f" ] && run_runtime_test "$(basename ${f%.pka})" "$f"
 done
+
+echo && echo "=== pika2c  x86_64 Backend Tests ===" && echo
+for f in test/x86_64/001_main_arith.pka \
+         test/x86_64/003_control_flow.pka test/x86_64/004_float_ops.pka \
+         test/x86_64/005_vector_smoke.pka test/x86_64/006_vector_reuse.pka \
+         test/x86_64/009_matrix_mul_unrolled.pka \
+         test/x86_64/220_if_else_basic.pka test/x86_64/230_for_sum.pka \
+         test/x86_64/240_for_break_continue.pka test/x86_64/250_else_if_chain.pka \
+         test/x86_64/260_while_style.pka test/x86_64/270_nested_loops.pka \
+         test/x86_64/200_structs_basic.pka test/x86_64/210_arrays_loop.pka \
+         test/x86_64/280_nested_loops_arrays.pka \
+         test/x86_64/300_array_fill_basic.pka \
+         test/x86_64/310_runtime_calls.pka \
+         test/x86_64/311_symbol_interop.pka \
+         test/x86_64/320_slices_basic.pka \
+         test/x86_64/330_strings_basic.pka \
+         test/x86_64/340_match_nullable_expr.pka \
+         test/x86_64/600_defaults_casts.pka \
+         test/x86_64/610_globals_static_arrays.pka \
+         test/x86_64/620_autoderef_nested.pka; do
+    [ -f "$f" ] && run_x86_64_test "$(basename ${f%.pka})" "$f"
+done
+
+run_x86_64_runtime_test "002_runtime_assert_fail" "test/x86_64/002_runtime_assert_fail.pka"
+run_x86_64_runtime_test "211_array_bounds_fail" "test/x86_64/211_array_bounds_fail.pka"
 
 echo && echo "=== pika2c  Self-Hosting Tests ===" && echo
 

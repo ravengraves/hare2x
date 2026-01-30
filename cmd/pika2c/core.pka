@@ -7,9 +7,9 @@ use strings;
 // ============================================================================
 
 def NODE_POOL_SIZE: size = 512*1024;
-def OUTBUF_SIZE: size = 4194304;    // 4MB output
+def OUTBUF_SIZE: size = 33554432;    // 32MB output
 def SRCBUF_SIZE: size = 1048576;    // 1MB input
-def DICT_SIZE: size = 8192;
+def DICT_SIZE: size = 1048576;
 
 // Node pool (allocated in tree.ha since it needs tnode type)
 // Here we just track the index
@@ -248,15 +248,15 @@ type dict_entry = struct {
 };
 
 // Separate dict pools: types, vars, funcs, globals
-let types_dict_entries: [8192]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let vars_dict_entries: [8192]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let funcs_dict_entries: [8192]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let globals_dict_entries: [2048]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let exported_funcs_entries: [1024]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let exported_types_entries: [1024]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let symbol_dict_entries: [1024]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let static_vars_entries: [1024]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let aliases_dict_entries: [256]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let types_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let vars_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let funcs_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let globals_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let exported_funcs_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let exported_types_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let symbol_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let static_vars_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let aliases_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
 
 type dict = struct {
 	entries: *[*]dict_entry,
@@ -296,7 +296,7 @@ fn dict_init_funcs(d: *dict, src: *[*]u8) void = {
 };
 
 fn dict_init_globals(d: *dict, src: *[*]u8) void = {
-	d.cap = 2048;
+	d.cap = DICT_SIZE;
 	d.count = 0;
 	d.src = src;
 	d.entries = (&globals_dict_entries[0]): *[*]dict_entry;
@@ -306,7 +306,7 @@ fn dict_init_globals(d: *dict, src: *[*]u8) void = {
 };
 
 fn dict_init_exported_funcs(d: *dict, src: *[*]u8) void = {
-	d.cap = 1024;
+	d.cap = DICT_SIZE;
 	d.count = 0;
 	d.src = src;
 	d.entries = (&exported_funcs_entries[0]): *[*]dict_entry;
@@ -316,7 +316,7 @@ fn dict_init_exported_funcs(d: *dict, src: *[*]u8) void = {
 };
 
 fn dict_init_exported_types(d: *dict, src: *[*]u8) void = {
-	d.cap = 1024;
+	d.cap = DICT_SIZE;
 	d.count = 0;
 	d.src = src;
 	d.entries = (&exported_types_entries[0]): *[*]dict_entry;
@@ -326,7 +326,7 @@ fn dict_init_exported_types(d: *dict, src: *[*]u8) void = {
 };
 
 fn dict_init_symbols(d: *dict, src: *[*]u8) void = {
-	d.cap = 1024;
+	d.cap = DICT_SIZE;
 	d.count = 0;
 	d.src = src;
 	d.entries = (&symbol_dict_entries[0]): *[*]dict_entry;
@@ -336,7 +336,7 @@ fn dict_init_symbols(d: *dict, src: *[*]u8) void = {
 };
 
 fn dict_init_static_vars(d: *dict, src: *[*]u8) void = {
-	d.cap = 1024;
+	d.cap = DICT_SIZE;
 	d.count = 0;
 	d.src = src;
 	d.entries = (&static_vars_entries[0]): *[*]dict_entry;
@@ -346,7 +346,7 @@ fn dict_init_static_vars(d: *dict, src: *[*]u8) void = {
 };
 
 fn dict_init_aliases(d: *dict, src: *[*]u8) void = {
-	d.cap = 256;
+	d.cap = DICT_SIZE;
 	d.count = 0;
 	d.src = src;
 	d.entries = (&aliases_dict_entries[0]): *[*]dict_entry;

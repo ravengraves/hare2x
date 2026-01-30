@@ -639,6 +639,16 @@ fn get_expr_type_eval(g: *codegen, expr: *tnode, k: u16) type_eval = {
 			ty = ty_ptr: uintptr: *tnode;
 			return type_eval { handled = true, ty = ty };
 		};
+		let glob_ptr = dict_get_bref(&g.globals, expr.ref);
+		if (glob_ptr != 0) {
+			let gnode: *tnode = glob_ptr: uintptr: *tnode;
+			if (gnode.kind == N_GLOBAL || gnode.kind == N_DEF) {
+				let child = t_first(gnode);
+				if (child != null && is_type_kind(unwrap(child).kind)) {
+					return type_eval { handled = true, ty = unwrap(child) };
+				};
+			};
+		};
 		let type_def = dict_get_bref(&g.types, expr.ref);
 		if (type_def != 0) {
 			match (resolve_alias_type(g, type_def: uintptr: *tnode)) {

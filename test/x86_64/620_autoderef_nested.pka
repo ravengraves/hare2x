@@ -1,0 +1,42 @@
+// phase6_autoderef_nested.pka
+use rt;
+
+type point = struct {
+	x: i32,
+	y: i32,
+};
+
+type node = struct {
+	value: i32,
+	next: nullable *node,
+};
+
+fn test_double_ptr() void = {
+	let pt = point { x = 10, y = 20 };
+	let p: *point = &pt;
+	let pp: **point = &p;
+	assert(pp.x == 10);
+	assert(pp.y == 20);
+};
+
+fn test_ptr_chain() void = {
+	let n1 = node { value = 1, next = null };
+	let n2 = node { value = 2, next = null };
+	let p1: *node = &n1;
+	let p2: *node = &n2;
+	p1.next = p2;
+	assert(p1.next.value == 2);
+};
+
+fn test_ptr_to_array() void = {
+	let arr: [3]i32 = [7, 8, 9];
+	let p: *[3]i32 = &arr;
+	assert(p[0] == 7);
+	assert(p[2] == 9);
+};
+
+export fn main() void = {
+	test_double_ptr();
+	test_ptr_chain();
+	test_ptr_to_array();
+};

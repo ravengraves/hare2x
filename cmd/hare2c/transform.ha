@@ -2656,6 +2656,15 @@ export fn emit_node(ctx: *transform_ctx, n_nullable: nullable *node) void = {
 				ptr_depth = 1;
 			};
 		};
+		if (ptr_depth == 0 && base.kind == node_kind::N_CALL) {
+			let cd = base.data: *n_call_data;
+			if (cd.func.kind == node_kind::N_ID) {
+				let fid = cd.func.data: *n_id_data;
+				if (is_tracked_var(&ctx.ptr_fns, fid.ptr, fid.length)) {
+					ptr_depth = 1;
+				};
+			};
+		};
 
 		// Generate appropriate dereferences: (*...*base).field
 		if (ptr_depth > 0) {

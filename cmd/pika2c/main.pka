@@ -54,7 +54,8 @@ fn parse_directives(
 	js_out: *bool,
 	glsl_out: *bool,
 	glsl_frag_out: *bool,
-	sycl_out: *bool
+	sycl_out: *bool,
+	x86_out: *bool
 ) size = {
 	let pos = 0z;
 	for (true) {
@@ -76,21 +77,30 @@ fn parse_directives(
 				*js_out = true;
 				*glsl_out = false;
 				*sycl_out = false;
+				*x86_out = false;
 			} else if (bref_match(arg, "c", src)) {
 				*js_out = false;
 				*glsl_out = false;
 				*sycl_out = false;
+				*x86_out = false;
 			} else if (bref_match(arg, "glsl", src)) {
 				*js_out = false;
 				*glsl_out = true;
 				*sycl_out = false;
+				*x86_out = false;
 			} else if (bref_match(arg, "sycl", src)) {
 				*js_out = false;
 				*glsl_out = false;
 				*sycl_out = true;
+				*x86_out = false;
+			} else if (bref_match(arg, "x86_64", src) || bref_match(arg, "asm", src)) {
+				*js_out = false;
+				*glsl_out = false;
+				*sycl_out = false;
+				*x86_out = true;
 			} else {
 				err_bref(arg, src, src_len,
-					"unknown target (use -T c, -T js, -T glsl, or -T sycl)");
+					"unknown target (use -T c, -T js, -T glsl, -T sycl, or -T x86_64)");
 			};
 		} else if (opt == 'S': u8) {
 			if (bref_match(arg, "vertex", src) ||
@@ -128,9 +138,10 @@ export fn main() void = {
 	let use_js: bool = false;
 	let use_glsl: bool = false;
 	let use_sycl: bool = false;
+	let use_x86_64: bool = false;
 	let glsl_frag: bool = false;
 	let skip = parse_directives(src, total_len, &prefix, &use_js,
-		&use_glsl, &glsl_frag, &use_sycl);
+		&use_glsl, &glsl_frag, &use_sycl, &use_x86_64);
 	let src_start = (&srcbuf[skip]): *[*]u8;
 	let src_len = total_len - skip;
 
@@ -233,7 +244,9 @@ export fn main() void = {
 		g.prefix = prefix;
 		g.prefix_src = src;  // prefix_src points to original srcbuf
 	};
-	if (use_sycl) {
+	if (use_x86_64) {
+		pkgen_generate_x86_64(&g);
+	} else if (use_sycl) {
 		pkgen_generate_sycl(&g);
 	} else if (use_glsl) {
 		pkgen_generate_glsl(&g, glsl_frag);

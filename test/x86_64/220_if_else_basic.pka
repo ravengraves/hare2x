@@ -1,0 +1,12 @@
+// if/else basic
+
+export fn main() void = {
+	let x: i32 = 3;
+	let y: i32 = 0;
+	if (x > 2) {
+		y = 7;
+	} else {
+		y = 1;
+	};
+	assert(y == 7);
+};

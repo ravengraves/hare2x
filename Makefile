@@ -1,5 +1,5 @@
 .POSIX:
-.PHONY: all clean check hare2c pika2c wasm help optimize optimize-hare2c optimize-pika2c check-glsl check-sycl
+.PHONY: all clean check hare2c pika2c wasm help optimize optimize-hare2c optimize-pika2c check-glsl check-sycl rebuild
 
 # Compiler settings
 CC = gcc
@@ -52,6 +52,7 @@ help:
 	@echo "  make check-sycl   - Run SYCL tests (Intel + CUDA if available)"
 	@echo "  make check-glsl   - Run GLSL backend tests"
 	@echo "  make wasm         - Build both WASM versions"
+	@echo "  make rebuild      - Rebuild pika2c using existing ./pika2c0 (fast iteration)"
 	@echo "  make clean        - Remove build artifacts"
 	@echo ""
 	@echo "BOLT optimization uses perf profiling for better code layout."
@@ -122,6 +123,16 @@ check-wasm:
 # Run GLSL backend tests
 check-glsl: pika2c
 	bash $(TEST_DIR)/test_glsl.sh
+
+# Fast rebuild using existing pika2c0 (no hare2c.py)
+rebuild:
+	@test -x ./pika2c0 || (echo "Missing ./pika2c0 (build it first)." >&2; exit 1)
+	cat $(CMD_DIR)/pika2c/*.pka | ./pika2c0 > pika2c.c
+	clang -O0 -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wfloat-conversion \
+		-Wno-overlength-strings -Wno-unused-function -Wno-unused-variable \
+		-Wno-gnu-auto-type -Wno-gnu-statement-expression -Wno-parentheses-equality \
+		-O0 -ffast-math -march=native -mtune=native -fno-builtin \
+		$(LIB_DIR)/pika/rt.c pika2c.c -o pika2c
 
 # Build WASM versions
 wasm:

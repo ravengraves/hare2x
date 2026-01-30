@@ -1,0 +1,45 @@
+// phase6_defaults_casts.pka
+use rt;
+
+fn add3(a: i32, b: i32 = 5, c: i32 = 7) i32 = {
+	return a + b + c;
+};
+
+fn scale(v: f32, factor: f32 = 2.5) f32 = {
+	return v * factor;
+};
+
+fn cast_checks() void = {
+	let i: i32 = 42;
+	let u: u32 = i: u32;
+	let f: f32 = i: f32;
+	let s: size = i: size;
+	let i2: i64 = u: i64;
+	let f2: f64 = f: f64;
+	let i3: i32 = f: i32;
+	let i4: i64 = f2: i64;
+	assert(u == 42u32);
+	assert(s == 42);
+	assert(i2 == 42);
+	assert(i3 == 42);
+	assert(i4 == 42);
+};
+
+export fn main() void = {
+	let t0 = add3(1, 2, 3);
+	assert(t0 == 6);
+
+	let t1 = add3(1, 2);
+	assert(t1 == 10);
+
+	let t2 = add3(1);
+	assert(t2 == 13);
+
+	let f0 = scale(2.0);
+	assert(f0 == 5.0);
+
+	let f1 = scale(2.0, 1.5);
+	assert(f1 == 3.0);
+
+	cast_checks();
+};

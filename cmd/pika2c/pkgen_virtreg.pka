@@ -1,0 +1,675 @@
+// pkgen_virtreg.pka - Virtual register packing (phase 1 scaffolding)
+
+use rt;
+
+// Register classes (phase 1/2 scaffolding)
+
+def REG_GPR64: u16 = 1;
+def REG_GPR32: u16 = 2;
+def REG_GPR16: u16 = 3;
+def REG_GPR8: u16 = 4;
+def REG_XMM: u16 = 5; // legacy/untyped XMM
+def REG_XMM_SCALAR_F32: u16 = 6;
+def REG_XMM_SCALAR_F64: u16 = 7;
+def REG_XMM_VEC4_I32: u16 = 8;
+def REG_XMM_VEC2_I64: u16 = 9;
+def REG_XMM_VEC4_F32: u16 = 10;
+def REG_XMM_VEC2_F64: u16 = 11;
+def REG_SPILL: u16 = 12;
+
+// Phase 2 planning-only inventory (assignment happens in phase 3).
+def X86_GPR_TOTAL: u8 = 16;
+def X86_GPR_RESERVED: u8 = 2; // rsp, rbp
+def X86_GPR_CALLER: u8 = 9; // rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11
+def X86_GPR_CALLEE: u8 = 5; // rbx, r12-r15
+def X86_XMM_TOTAL: u8 = 16;
+def X86_XMM_SCRATCH: u8 = 15;
+
+// Scheduler knobs (phase 2 scaffolding)
+def VIRT_OP_WINDOW: u8 = 64; // keep in sync with IR_DFG_CHUNK
+def VIRT_MC_ITERS: u8 = 8;
+def VIRT_MC_SWAPS: u8 = 4;
+def VIRT_SCHED_DEBUG: u8 = 0;
+def VIRT_DEP_NONE: u32 = 0xffffffffu32;
+def VIRT_FLAG_BARRIER: u16 = 1;
+
+// Physical register descriptor
+
+type phys_reg = struct {
+	class: u16,
+	index: u8,
+	lane: u8,
+};
+
+// Allocation mapping
+
+type virt_alloc = struct {
+	vreg_id: u32,
+	phys: phys_reg,
+};
+
+// Operation queue entries (phase 2 scheduling)
+type virt_op = struct {
+	op_index: u32,
+	kind: u16,
+	aux: u16,
+	width: u8,
+	lanes: u8,
+	cost: u16,
+	flags: u16,
+	dep0: u32,
+	dep1: u32,
+};
+
+type virt_window = struct {
+	op_start: size, // index into order[]
+	op_count: size,
+	score: i64,
+};
+
+type virt_func_sched = struct {
+	op_start: size,    // index into order[]
+	op_count: size,
+	window_start: size,
+	window_count: size,
+	best_score: i64,
+	alloc_start: size,
+	alloc_count: size,
+};
+
+// Allocation context
+
+type virt_ctx = struct {
+	allocs: [8192]virt_alloc,
+	count: size,
+	ops: [65536]virt_op,
+	op_count: size,
+	order: [65536]u32,
+	order_count: size,
+	windows: [2048]virt_window,
+	window_count: size,
+	func_sched: [256]virt_func_sched,
+	active_queue: [64]u32,
+	active_count: size,
+};
+
+let virt_ctx_global: virt_ctx = virt_ctx {
+	allocs = [virt_alloc { vreg_id = 0, phys = phys_reg { class = 0, index = 0, lane = 0 } }...],
+	count = 0,
+	ops = [virt_op { op_index = 0, kind = 0, aux = 0, width = 0, lanes = 0, cost = 0, flags = 0, dep0 = VIRT_DEP_NONE, dep1 = VIRT_DEP_NONE }...],
+	op_count = 0,
+	order = [0...],
+	order_count = 0,
+	windows = [virt_window { op_start = 0, op_count = 0, score = 0 }...],
+	window_count = 0,
+	func_sched = [virt_func_sched { op_start = 0, op_count = 0, window_start = 0, window_count = 0,
+		best_score = 0, alloc_start = 0, alloc_count = 0 }...],
+	active_queue = [0...],
+	active_count = 0,
+};
+
+fn virtreg_reset(ctx: *virt_ctx) void = {
+	ctx.count = 0;
+	ctx.op_count = 0;
+	ctx.order_count = 0;
+	ctx.window_count = 0;
+	ctx.active_count = 0;
+};
+
+fn virtreg_add(ctx: *virt_ctx, vreg_id: u32, phys: phys_reg) void = {
+	if (ctx.count >= len(ctx.allocs)) { abort("virtreg: too many allocs"); };
+	ctx.allocs[ctx.count] = virt_alloc { vreg_id = vreg_id, phys = phys };
+	ctx.count += 1;
+};
+
+fn virtreg_is_float(ty: u16) bool = {
+	return ty == IR_T_F32 || ty == IR_T_F64;
+};
+
+fn virtreg_use_xmm(ty: u16, width: u8) bool = {
+	if (width > 1) { return true; };
+	return ty == IR_T_F32 || ty == IR_T_F64;
+};
+
+fn virtreg_xmm_class(ty: u16, width: u8) u16 = {
+	if (width > 1) {
+		if (ty == IR_T_F32) { return REG_XMM_VEC4_F32; };
+		if (ty == IR_T_F64) { return REG_XMM_VEC2_F64; };
+		if (ty == IR_T_I32 || ty == IR_T_U32) { return REG_XMM_VEC4_I32; };
+		if (ty == IR_T_I64 || ty == IR_T_U64 || ty == IR_T_PTR) { return REG_XMM_VEC2_I64; };
+		return REG_XMM;
+	};
+	if (ty == IR_T_F32) { return REG_XMM_SCALAR_F32; };
+	if (ty == IR_T_F64) { return REG_XMM_SCALAR_F64; };
+	return REG_XMM;
+};
+
+fn virtreg_is_xmm_class(cls: u16) bool = {
+	if (cls == REG_XMM || cls == REG_XMM_SCALAR_F32 || cls == REG_XMM_SCALAR_F64) { return true; };
+	if (cls == REG_XMM_VEC4_I32 || cls == REG_XMM_VEC2_I64 || cls == REG_XMM_VEC4_F32 || cls == REG_XMM_VEC2_F64) { return true; };
+	return false;
+};
+
+fn virtreg_priority(ty: u16, width: u8) u8 = {
+	if (width > 1) { return 2; };
+	if (ty == IR_T_F32 || ty == IR_T_F64) { return 1; };
+	return 0;
+};
+
+fn virt_lane_count(ty: u16) u8 = {
+	if (ty == IR_T_F32 || ty == IR_T_I32 || ty == IR_T_U32) { return 4; };
+	if (ty == IR_T_F64 || ty == IR_T_I64 || ty == IR_T_U64 || ty == IR_T_PTR) { return 2; };
+	return 1;
+};
+
+fn virt_lane_util(width: u8, lanes: u8) i64 = {
+	if (lanes == 0 || width == 0) { return 0; };
+	let used = width;
+	if (used > lanes) { used = lanes; };
+	return (used: i64) * 3;
+};
+
+fn virt_op_width(op: ir_op) u8 = {
+	if (op.dst.width > 0) { return op.dst.width; };
+	if (op.a.width > 0) { return op.a.width; };
+	if (op.b.width > 0) { return op.b.width; };
+	return 1;
+};
+
+fn virt_op_lane_ty(op: ir_op) u16 = {
+	if (op.dst.width > 1) { return op.dst.ty; };
+	if (op.a.width > 1) { return op.a.ty; };
+	if (op.b.width > 1) { return op.b.ty; };
+	return op.dst.ty;
+};
+
+fn virt_op_cost(kind: u16, width: u8) u16 = {
+	let base: u16 = 1;
+	if (kind == IR_OP_CALL) { base = 8; }
+	else if (kind == IR_OP_LOAD || kind == IR_OP_STORE) { base = 3; }
+	else if (kind == IR_OP_BIN || kind == IR_OP_UN || kind == IR_OP_CMP || kind == IR_OP_CAST) { base = 2; }
+	else if (kind == IR_OP_RET) { base = 2; }
+	else if (kind == IR_OP_PACK || kind == IR_OP_UNPACK) { base = 1; };
+	if (width > 1) { return base * (width: u16); };
+	return base;
+};
+
+fn virt_lcg_next(state: *u32) u32 = {
+	let v = *state;
+	v = v * 1103515245u32 + 12345u32;
+	*state = v;
+	return v;
+};
+
+fn virt_score_list(ctx: *virt_ctx, list: *[*]u32, count: size) i64 = {
+	let score: i64 = 0;
+	let prev_kind: u16 = 0;
+	let i = 0z;
+	let max = count;
+	let window_max = VIRT_OP_WINDOW: size;
+	if (max > window_max) { max = window_max; };
+	for (i < max) {
+		let op_idx = list[i]: size;
+		let op = ctx.ops[op_idx];
+		score += op.cost: i64;
+		score += virt_lane_util(op.width, op.lanes);
+		if (op.kind == IR_OP_PACK || op.kind == IR_OP_UNPACK) { score -= 6; };
+		if (i > 0 && op.kind == prev_kind) { score += 1; };
+		prev_kind = op.kind;
+		i += 1;
+	};
+	return score;
+};
+
+fn virt_copy_u32(dst: *[*]u32, src: *[*]u32, count: size) void = {
+	let i = 0z;
+	for (i < count) {
+		dst[i] = src[i];
+		i += 1;
+	};
+};
+
+fn virt_dep_ready(ctx: *virt_ctx, op_idx: u32, win_start: u32, win_count: u32, scheduled: *[*]u8) bool = {
+	let op = ctx.ops[op_idx: size];
+	let dep0 = op.dep0;
+	if (dep0 != VIRT_DEP_NONE && dep0 >= win_start && dep0 < win_start + win_count) {
+		let rel0 = (dep0 - win_start): size;
+		if (scheduled[rel0] == 0) { return false; };
+	};
+	let dep1 = op.dep1;
+	if (dep1 != VIRT_DEP_NONE && dep1 >= win_start && dep1 < win_start + win_count) {
+		let rel1 = (dep1 - win_start): size;
+		if (scheduled[rel1] == 0) { return false; };
+	};
+	return true;
+};
+
+fn virt_build_order_random(ctx: *virt_ctx, op_start_idx: size, count: size, out: *[*]u32, seed: *u32) bool = {
+	let scheduled: [64]u8 = [0...];
+	let i = 0z;
+	for (i < count) { scheduled[i] = 0; i += 1; };
+	let pos = 0z;
+	let win_start = op_start_idx: u32;
+	let win_count = count: u32;
+	for (pos < count) {
+		let ready: [64]u32 = [0...];
+		let ready_count: size = 0;
+		let j = 0z;
+		for (j < count) {
+			if (scheduled[j] == 0) {
+				let op_idx = (op_start_idx + j): u32;
+				if (virt_dep_ready(ctx, op_idx, win_start, win_count, (&scheduled[0]): *[*]u8)) {
+					ready[ready_count] = op_idx;
+					ready_count += 1;
+				};
+			};
+			j += 1;
+		};
+		if (ready_count == 0) { return false; };
+		let pick = virt_lcg_next(seed) % (ready_count: u32);
+		let sel = ready[pick: size];
+		out[pos] = sel;
+		let rel = (sel - win_start): size;
+		scheduled[rel] = 1;
+		pos += 1;
+	};
+	return true;
+};
+
+fn virt_schedule_window(ctx: *virt_ctx, op_start_idx: size, op_count: size, order_start: size, seed_in: u32) i64 = {
+	let count = op_count;
+	let window_max = VIRT_OP_WINDOW: size;
+	if (count > window_max) { count = window_max; };
+	let best: [64]u32 = [0...];
+	let cand: [64]u32 = [0...];
+	let seed: u32 = seed_in;
+	let best_score: i64 = -9223372036854775807;
+	let iter = 0z;
+	let max_iters = VIRT_MC_ITERS: size;
+	if (max_iters == 0) { max_iters = 1; };
+	for (iter < max_iters) {
+		let ok = virt_build_order_random(ctx, op_start_idx, count, (&cand[0]): *[*]u32, &seed);
+		if (!ok) {
+			let j = 0z;
+			for (j < count) {
+				cand[j] = (op_start_idx + j): u32;
+				j += 1;
+			};
+		};
+		let cand_score = virt_score_list(ctx, (&cand[0]): *[*]u32, count);
+		if (cand_score > best_score) {
+			virt_copy_u32((&best[0]): *[*]u32, (&cand[0]): *[*]u32, count);
+			best_score = cand_score;
+		};
+		iter += 1;
+		seed = virt_lcg_next(&seed);
+	};
+	let w = 0z;
+	for (w < count) {
+		ctx.order[order_start + w] = best[w];
+		w += 1;
+	};
+	ctx.active_count = count;
+	let q_active = 0z;
+	for (q_active < count) {
+		ctx.active_queue[q_active] = best[q_active];
+		q_active += 1;
+	};
+	return best_score;
+};
+
+fn virt_schedule_block(ctx: *virt_ctx, op_start: size, op_count: size, order_cursor: *size, window_cursor: *size, seed_in: u32) i64 = {
+	let total_score: i64 = 0;
+	let remaining = op_count;
+	let op_off = 0z;
+	let seed: u32 = seed_in;
+	let window_max = VIRT_OP_WINDOW: size;
+	for (op_off < remaining) {
+		let win_count = remaining - op_off;
+		if (win_count > window_max) { win_count = window_max; };
+		let order_start = *order_cursor;
+		*order_cursor += win_count;
+		let score = virt_schedule_window(ctx, op_start + op_off, win_count, order_start, seed);
+		ctx.windows[*window_cursor] = virt_window { op_start = order_start, op_count = win_count, score = score };
+		*window_cursor += 1;
+		total_score += score;
+		op_off += win_count;
+		seed = virt_lcg_next(&seed);
+	};
+	return total_score;
+};
+
+fn virt_build_op_queue(ctx: *ir_ctx, out: *virt_ctx) void = {
+	out.op_count = 0;
+	out.order_count = 0;
+	out.window_count = 0;
+	let i = 0z;
+	for (i < ctx.func_count) {
+		let f: *ir_func = &ctx.funcs[i];
+		let func_op_start = out.op_count;
+		let last_def: [8192]u32 = [VIRT_DEP_NONE...];
+		let v = 0u32;
+		for (v < f.next_vreg) {
+			let id: u32 = f.vreg_base + v;
+			last_def[id: size] = VIRT_DEP_NONE;
+			v += 1u32;
+		};
+		let j = 0z;
+		for (j < f.ops_len) {
+			let op_idx = f.ops_start + j;
+			let op = ctx.ops[op_idx];
+			let dep0 = VIRT_DEP_NONE;
+			let dep1 = VIRT_DEP_NONE;
+			if (op.a.ty != IR_T_INVALID) {
+				let prev = last_def[op.a.id: size];
+				if (prev != VIRT_DEP_NONE) { dep0 = prev; };
+			};
+			if (op.b.ty != IR_T_INVALID) {
+				let prevb = last_def[op.b.id: size];
+				if (prevb != VIRT_DEP_NONE) { dep1 = prevb; };
+			};
+			let flags: u16 = 0;
+			if (op.kind == IR_OP_LABEL || op.kind == IR_OP_JUMP || op.kind == IR_OP_BRANCH
+				|| op.kind == IR_OP_CALL || op.kind == IR_OP_RET
+				|| op.kind == IR_OP_LOAD || op.kind == IR_OP_STORE
+				|| op.kind == IR_OP_PACK || op.kind == IR_OP_UNPACK) {
+				flags |= VIRT_FLAG_BARRIER;
+			};
+			if (op.dst.ty != IR_T_INVALID && last_def[op.dst.id: size] != VIRT_DEP_NONE) {
+				// Prevent reordering across redefinitions (non-SSA hazard).
+				flags |= VIRT_FLAG_BARRIER;
+			};
+			let width = virt_op_width(op);
+			let lane_ty = virt_op_lane_ty(op);
+			let lanes: u8 = 1;
+			if (width > 1) { lanes = virt_lane_count(lane_ty); };
+			out.ops[out.op_count] = virt_op {
+				op_index = op_idx: u32,
+				kind = op.kind,
+				aux = op.aux,
+				width = width,
+				lanes = lanes,
+				cost = virt_op_cost(op.kind, width),
+				flags = flags,
+				dep0 = dep0,
+				dep1 = dep1,
+			};
+			let cur_op = out.op_count: u32;
+			out.op_count += 1;
+			if (op.dst.ty != IR_T_INVALID) {
+				last_def[op.dst.id: size] = cur_op;
+			};
+			j += 1;
+		};
+		let func_order_start = out.order_count;
+		let func_window_start = out.window_count;
+		let best_score_total: i64 = 0;
+		let op_end = func_op_start + f.ops_len;
+		let op_cursor = func_op_start;
+		let block_start = op_cursor;
+		let seed: u32 = (i: u32 + 1u32) * 1664525u32 + 1013904223u32;
+		for (op_cursor < op_end) {
+			let op_entry = out.ops[op_cursor];
+			let is_barrier = (op_entry.flags & VIRT_FLAG_BARRIER) != 0;
+			if (is_barrier) {
+				if (op_cursor > block_start) {
+					best_score_total += virt_schedule_block(out, block_start, op_cursor - block_start,
+						&out.order_count, &out.window_count, seed);
+					seed = virt_lcg_next(&seed);
+				};
+				best_score_total += virt_schedule_block(out, op_cursor, 1, &out.order_count, &out.window_count, seed);
+				seed = virt_lcg_next(&seed);
+				op_cursor += 1;
+				block_start = op_cursor;
+				continue;
+			};
+			op_cursor += 1;
+		};
+		if (block_start < op_end) {
+			best_score_total += virt_schedule_block(out, block_start, op_end - block_start,
+				&out.order_count, &out.window_count, seed);
+		};
+		out.func_sched[i] = virt_func_sched {
+			op_start = func_order_start,
+			op_count = f.ops_len,
+			window_start = func_window_start,
+			window_count = out.window_count - func_window_start,
+			best_score = best_score_total,
+			alloc_start = 0,
+			alloc_count = 0,
+		};
+		i += 1;
+	};
+};
+
+fn virt_mark_seen(first: *[*]u32, last: *[*]u32, v: ir_vreg, pos: u32) void = {
+	if (v.ty == IR_T_INVALID) { return; };
+	let id = v.id: size;
+	if (first[id] == VIRT_DEP_NONE) { first[id] = pos; };
+	if (last[id] < pos) { last[id] = pos; };
+};
+
+fn virtreg_alloc_linear_scan(ctx: *ir_ctx, out: *virt_ctx, f: *ir_func, order_start: size, order_count: size) void = {
+	let first_seen: [8192]u32 = [VIRT_DEP_NONE...];
+	let last_seen: [8192]u32 = [0...];
+	let vreg_pri: [8192]u8 = [0...];
+	let alloc_class: [8192]u16 = [REG_SPILL...];
+	let alloc_index: [8192]u8 = [0...];
+	let v = 0u32;
+	for (v < f.next_vreg) {
+		let vreg_id0 = f.vreg_base + v;
+		let ty0 = ctx.vreg_types[vreg_id0: size];
+		let width0 = ctx.vreg_widths[vreg_id0: size];
+		vreg_pri[vreg_id0: size] = virtreg_priority(ty0, width0);
+		v += 1u32;
+	};
+	let pos = 0z;
+	for (pos < order_count) {
+		let op_idx = out.order[order_start + pos];
+		let op = ctx.ops[op_idx: size];
+		virt_mark_seen((&first_seen[0]): *[*]u32, (&last_seen[0]): *[*]u32, op.dst, pos: u32);
+		virt_mark_seen((&first_seen[0]): *[*]u32, (&last_seen[0]): *[*]u32, op.a, pos: u32);
+		virt_mark_seen((&first_seen[0]): *[*]u32, (&last_seen[0]): *[*]u32, op.b, pos: u32);
+		let k = 0z;
+		for (k < op.arg_count) {
+			let arg = ctx.args[op.arg_start + k];
+			virt_mark_seen((&first_seen[0]): *[*]u32, (&last_seen[0]): *[*]u32, arg, pos: u32);
+			k += 1;
+		};
+		pos += 1;
+	};
+	let pi = 0z;
+	for (pi < f.params_len) {
+		let pv = ctx.params[f.params_start + pi];
+		if (first_seen[pv.id: size] == VIRT_DEP_NONE) {
+			first_seen[pv.id: size] = 0u32;
+			last_seen[pv.id: size] = 0u32;
+		} else {
+			first_seen[pv.id: size] = 0u32;
+		};
+		pi += 1;
+	};
+	let order_ids: [8192]u32 = [0...];
+	let order_len: size = 0;
+	let v2 = 0u32;
+	for (v2 < f.next_vreg) {
+		let vreg_id1 = f.vreg_base + v2;
+		if (first_seen[vreg_id1: size] != VIRT_DEP_NONE) {
+			order_ids[order_len] = vreg_id1;
+			order_len += 1;
+		};
+		v2 += 1u32;
+	};
+	let sort_i = 1z;
+	for (sort_i < order_len) {
+		let key = order_ids[sort_i];
+		let key_first = first_seen[key: size];
+		let j = sort_i;
+		for (j > 0) {
+			if (!(first_seen[order_ids[j - 1]: size] > key_first)) { break; };
+			order_ids[j] = order_ids[j - 1];
+			j -= 1;
+		};
+		order_ids[j] = key;
+		sort_i += 1;
+	};
+	let gpr_pool: [9]u8 = [4, 5, 8, 9, 1, 12, 13, 14, 15];
+	let gpr_free: [9]u8 = [4, 5, 8, 9, 1, 12, 13, 14, 15];
+	let gpr_free_count: size = len(gpr_free);
+	let xmm_free: [15]u8 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+	let xmm_free_count: size = len(xmm_free);
+	let active_gpr: [8192]u32 = [0...];
+	let active_gpr_count: size = 0;
+	let active_xmm: [8192]u32 = [0...];
+	let active_xmm_count: size = 0;
+	let oi = 0z;
+	for (oi < order_len) {
+		let vreg_id2 = order_ids[oi];
+		let cur_start = first_seen[vreg_id2: size];
+		let gi = 0z;
+		for (gi < active_gpr_count) {
+			let gpr_active_id = active_gpr[gi];
+			if (last_seen[gpr_active_id: size] < cur_start) {
+				let gpr_active_cls = alloc_class[gpr_active_id: size];
+				if (gpr_active_cls != REG_SPILL) {
+					gpr_free[gpr_free_count] = alloc_index[gpr_active_id: size];
+					gpr_free_count += 1;
+				};
+				active_gpr_count -= 1;
+				active_gpr[gi] = active_gpr[active_gpr_count];
+				continue;
+			};
+			gi += 1;
+		};
+		let xi = 0z;
+		for (xi < active_xmm_count) {
+			let xmm_active_id = active_xmm[xi];
+			if (last_seen[xmm_active_id: size] < cur_start) {
+				let xmm_active_cls = alloc_class[xmm_active_id: size];
+				if (xmm_active_cls != REG_SPILL) {
+					xmm_free[xmm_free_count] = alloc_index[xmm_active_id: size];
+					xmm_free_count += 1;
+				};
+				active_xmm_count -= 1;
+				active_xmm[xi] = active_xmm[active_xmm_count];
+				continue;
+			};
+			xi += 1;
+		};
+		let ty1 = ctx.vreg_types[vreg_id2: size];
+		let width1 = ctx.vreg_widths[vreg_id2: size];
+		if (virtreg_use_xmm(ty1, width1)) {
+			if (xmm_free_count > 0) {
+				xmm_free_count -= 1;
+				alloc_class[vreg_id2: size] = virtreg_xmm_class(ty1, width1);
+				alloc_index[vreg_id2: size] = xmm_free[xmm_free_count];
+				active_xmm[active_xmm_count] = vreg_id2;
+				active_xmm_count += 1;
+			} else {
+				let cand_idx = 0z;
+				let cand_id: u32 = 0;
+				let cand_pri: u8 = 255;
+				let cand_last: u32 = 0;
+				let found = false;
+				let cx = 0z;
+				for (cx < active_xmm_count) {
+					let cand_active_id = active_xmm[cx];
+					let cand_pri_val = vreg_pri[cand_active_id: size];
+					let cand_last_val = last_seen[cand_active_id: size];
+					if (!found || cand_pri_val < cand_pri || (cand_pri_val == cand_pri && cand_last_val > cand_last)) {
+						found = true;
+						cand_idx = cx;
+						cand_id = cand_active_id;
+						cand_pri = cand_pri_val;
+						cand_last = cand_last_val;
+					};
+					cx += 1;
+				};
+				let cur_pri = vreg_pri[vreg_id2: size];
+				let cur_last = last_seen[vreg_id2: size];
+				let spill_current = true;
+				if (found) {
+					if (cand_pri < cur_pri) { spill_current = false; }
+					else if (cand_pri == cur_pri && cand_last > cur_last) { spill_current = false; };
+				};
+				if (!spill_current && found) {
+					let reuse_idx_xmm = alloc_index[cand_id: size];
+					alloc_class[cand_id: size] = REG_SPILL;
+					alloc_index[cand_id: size] = 0;
+					active_xmm[cand_idx] = active_xmm[active_xmm_count - 1];
+					active_xmm_count -= 1;
+					alloc_class[vreg_id2: size] = virtreg_xmm_class(ty1, width1);
+					alloc_index[vreg_id2: size] = reuse_idx_xmm;
+					active_xmm[active_xmm_count] = vreg_id2;
+					active_xmm_count += 1;
+				} else {
+					alloc_class[vreg_id2: size] = REG_SPILL;
+					alloc_index[vreg_id2: size] = 0;
+				};
+			};
+		} else {
+			if (gpr_free_count > 0) {
+				gpr_free_count -= 1;
+				alloc_class[vreg_id2: size] = REG_GPR64;
+				alloc_index[vreg_id2: size] = gpr_free[gpr_free_count];
+				active_gpr[active_gpr_count] = vreg_id2;
+				active_gpr_count += 1;
+			} else {
+				let cand_idx_g = 0z;
+				let cand_id_g: u32 = 0;
+				let cand_last_g: u32 = 0;
+				let found_g = false;
+				let cg = 0z;
+				for (cg < active_gpr_count) {
+					let cand_active_id_g = active_gpr[cg];
+					let cand_last_val_g = last_seen[cand_active_id_g: size];
+					if (!found_g || cand_last_val_g > cand_last_g) {
+						found_g = true;
+						cand_idx_g = cg;
+						cand_id_g = cand_active_id_g;
+						cand_last_g = cand_last_val_g;
+					};
+					cg += 1;
+				};
+				let cur_last_g = last_seen[vreg_id2: size];
+				if (found_g && cand_last_g > cur_last_g) {
+					let reuse_idx_gpr = alloc_index[cand_id_g: size];
+					alloc_class[cand_id_g: size] = REG_SPILL;
+					alloc_index[cand_id_g: size] = 0;
+					active_gpr[cand_idx_g] = active_gpr[active_gpr_count - 1];
+					active_gpr_count -= 1;
+					alloc_class[vreg_id2: size] = REG_GPR64;
+					alloc_index[vreg_id2: size] = reuse_idx_gpr;
+					active_gpr[active_gpr_count] = vreg_id2;
+					active_gpr_count += 1;
+				} else {
+					alloc_class[vreg_id2: size] = REG_SPILL;
+					alloc_index[vreg_id2: size] = 0;
+				};
+			};
+		};
+		oi += 1;
+	};
+	let v3 = 0u32;
+	for (v3 < f.next_vreg) {
+		let vreg_id3 = f.vreg_base + v3;
+		if (first_seen[vreg_id3: size] != VIRT_DEP_NONE) {
+			let phys = phys_reg { class = alloc_class[vreg_id3: size], index = alloc_index[vreg_id3: size], lane = 0 };
+			virtreg_add(out, vreg_id3, phys);
+		};
+		v3 += 1u32;
+	};
+};
+
+fn virtreg_pack(ctx: *ir_ctx, out: *virt_ctx) void = {
+	virtreg_reset(out);
+	virt_build_op_queue(ctx, out);
+	for (let i = 0z; i < ctx.func_count; i += 1) {
+		let f: *ir_func = &ctx.funcs[i];
+		let alloc_start = out.count;
+		let sched = out.func_sched[i];
+		virtreg_alloc_linear_scan(ctx, out, f, sched.op_start, sched.op_count);
+		out.func_sched[i].alloc_start = alloc_start;
+		out.func_sched[i].alloc_count = out.count - alloc_start;
+	};
+};
