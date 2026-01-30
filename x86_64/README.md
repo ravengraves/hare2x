@@ -50,28 +50,6 @@ Phase 2 tasks:
 - Arrays + loops (fixed-size array literals, indexing, and stores).
 - Validate with: `test/x86_64/200_structs_basic.pka`, `test/x86_64/210_arrays_loop.pka`, plus Phase 1 tests.
 
-## Phase 3 status
-Phase 3 tests are currently passing:
-`test/x86_64/300_array_fill_basic.pka`,
-`test/x86_64/310_runtime_calls.pka`,
-`test/x86_64/311_symbol_interop.pka`,
-`test/x86_64/312_rt_write_output.pka`,
-`test/x86_64/320_slices_basic.pka`,
-`test/x86_64/330_strings_basic.pka`,
-`test/x86_64/331_string_escapes.pka`,
-`test/x86_64/340_match_nullable_expr.pka`.
-
-Remaining Phase 3 tasks: none known beyond keeping these tests green.
-
-## Remaining work plan (to pass full suite)
-Focus on enabling the Pika tests in the bring-up order above. Each item lists the needed backend work and the Pika tests it unlocks.
-
-Phase 3: Pointers, slices, strings, runtime interop
-- Slice types: layout, len/cap ops, slice literals, slicing, and bounds checks (`slices`, `unbounded_slice`).
-- String support: `str` literals, `strings` module interop, and UTF-8 helpers (`strings`, `string_features`, `string_escapes`, `str_firstclass`).
-- Runtime interop: correct ABI for `@symbol` calls and RT functions (`interop`, `runtime`).
-- Array fill semantics: `[x...]`/`[a,b,c...]` lowering (`array_fill`).
-
 Phase 4: Tagged unions + nullable + globals/static
 - Full tagged union lowering + `match` on tagged unions (`tagged`, `void_alias_tagged`).
 - Nullable pointers: null checks, match narrowing, and codegen paths (`nullable`, `autoderef`, `pointer_safety_comprehensive`).
@@ -90,6 +68,21 @@ Phase 5: Exhaustiveness + fail tests + runtime fail tests
 Phase 6: Self-hosting ladder
 - Stabilize codegen for gen1/gen2/gen3 output parity and fixed-point tests.
   (`test/test_pika2c.sh` self-hosting section).
+
+# x86_64 AT&T ASM Generation Stage Breakdown
+Notes regarding the planned implementation:
+pkparse.pka -> pkgen_ir.pka -> pkgen_virtreg.pka -> pkgen_x86_64.pka
+
+1. pkgen_ir.pka - a typed IR representation detailing individual operations
+2. pkgen_virtreg.pka - packing operations efficiently into minimal virtual vector and regular registers based on type (using fixed-iteration greedy + brute-force + monte carlo packing); this will be very basic at first, just trying to minimize the number of registers used for operations.
+3. pkgen_x86_64.pka - taking our virtual register allocations and actually distributing them across the available registers, handling things like register movement, 
+
+
+updated pipeline:
+
+Integrated a DFG‑window linear‑scan allocator (with param live‑ins) into virtreg_pack, fixed x86_64
+call arg shuffles, and updated x86_64/README.md for the test/x86_64 move. This resolves the
+600_defaults_casts failure and keeps the x86_64 matmul tests green with vector ops emitted.
 
 Manual test loop (Phase 1/2):
 ```sh

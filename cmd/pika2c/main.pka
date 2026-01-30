@@ -245,6 +245,14 @@ export fn main() void = {
 		g.prefix_src = src;  // prefix_src points to original srcbuf
 	};
 	if (use_x86_64) {
+		// Run the C-backend pass to reuse its semantic checks, then reset state
+		// before emitting x86_64 asm.
+		pkgen_generate_gnuc11(&g);
+		gen_init(&g, &t);
+		if (prefix.length > 0) {
+			g.prefix = prefix;
+			g.prefix_src = src;
+		};
 		pkgen_generate_x86_64(&g);
 	} else if (use_sycl) {
 		pkgen_generate_sycl(&g);
