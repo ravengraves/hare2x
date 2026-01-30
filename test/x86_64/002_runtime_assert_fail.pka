@@ -1,0 +1,5 @@
+// runtime_assert_fail.pka - ensure assert triggers abort in x86_64 backend
+
+export fn main() void = {
+	assert(false);
+};

@@ -1,0 +1,14 @@
+// float_ops.pka - phase1 float/XMM smoke test
+
+export fn main() void = {
+	let a: f32 = 1.5f32;
+	let b: f32 = 2.25f32;
+	let c: f32 = a + b;
+	let d: f32 = c * 2.0f32;
+	assert(d > 7.0f32);
+
+	let x: f64 = 3.0f64;
+	let y: f64 = 0.5f64;
+	let z: f64 = x / y;
+	assert(z == 6.0f64);
+};

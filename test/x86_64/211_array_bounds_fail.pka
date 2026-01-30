@@ -1,0 +1,7 @@
+// array_bounds_fail.pka - bounds check abort
+
+export fn main() void = {
+	let arr: [4]i32 = [1, 2, 3, 4];
+	let idx: i32 = 4;
+	let _v = arr[idx];
+};

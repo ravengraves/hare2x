@@ -1,0 +1,37 @@
+// control_flow.pka - phase1 control-flow smoke test
+
+export fn main() void = {
+	let v: i32 = 0;
+	if (1 < 2) { v = 3; } else { v = 4; };
+	assert(v == 3);
+
+	let sum: i32 = 0;
+	for (let i0: i32 = 0; i0 < 5; i0 += 1) {
+		sum += i0;
+	};
+	assert(sum == 10);
+
+	let w: i32 = 0;
+	let n: i32 = 5;
+	for (n > 0) {
+		w += n;
+		n -= 1;
+	};
+	assert(w == 15);
+
+	let even_sum: i32 = 0;
+	for (let i1: i32 = 0; i1 < 10; i1 += 1) {
+		if ((i1 & 1) != 0) { continue; };
+		even_sum += i1;
+		if (even_sum > 10) { break; };
+	};
+	assert(even_sum == 12);
+
+	let sel: i32 = 0;
+	switch (3) {
+	case 0 => sel = 10;
+	case 2, 3 => sel = 20;
+	case => sel = 30;
+	};
+	assert(sel == 20);
+};

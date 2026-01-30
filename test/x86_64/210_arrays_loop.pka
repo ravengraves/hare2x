@@ -1,0 +1,24 @@
+// arrays_loop.pka - array indexing + loops (phase 2)
+
+export fn main() void = {
+	let arr: [8]i32 = [1, 2, 3, 4, 5, 6, 7, 8];
+	let sum: i32 = 0;
+	for (let i0: i32 = 0; i0 < 8; i0 += 1) {
+		sum += arr[i0];
+	};
+	assert(sum == 36);
+
+	for (let i1: i32 = 0; i1 < 8; i1 += 1) {
+		arr[i1] = arr[i1] * 2;
+	};
+	assert(arr[0] == 2);
+	assert(arr[7] == 16);
+
+	let acc: i32 = 0;
+	for (let i2: i32 = 0; i2 < 8; i2 += 1) {
+		acc += arr[i2];
+		arr[i2] = acc;
+	};
+	assert(arr[3] == 20);
+	assert(arr[7] == 72);
+};

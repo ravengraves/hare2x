@@ -1,0 +1,8 @@
+// main_arith.pka - phase1 arithmetic smoke test
+
+export fn main() void = {
+	let a: i32 = 10;
+	let b: i32 = 32;
+	let c: i32 = a + b * 2;
+	assert(c == 74);
+};

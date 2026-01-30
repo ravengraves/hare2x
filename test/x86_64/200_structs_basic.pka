@@ -1,0 +1,27 @@
+// structs_basic.pka - enum-free struct coverage for x86_64 bring-up
+
+export type point = struct {
+	x: i32,
+	y: i32,
+};
+
+type packed_point = struct {
+	x: u8,
+	y: u16,
+};
+
+export fn increment(p: *i32) void = {
+	*p = *p + 1;
+};
+
+export fn main() void = {
+	let p = point { x = 10, y = 20 };
+	let val: i32 = 41;
+	increment(&val);
+	let pp = packed_point { x = 1, y = 2 };
+	assert(p.x == 10);
+	assert(p.y == 20);
+	assert(val == 42);
+	assert(pp.x == 1);
+	assert(pp.y == 2);
+};
