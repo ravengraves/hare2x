@@ -1,0 +1,19 @@
+use rt;
+
+fn echo_once() void = {
+	let buf: [64]u8 = [0...];
+	let n = rt::read(0, &buf[0]: *opaque, len(buf));
+	if (n < 0) {
+		abort();
+	};
+	if (n == 0) {
+		return;
+	};
+	let count: size = n: size;
+	rt::write(1, &buf[0]: *opaque, count);
+};
+
+export fn main() void = {
+	echo_once();
+};
+

@@ -1,0 +1,20 @@
+def MAX_TICKS: i32 = 4;
+const START_AT: i32 = 10;
+let global_ticks: i32 = 0;
+
+fn tick() i32 = {
+	static let local_ticks: i32 = 0;
+	local_ticks += 1;
+	global_ticks += 1;
+	return START_AT + local_ticks + global_ticks;
+};
+
+export fn main() void = {
+	let sum: i32 = 0;
+	for (let i: i32 = 0; i < MAX_TICKS; i += 1) {
+		sum += tick();
+	};
+	assert(global_ticks == MAX_TICKS);
+	assert(sum == 60);
+};
+

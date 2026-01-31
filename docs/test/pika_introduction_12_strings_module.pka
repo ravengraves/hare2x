@@ -1,0 +1,16 @@
+use strings;
+
+fn first_byte(s: str) u8 = {
+	let bytes: []u8 = strings::toutf8(s);
+	return bytes[0];
+};
+
+export fn main() void = {
+	let a: str = "Hello, " "world!";
+	let b: str = `Hello, world!`;
+
+	assert(a == b);
+	assert(len(a) == 13);
+	assert(first_byte(a) == 'H');
+};
+

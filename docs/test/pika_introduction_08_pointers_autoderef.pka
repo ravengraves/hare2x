@@ -1,0 +1,18 @@
+type point = struct {
+	x: i32,
+	y: i32,
+};
+
+fn manhattan(p: *point) i32 = {
+	return p.x + p.y;
+};
+
+export fn main() void = {
+	let pt = point { x = 3, y = 4 };
+	assert(manhattan(&pt) == 7);
+
+	let nums: [3]i32 = [10, 20, 30];
+	let pnums: *[3]i32 = &nums;
+	assert(pnums[1] == 20);
+};
+

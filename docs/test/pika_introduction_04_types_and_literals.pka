@@ -1,0 +1,26 @@
+type point = struct {
+	x: i32,
+	y: i32,
+};
+
+export fn main() void = {
+	let answer: i32 = 42;
+	let byte: u8 = 10u8;
+	let count: size = 0z;
+	let piish: f32 = 3: f32;
+	let newline: u8 = '\n';
+	let good = true;
+
+	let p = point { x = answer, y = 1 };
+	let name: [_]u8 = ['P', 'i', 'k', 'a'];
+
+	assert(len(name) == 4);
+	assert(size(i32) == 4);
+	assert(byte == 10);
+	assert(count == 0);
+	assert(piish: i32 == 3);
+	assert(newline == 10u8);
+	assert(p.x == 42);
+	assert(good == true);
+};
+

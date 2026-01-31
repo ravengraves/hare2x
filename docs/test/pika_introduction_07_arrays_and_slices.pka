@@ -1,0 +1,19 @@
+fn sum(items: []i32) i32 = {
+	let total: i32 = 0;
+	for (let i = 0z; i < len(items); i += 1) {
+		total += items[i];
+	};
+	return total;
+};
+
+export fn main() void = {
+	let data: [6]i32 = [10, 20, 30, 40, 50, 60];
+	let middle = data[2..5]; // [30, 40, 50]
+	let tail = data[3..];    // [40, 50, 60]
+
+	assert(len(middle) == 3);
+	assert(middle[0] == 30);
+	assert(sum(middle) == 120);
+	assert(sum(tail) == 150);
+};
+

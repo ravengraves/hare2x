@@ -1,0 +1,21 @@
+fn sum_even_under(limit: i32) i32 = {
+	let total: i32 = 0;
+	let i: i32 = 0;
+	for (true) {
+		if (i >= limit) {
+			break;
+		};
+		if ((i & 1) != 0) {
+			i += 1;
+			continue;
+		};
+		total += i;
+		i += 1;
+	};
+	return total;
+};
+
+export fn main() void = {
+	assert(sum_even_under(6) == 0 + 2 + 4);
+};
+

@@ -1,0 +1,16 @@
+use strings;
+
+// Unbounded pointers are useful for C-style interop, but they are not
+// bounds-checked. Slicing them gives you a checked []u8 view, but the caller
+// must still ensure start/end are valid for the underlying buffer.
+fn prefix(raw: *[*]u8, start: size, end: size) str = {
+	let view: []u8 = raw[start..end];
+	return strings::fromutf8_unsafe(view);
+};
+
+export fn main() void = {
+	let buf: [5]u8 = ['P', 'I', 'K', 'A', '!'];
+	let raw: *[*]u8 = &buf: *[*]u8;
+	assert(prefix(raw, 0, 4) == "PIKA");
+};
+

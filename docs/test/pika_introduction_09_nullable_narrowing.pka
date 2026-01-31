@@ -1,0 +1,15 @@
+fn deref_or(p: nullable *i32, fallback: i32) i32 = {
+	return match (p) {
+	case let q: *i32 =>
+		yield *q;
+	case null =>
+		yield fallback;
+	};
+};
+
+export fn main() void = {
+	let x: i32 = 42;
+	assert(deref_or(&x, 0) == 42);
+	assert(deref_or(null, 0) == 0);
+};
+

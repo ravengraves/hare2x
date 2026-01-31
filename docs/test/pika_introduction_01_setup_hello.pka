@@ -1,0 +1,8 @@
+// hello.pka
+use rt;
+use strings;
+
+export fn main() void = {
+	let msg = "Hello, Pika! 🐇\n";
+	rt::write(1, strings::toutf8(msg): *[*]u8, len(msg));
+};

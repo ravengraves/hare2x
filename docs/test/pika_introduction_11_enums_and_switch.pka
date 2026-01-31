@@ -1,0 +1,17 @@
+type mood = enum {
+	SUN,
+	RAIN,
+};
+
+fn mood_score(m: mood) i32 = {
+	switch (m) {
+	case mood::SUN => return 10;
+	case mood::RAIN => return 2;
+	};
+};
+
+export fn main() void = {
+	assert(mood_score(mood::SUN) == 10);
+	assert(mood_score(mood::RAIN) == 2);
+};
+

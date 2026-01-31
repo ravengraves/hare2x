@@ -1,0 +1,17 @@
+type op = enum {
+	ADD,
+	SUB,
+};
+
+fn apply(kind: op, a: i32, b: i32) i32 = {
+	switch (kind) {
+	case op::ADD => return a + b;
+	case op::SUB => return a - b;
+	};
+};
+
+export fn main() void = {
+	assert(apply(op::ADD, 10, 20) == 30);
+	assert(apply(op::SUB, 10, 20) == -10);
+};
+
