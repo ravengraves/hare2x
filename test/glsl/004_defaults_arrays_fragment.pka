@@ -1,0 +1,13 @@
+// Defaults + arrays fragment shader
+#[varying] let v_color = gl::vec3 { ... };
+#[builtin] let gl_FragColor = gl::vec4 { ... };
+
+export fn main() void = {
+	let pulse = 0.6 + 0.4 * v_color.y;
+	gl_FragColor = gl::vec4 {
+		x = v_color.x * pulse,
+		y = v_color.y * pulse,
+		z = v_color.z * pulse,
+		w = 1.0,
+	};
+};

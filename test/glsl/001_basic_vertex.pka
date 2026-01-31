@@ -1,0 +1,12 @@
+// Basic vertex shader: position -> gl_Position
+#[attribute] let position = gl::vec2 { ... };
+#[builtin] let gl_Position = gl::vec4 { ... };
+
+export fn main() void = {
+	gl_Position = gl::vec4 {
+		x = position.x,
+		y = position.y,
+		z = 0.0,
+		w = 1.0,
+	};
+};

@@ -1,0 +1,308 @@
+// gl.pka - GLSL builtin types and function stubs for Pika GLSL target
+// Note: function stubs are for documentation/type hints only.
+// Vector/matrix overloads exist in GLSL even if not listed here.
+
+// Vector types (struct layout for Pika field access)
+type gl_vec2 = struct { x: f32, y: f32 };
+type gl_vec3 = struct { x: f32, y: f32, z: f32 };
+type gl_vec4 = struct { x: f32, y: f32, z: f32, w: f32 };
+
+type gl_ivec2 = struct { x: i32, y: i32 };
+type gl_ivec3 = struct { x: i32, y: i32, z: i32 };
+type gl_ivec4 = struct { x: i32, y: i32, z: i32, w: i32 };
+
+type gl_bvec2 = struct { x: bool, y: bool };
+type gl_bvec3 = struct { x: bool, y: bool, z: bool };
+type gl_bvec4 = struct { x: bool, y: bool, z: bool, w: bool };
+
+// Matrix types (column-major layout)
+type gl_mat2 = struct { col0: gl_vec2, col1: gl_vec2 };
+type gl_mat3 = struct { col0: gl_vec3, col1: gl_vec3, col2: gl_vec3 };
+type gl_mat4 = struct { col0: gl_vec4, col1: gl_vec4, col2: gl_vec4, col3: gl_vec4 };
+
+// Sampler types
+type gl_sampler2D = struct { _opaque: i32 };
+type gl_samplerCube = struct { _opaque: i32 };
+
+// GLSL builtins (use via gl::name, compiled to GLSL name)
+fn gl_radians(degrees: f32) f32;
+fn gl_degrees(radians: f32) f32;
+fn gl_sin(angle: f32) f32;
+fn gl_cos(angle: f32) f32;
+fn gl_tan(angle: f32) f32;
+fn gl_asin(x: f32) f32;
+fn gl_acos(x: f32) f32;
+fn gl_atan(y_over_x: f32) f32;
+fn gl_atan2(y: f32, x: f32) f32;
+
+fn gl_pow(x: f32, y: f32) f32;
+fn gl_exp(x: f32) f32;
+fn gl_log(x: f32) f32;
+fn gl_exp2(x: f32) f32;
+fn gl_log2(x: f32) f32;
+fn gl_sqrt(x: f32) f32;
+fn gl_inversesqrt(x: f32) f32;
+
+fn gl_abs(x: f32) f32;
+fn gl_sign(x: f32) f32;
+fn gl_floor(x: f32) f32;
+fn gl_ceil(x: f32) f32;
+fn gl_fract(x: f32) f32;
+fn gl_mod(x: f32, y: f32) f32;
+fn gl_min(x: f32, y: f32) f32;
+fn gl_max(x: f32, y: f32) f32;
+fn gl_clamp(x: f32, min_val: f32, max_val: f32) f32;
+fn gl_mix(x: f32, y: f32, a: f32) f32;
+fn gl_step(edge: f32, x: f32) f32;
+fn gl_smoothstep(edge0: f32, edge1: f32, x: f32) f32;
+
+fn gl_length(v: gl_vec3) f32;
+fn gl_distance(p0: gl_vec3, p1: gl_vec3) f32;
+fn gl_dot(v1: gl_vec3, v2: gl_vec3) f32;
+fn gl_cross(v1: gl_vec3, v2: gl_vec3) gl_vec3;
+fn gl_normalize(v: gl_vec3) gl_vec3;
+fn gl_faceforward(n: gl_vec3, i: gl_vec3, nref: gl_vec3) gl_vec3;
+fn gl_reflect(i: gl_vec3, n: gl_vec3) gl_vec3;
+fn gl_refract(i: gl_vec3, n: gl_vec3, eta: f32) gl_vec3;
+
+fn gl_matrixCompMult(m1: gl_mat4, m2: gl_mat4) gl_mat4;
+
+fn gl_lessThan(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_lessThanEqual(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_greaterThan(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_greaterThanEqual(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_equal(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_notEqual(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_any(v: gl_bvec3) bool;
+fn gl_all(v: gl_bvec3) bool;
+fn gl_not(v: gl_bvec3) gl_bvec3;
+
+fn gl_texture2D(sampler: gl_sampler2D, coord: gl_vec2) gl_vec4;
+fn gl_texture2D_bias(sampler: gl_sampler2D, coord: gl_vec2, bias: f32) gl_vec4;
+fn gl_textureCube(sampler: gl_samplerCube, coord: gl_vec3) gl_vec4;
+
+// Suffix overload helpers (type hints only)
+fn gl_radiansf(degrees: f32) f32;
+fn gl_radiansv2(degrees: gl_vec2) gl_vec2;
+fn gl_radiansv3(degrees: gl_vec3) gl_vec3;
+fn gl_radiansv4(degrees: gl_vec4) gl_vec4;
+
+fn gl_degreesf(radians: f32) f32;
+fn gl_degreesv2(radians: gl_vec2) gl_vec2;
+fn gl_degreesv3(radians: gl_vec3) gl_vec3;
+fn gl_degreesv4(radians: gl_vec4) gl_vec4;
+
+fn gl_sinf(angle: f32) f32;
+fn gl_sinv2(angle: gl_vec2) gl_vec2;
+fn gl_sinv3(angle: gl_vec3) gl_vec3;
+fn gl_sinv4(angle: gl_vec4) gl_vec4;
+
+fn gl_cosf(angle: f32) f32;
+fn gl_cosv2(angle: gl_vec2) gl_vec2;
+fn gl_cosv3(angle: gl_vec3) gl_vec3;
+fn gl_cosv4(angle: gl_vec4) gl_vec4;
+
+fn gl_tanf(angle: f32) f32;
+fn gl_tanv2(angle: gl_vec2) gl_vec2;
+fn gl_tanv3(angle: gl_vec3) gl_vec3;
+fn gl_tanv4(angle: gl_vec4) gl_vec4;
+
+fn gl_asinf(x: f32) f32;
+fn gl_asinv2(x: gl_vec2) gl_vec2;
+fn gl_asinv3(x: gl_vec3) gl_vec3;
+fn gl_asinv4(x: gl_vec4) gl_vec4;
+
+fn gl_acosf(x: f32) f32;
+fn gl_acosv2(x: gl_vec2) gl_vec2;
+fn gl_acosv3(x: gl_vec3) gl_vec3;
+fn gl_acosv4(x: gl_vec4) gl_vec4;
+
+fn gl_atanf(y_over_x: f32) f32;
+fn gl_atanv2(y_over_x: gl_vec2) gl_vec2;
+fn gl_atanv3(y_over_x: gl_vec3) gl_vec3;
+fn gl_atanv4(y_over_x: gl_vec4) gl_vec4;
+
+fn gl_atan2f(y: f32, x: f32) f32;
+fn gl_atan2v2(y: gl_vec2, x: gl_vec2) gl_vec2;
+fn gl_atan2v3(y: gl_vec3, x: gl_vec3) gl_vec3;
+fn gl_atan2v4(y: gl_vec4, x: gl_vec4) gl_vec4;
+
+fn gl_powf(x: f32, y: f32) f32;
+fn gl_powv2(x: gl_vec2, y: gl_vec2) gl_vec2;
+fn gl_powv3(x: gl_vec3, y: gl_vec3) gl_vec3;
+fn gl_powv4(x: gl_vec4, y: gl_vec4) gl_vec4;
+
+fn gl_expf(x: f32) f32;
+fn gl_expv2(x: gl_vec2) gl_vec2;
+fn gl_expv3(x: gl_vec3) gl_vec3;
+fn gl_expv4(x: gl_vec4) gl_vec4;
+
+fn gl_logf(x: f32) f32;
+fn gl_logv2(x: gl_vec2) gl_vec2;
+fn gl_logv3(x: gl_vec3) gl_vec3;
+fn gl_logv4(x: gl_vec4) gl_vec4;
+
+fn gl_exp2f(x: f32) f32;
+fn gl_exp2v2(x: gl_vec2) gl_vec2;
+fn gl_exp2v3(x: gl_vec3) gl_vec3;
+fn gl_exp2v4(x: gl_vec4) gl_vec4;
+
+fn gl_log2f(x: f32) f32;
+fn gl_log2v2(x: gl_vec2) gl_vec2;
+fn gl_log2v3(x: gl_vec3) gl_vec3;
+fn gl_log2v4(x: gl_vec4) gl_vec4;
+
+fn gl_sqrtf(x: f32) f32;
+fn gl_sqrtv2(x: gl_vec2) gl_vec2;
+fn gl_sqrtv3(x: gl_vec3) gl_vec3;
+fn gl_sqrtv4(x: gl_vec4) gl_vec4;
+
+fn gl_inversesqrtf(x: f32) f32;
+fn gl_inversesqrtv2(x: gl_vec2) gl_vec2;
+fn gl_inversesqrtv3(x: gl_vec3) gl_vec3;
+fn gl_inversesqrtv4(x: gl_vec4) gl_vec4;
+
+fn gl_absf(x: f32) f32;
+fn gl_absv2(x: gl_vec2) gl_vec2;
+fn gl_absv3(x: gl_vec3) gl_vec3;
+fn gl_absv4(x: gl_vec4) gl_vec4;
+fn gl_absi2(x: gl_ivec2) gl_ivec2;
+fn gl_absi3(x: gl_ivec3) gl_ivec3;
+fn gl_absi4(x: gl_ivec4) gl_ivec4;
+
+fn gl_signf(x: f32) f32;
+fn gl_signv2(x: gl_vec2) gl_vec2;
+fn gl_signv3(x: gl_vec3) gl_vec3;
+fn gl_signv4(x: gl_vec4) gl_vec4;
+fn gl_signi2(x: gl_ivec2) gl_ivec2;
+fn gl_signi3(x: gl_ivec3) gl_ivec3;
+fn gl_signi4(x: gl_ivec4) gl_ivec4;
+
+fn gl_floorf(x: f32) f32;
+fn gl_floorv2(x: gl_vec2) gl_vec2;
+fn gl_floorv3(x: gl_vec3) gl_vec3;
+fn gl_floorv4(x: gl_vec4) gl_vec4;
+
+fn gl_ceilf(x: f32) f32;
+fn gl_ceilv2(x: gl_vec2) gl_vec2;
+fn gl_ceilv3(x: gl_vec3) gl_vec3;
+fn gl_ceilv4(x: gl_vec4) gl_vec4;
+
+fn gl_fractf(x: f32) f32;
+fn gl_fractv2(x: gl_vec2) gl_vec2;
+fn gl_fractv3(x: gl_vec3) gl_vec3;
+fn gl_fractv4(x: gl_vec4) gl_vec4;
+
+fn gl_modf(x: f32, y: f32) f32;
+fn gl_modv2(x: gl_vec2, y: gl_vec2) gl_vec2;
+fn gl_modv3(x: gl_vec3, y: gl_vec3) gl_vec3;
+fn gl_modv4(x: gl_vec4, y: gl_vec4) gl_vec4;
+
+fn gl_minf(x: f32, y: f32) f32;
+fn gl_minv2(x: gl_vec2, y: gl_vec2) gl_vec2;
+fn gl_minv3(x: gl_vec3, y: gl_vec3) gl_vec3;
+fn gl_minv4(x: gl_vec4, y: gl_vec4) gl_vec4;
+fn gl_mini2(x: gl_ivec2, y: gl_ivec2) gl_ivec2;
+fn gl_mini3(x: gl_ivec3, y: gl_ivec3) gl_ivec3;
+fn gl_mini4(x: gl_ivec4, y: gl_ivec4) gl_ivec4;
+
+fn gl_maxf(x: f32, y: f32) f32;
+fn gl_maxv2(x: gl_vec2, y: gl_vec2) gl_vec2;
+fn gl_maxv3(x: gl_vec3, y: gl_vec3) gl_vec3;
+fn gl_maxv4(x: gl_vec4, y: gl_vec4) gl_vec4;
+fn gl_maxi2(x: gl_ivec2, y: gl_ivec2) gl_ivec2;
+fn gl_maxi3(x: gl_ivec3, y: gl_ivec3) gl_ivec3;
+fn gl_maxi4(x: gl_ivec4, y: gl_ivec4) gl_ivec4;
+
+fn gl_clampf(x: f32, min_val: f32, max_val: f32) f32;
+fn gl_clampv2(x: gl_vec2, min_val: gl_vec2, max_val: gl_vec2) gl_vec2;
+fn gl_clampv3(x: gl_vec3, min_val: gl_vec3, max_val: gl_vec3) gl_vec3;
+fn gl_clampv4(x: gl_vec4, min_val: gl_vec4, max_val: gl_vec4) gl_vec4;
+fn gl_clampi2(x: gl_ivec2, min_val: gl_ivec2, max_val: gl_ivec2) gl_ivec2;
+fn gl_clampi3(x: gl_ivec3, min_val: gl_ivec3, max_val: gl_ivec3) gl_ivec3;
+fn gl_clampi4(x: gl_ivec4, min_val: gl_ivec4, max_val: gl_ivec4) gl_ivec4;
+
+fn gl_mixf(x: f32, y: f32, a: f32) f32;
+fn gl_mixv2(x: gl_vec2, y: gl_vec2, a: gl_vec2) gl_vec2;
+fn gl_mixv3(x: gl_vec3, y: gl_vec3, a: gl_vec3) gl_vec3;
+fn gl_mixv4(x: gl_vec4, y: gl_vec4, a: gl_vec4) gl_vec4;
+
+fn gl_stepf(edge: f32, x: f32) f32;
+fn gl_stepv2(edge: gl_vec2, x: gl_vec2) gl_vec2;
+fn gl_stepv3(edge: gl_vec3, x: gl_vec3) gl_vec3;
+fn gl_stepv4(edge: gl_vec4, x: gl_vec4) gl_vec4;
+
+fn gl_smoothstepf(edge0: f32, edge1: f32, x: f32) f32;
+fn gl_smoothstepv2(edge0: gl_vec2, edge1: gl_vec2, x: gl_vec2) gl_vec2;
+fn gl_smoothstepv3(edge0: gl_vec3, edge1: gl_vec3, x: gl_vec3) gl_vec3;
+fn gl_smoothstepv4(edge0: gl_vec4, edge1: gl_vec4, x: gl_vec4) gl_vec4;
+
+fn gl_lengthv2(v: gl_vec2) f32;
+fn gl_lengthv3(v: gl_vec3) f32;
+fn gl_lengthv4(v: gl_vec4) f32;
+
+fn gl_distancev2(p0: gl_vec2, p1: gl_vec2) f32;
+fn gl_distancev3(p0: gl_vec3, p1: gl_vec3) f32;
+fn gl_distancev4(p0: gl_vec4, p1: gl_vec4) f32;
+
+fn gl_dotv2(v1: gl_vec2, v2: gl_vec2) f32;
+fn gl_dotv3(v1: gl_vec3, v2: gl_vec3) f32;
+fn gl_dotv4(v1: gl_vec4, v2: gl_vec4) f32;
+
+fn gl_crossv3(v1: gl_vec3, v2: gl_vec3) gl_vec3;
+
+fn gl_normalizev2(v: gl_vec2) gl_vec2;
+fn gl_normalizev3(v: gl_vec3) gl_vec3;
+fn gl_normalizev4(v: gl_vec4) gl_vec4;
+
+fn gl_faceforwardv2(n: gl_vec2, i: gl_vec2, nref: gl_vec2) gl_vec2;
+fn gl_faceforwardv3(n: gl_vec3, i: gl_vec3, nref: gl_vec3) gl_vec3;
+fn gl_faceforwardv4(n: gl_vec4, i: gl_vec4, nref: gl_vec4) gl_vec4;
+
+fn gl_reflectv2(i: gl_vec2, n: gl_vec2) gl_vec2;
+fn gl_reflectv3(i: gl_vec3, n: gl_vec3) gl_vec3;
+fn gl_reflectv4(i: gl_vec4, n: gl_vec4) gl_vec4;
+
+fn gl_refractv2(i: gl_vec2, n: gl_vec2, eta: f32) gl_vec2;
+fn gl_refractv3(i: gl_vec3, n: gl_vec3, eta: f32) gl_vec3;
+fn gl_refractv4(i: gl_vec4, n: gl_vec4, eta: f32) gl_vec4;
+
+fn gl_matrixCompMultm2(m1: gl_mat2, m2: gl_mat2) gl_mat2;
+fn gl_matrixCompMultm3(m1: gl_mat3, m2: gl_mat3) gl_mat3;
+fn gl_matrixCompMultm4(m1: gl_mat4, m2: gl_mat4) gl_mat4;
+
+fn gl_lessThanv2(v1: gl_vec2, v2: gl_vec2) gl_bvec2;
+fn gl_lessThanv3(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_lessThanv4(v1: gl_vec4, v2: gl_vec4) gl_bvec4;
+
+fn gl_lessThanEqualv2(v1: gl_vec2, v2: gl_vec2) gl_bvec2;
+fn gl_lessThanEqualv3(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_lessThanEqualv4(v1: gl_vec4, v2: gl_vec4) gl_bvec4;
+
+fn gl_greaterThanv2(v1: gl_vec2, v2: gl_vec2) gl_bvec2;
+fn gl_greaterThanv3(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_greaterThanv4(v1: gl_vec4, v2: gl_vec4) gl_bvec4;
+
+fn gl_greaterThanEqualv2(v1: gl_vec2, v2: gl_vec2) gl_bvec2;
+fn gl_greaterThanEqualv3(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_greaterThanEqualv4(v1: gl_vec4, v2: gl_vec4) gl_bvec4;
+
+fn gl_equalv2(v1: gl_vec2, v2: gl_vec2) gl_bvec2;
+fn gl_equalv3(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_equalv4(v1: gl_vec4, v2: gl_vec4) gl_bvec4;
+
+fn gl_notEqualv2(v1: gl_vec2, v2: gl_vec2) gl_bvec2;
+fn gl_notEqualv3(v1: gl_vec3, v2: gl_vec3) gl_bvec3;
+fn gl_notEqualv4(v1: gl_vec4, v2: gl_vec4) gl_bvec4;
+
+fn gl_anyb2(v: gl_bvec2) bool;
+fn gl_anyb3(v: gl_bvec3) bool;
+fn gl_anyb4(v: gl_bvec4) bool;
+
+fn gl_allb2(v: gl_bvec2) bool;
+fn gl_allb3(v: gl_bvec3) bool;
+fn gl_allb4(v: gl_bvec4) bool;
+
+fn gl_notb2(v: gl_bvec2) gl_bvec2;
+fn gl_notb3(v: gl_bvec3) gl_bvec3;
+fn gl_notb4(v: gl_bvec4) gl_bvec4;

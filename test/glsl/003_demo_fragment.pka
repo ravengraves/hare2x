@@ -1,0 +1,13 @@
+// Demo fragment shader (pika2glsl default)
+#[varying] let v_color = gl::vec3 { ... };
+#[builtin] let gl_FragColor = gl::vec4 { ... };
+
+export fn main() void = {
+	let pulse = 0.8 + 0.2 * v_color.x;
+	gl_FragColor = gl::vec4 {
+		x = v_color.x * pulse,
+		y = v_color.y * pulse,
+		z = v_color.z * pulse,
+		w = 1.0,
+	};
+};

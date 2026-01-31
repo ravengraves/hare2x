@@ -1,0 +1,17 @@
+// Demo vertex shader (pika2glsl default)
+#[attribute] let a_pos = gl::vec2 { ... };
+#[attribute] let a_color = gl::vec3 { ... };
+#[varying] let v_color = gl::vec3 { ... };
+#[uniform] let u_time: f32 = 0;
+#[builtin] let gl_Position = gl::vec4 { ... };
+
+export fn main() void = {
+	let wobble = gl::sinf(u_time + a_pos.x * 4.0) * 0.12;
+	gl_Position = gl::vec4 {
+		x = a_pos.x,
+		y = a_pos.y + wobble,
+		z = 0.0,
+		w = 1.0,
+	};
+	v_color = a_color;
+};

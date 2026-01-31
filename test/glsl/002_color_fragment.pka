@@ -1,0 +1,12 @@
+// Fragment shader using varying color
+#[varying] let v_color = gl::vec3 { ... };
+#[builtin] let gl_FragColor = gl::vec4 { ... };
+
+export fn main() void = {
+	gl_FragColor = gl::vec4 {
+		x = v_color.x,
+		y = v_color.y,
+		z = v_color.z,
+		w = 1.0,
+	};
+};
