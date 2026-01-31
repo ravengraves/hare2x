@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pika2GLSL Testbed</title>
+    <style>
+        :root {
+            --bg: #000;
+            --fg: #fff;
+            --bg-secondary: #1d1f22;
+            --bg-tertiary: #111214;
+            --border: #3a3d41;
+            --border-focus: #ffffff;
+            --muted: #8b8f96;
+            --success: #6dff7b;
+            --error: #ff6b6b;
+            --accent: #7cc5ff;
+        }
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg: #f7f4ef;
+                --fg: #0e0f10;
+                --bg-secondary: #fff7ec;
+                --bg-tertiary: #f0e7d9;
+                --border: #cdbba7;
+                --border-focus: #0e0f10;
+                --muted: #6e6458;
+                --success: #137b3c;
+                --error: #c83b3b;
+                --accent: #1665c0;
+            }
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: "Space Mono", "IBM Plex Mono", "Fira Mono", ui-monospace, SFMono-Regular, monospace;
+            margin: 0;
+            padding: 24px;
+            background: radial-gradient(1200px 600px at 10% 0%, rgba(124, 197, 255, 0.1), transparent 60%),
+                        radial-gradient(1200px 600px at 80% 20%, rgba(255, 208, 122, 0.08), transparent 60%),
+                        var(--bg);
+            color: var(--fg);
+            min-height: 100vh;
+        }
+        h1 {
+            margin: 0 0 8px 0;
+            font-size: 1.8em;
+            letter-spacing: 0.02em;
+        }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        h3 { margin: 0 0 8px 0; font-size: 1em; }
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            margin: 18px 0 16px 0;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        button {
+            background: var(--bg-secondary);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            font-family: inherit;
+            cursor: pointer;
+        }
+        button:hover { border-color: var(--border-focus); }
+        button:disabled { color: var(--muted); cursor: not-allowed; }
+        #status {
+            padding: 8px;
+            color: var(--muted);
+        }
+        #status.ready { color: var(--success); }
+        #status.error { color: var(--error); }
+        #status.working { color: var(--accent); }
+        .main-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+            gap: 16px;
+            align-items: start;
+        }
+        .editors {
+            display: grid;
+            gap: 16px;
+        }
+        .stage-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        .pane {
+            min-width: 0;
+        }
+        textarea {
+            width: 100%;
+            height: 220px;
+            background: var(--bg-secondary);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 10px;
+            font-family: inherit;
+            font-size: 13px;
+            resize: vertical;
+            tab-size: 4;
+        }
+        textarea:focus {
+            outline: none;
+            border-color: var(--border-focus);
+        }
+        textarea.error { border-color: var(--error); }
+        textarea.output {
+            background: var(--bg-tertiary);
+        }
+        textarea[readonly] {
+            color: var(--muted);
+        }
+        .preview {
+            display: grid;
+            gap: 12px;
+        }
+        #canvas {
+            width: 100%;
+            height: 360px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            display: block;
+        }
+        .log {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            padding: 10px;
+            max-height: 260px;
+            overflow: auto;
+            white-space: pre-wrap;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .prelude-section { margin-top: 20px; }
+        #glPrelude { max-height: 240px; }
+        .log .error { color: var(--error); }
+        .log .success { color: var(--success); }
+        .log .info { color: var(--muted); }
+        .log .accent { color: var(--accent); }
+        .info-text {
+            color: var(--muted);
+            font-size: 0.9em;
+        }
+        @media (max-width: 1100px) {
+            .main-layout {
+                grid-template-columns: 1fr;
+            }
+            #canvas { height: 320px; }
+        }
+        @media (max-width: 900px) {
+            .stage-grid {
+                grid-template-columns: 1fr;
+            }
+            textarea { height: 200px; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Pika2GLSL Testbed</h1>
+    <p><a href="https://git.sr.ht/~alecgraves/hare2c">Source Code</a></p>
+
+    <div class="toolbar">
+        <button id="compileBtn" disabled>Compile</button>
+        <button id="resetBtn">Reset</button>
+        <button id="clearBtn">Clear Log</button>
+        <span id="status">Loading...</span>
+    </div>
+
+    <div class="main-layout">
+        <div class="editors">
+            <div class="stage-grid">
+                <div class="pane">
+                    <h3>Vertex Shader (Pika)</h3>
+                    <textarea id="vertexInput" spellcheck="false"></textarea>
+                </div>
+                <div class="pane">
+                    <h3>Vertex Shader (GLSL)</h3>
+                    <textarea id="vertexOutput" class="output" readonly></textarea>
+                </div>
+            </div>
+            <div class="stage-grid">
+                <div class="pane">
+                    <h3>Fragment Shader (Pika)</h3>
+                    <textarea id="fragmentInput" spellcheck="false"></textarea>
+                </div>
+                <div class="pane">
+                    <h3>Fragment Shader (GLSL)</h3>
+                    <textarea id="fragmentOutput" class="output" readonly></textarea>
+                </div>
+            </div>
+        </div>
+        <div class="preview">
+            <div>
+                <h3>Output</h3>
+                <canvas id="canvas"></canvas>
+            </div>
+            <div>
+                <h3>Log</h3>
+                <div id="log" class="log"></div>
+                <div class="info-text">GLSL ES 1.00 - WebGL 1.0</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="prelude-section">
+        <h2>GLSL Prelude (gl.pka)</h2>
+        <pre id="glPrelude" class="log"></pre>
+    </div>
+
+    <script>
+        const GL_PRELUDE = "<GL_PK>";
+        const DEFAULT_VERTEX = "<GLSL_VERTEX_DEMO>";
+        const DEFAULT_FRAGMENT = "<GLSL_FRAGMENT_DEMO>";
+        const WASM_LOADER = "<WASM_LOADER>";
+        const wasmLoader = new Function(WASM_LOADER + '; return createWasmLoader;')()({ initialPages: 512 });
+
+        const $ = (id) => document.getElementById(id);
+        const el = {
+            vertexInput: $('vertexInput'),
+            fragmentInput: $('fragmentInput'),
+            vertexOutput: $('vertexOutput'),
+            fragmentOutput: $('fragmentOutput'),
+            compileBtn: $('compileBtn'),
+            resetBtn: $('resetBtn'),
+            clearBtn: $('clearBtn'),
+            status: $('status'),
+            log: $('log'),
+            glPrelude: $('glPrelude'),
+            canvas: $('canvas'),
+        };
+        const gl = el.canvas.getContext('webgl');
+
+        const encoder = wasmLoader.encoder;
+        const VERTICES = new Float32Array([
+             0.0,  0.7,  1.0, 0.2, 0.2,
+            -0.7, -0.5,  0.2, 1.0, 0.2,
+             0.7, -0.5,  0.2, 0.2, 1.0,
+        ]);
+
+        let wasmInstance = null;
+        let wasmMemory = null;
+        let memoryAccess = null;
+        let wasm = {};
+        let program = null;
+        let animationId = null;
+        let startTime = Date.now();
+        let vertexBuffer = null;
+
+        el.vertexInput.value = DEFAULT_VERTEX;
+        el.fragmentInput.value = DEFAULT_FRAGMENT;
+        if (el.glPrelude) { el.glPrelude.textContent = GL_PRELUDE; }
+
+        function logMessage(text, cls = 'info') {
+            const line = document.createElement('div');
+            line.textContent = text;
+            line.className = cls;
+            el.log.appendChild(line);
+            el.log.scrollTop = el.log.scrollHeight;
+        }
+
+        function clearLog() { el.log.innerHTML = ''; }
+
+        function setStatus(cls, text) {
+            el.status.className = cls || '';
+            el.status.textContent = text;
+        }
+
+        function setFieldError(input, output, on) {
+            input.classList.toggle('error', on);
+            output.classList.toggle('error', on);
+        }
+
+        function resetEditors() {
+            el.vertexInput.value = DEFAULT_VERTEX;
+            el.fragmentInput.value = DEFAULT_FRAGMENT;
+            el.vertexOutput.value = '';
+            el.fragmentOutput.value = '';
+            setFieldError(el.vertexInput, el.vertexOutput, false);
+            setFieldError(el.fragmentInput, el.fragmentOutput, false);
+            clearLog();
+            logMessage('Reset to default shaders.');
+            compileShaders();
+        }
+
+        const requiredExports = [
+            'main',
+            'get_stdin_ptr',
+            'set_stdin_len',
+            'get_stdout_ptr',
+            'get_stdout_len',
+            'get_stderr_ptr',
+            'get_stderr_len',
+            'get_error_flag',
+        ];
+
+        function writeProgramInput(text) {
+            const bytes = encoder.encode(text);
+            const ptr = wasm.get_stdin_ptr();
+            memoryAccess.writeBytes(ptr, bytes);
+            wasm.set_stdin_len(bytes.length);
+        }
+
+        function readOutput(getPtr, getLen) {
+            const ptr = getPtr();
+            const len = getLen();
+            return len > 0 ? memoryAccess.readUtf8(ptr, len) : '';
+        }
+
+        function transpileStage(stage, source, inputEl, outputEl) {
+            setFieldError(inputEl, outputEl, false);
+            if (!source.trim()) {
+                setFieldError(inputEl, outputEl, true);
+                logMessage(stage + ' shader input is empty.', 'error');
+                return { ok: false };
+            }
+            const programText = ['-T glsl', '-S ' + stage, source, GL_PRELUDE].join('\n');
+            writeProgramInput(programText);
+            let result = 0;
+            let trappedError = null;
+            try {
+                result = wasm.main();
+            } catch (err) {
+                trappedError = err;
+            }
+            const errFlag = wasm.get_error_flag();
+            if (errFlag !== 0 || result !== 0 || trappedError) {
+                const errText = readOutput(wasm.get_stderr_ptr, wasm.get_stderr_len) ||
+                    (trappedError ? trappedError.message : ('Transpile failed (' + stage + ')'));
+                setFieldError(inputEl, outputEl, true);
+                logMessage(stage + ' error: ' + errText, 'error');
+                return { ok: false };
+            }
+            const outText = readOutput(wasm.get_stdout_ptr, wasm.get_stdout_len);
+            outputEl.value = outText;
+            return { ok: true, text: outText };
+        }
+
+        function compileShader(type, source, label) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                const error = gl.getShaderInfoLog(shader) || 'Unknown error';
+                logMessage(label + ' compile error: ' + error.trim(), 'error');
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(vertSrc, fragSrc) {
+            const vertShader = compileShader(gl.VERTEX_SHADER, vertSrc, 'Vertex');
+            const fragShader = compileShader(gl.FRAGMENT_SHADER, fragSrc, 'Fragment');
+            if (!vertShader || !fragShader) {
+                return null;
+            }
+            const prog = gl.createProgram();
+            gl.attachShader(prog, vertShader);
+            gl.attachShader(prog, fragShader);
+            gl.linkProgram(prog);
+            gl.deleteShader(vertShader);
+            gl.deleteShader(fragShader);
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                const error = gl.getProgramInfoLog(prog) || 'Unknown link error';
+                logMessage('Link error: ' + error.trim(), 'error');
+                gl.deleteProgram(prog);
+                return null;
+            }
+            return prog;
+        }
+
+        function setupBuffer() {
+            if (!vertexBuffer) { vertexBuffer = gl.createBuffer(); }
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, VERTICES, gl.STATIC_DRAW);
+        }
+
+        function resizeCanvas() {
+            const rect = el.canvas.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            el.canvas.width = rect.width * dpr;
+            el.canvas.height = rect.height * dpr;
+            gl.viewport(0, 0, el.canvas.width, el.canvas.height);
+        }
+
+        function renderFrame() {
+            if (!program) { return; }
+            resizeCanvas();
+            const time = (Date.now() - startTime) / 1000;
+            const bg = getComputedStyle(document.documentElement)
+                .getPropertyValue('--bg-secondary').trim();
+            if (bg === '#222' || bg === '#1d1f22') {
+                gl.clearColor(0.11, 0.12, 0.13, 1.0);
+            } else {
+                gl.clearColor(0.97, 0.95, 0.91, 1.0);
+            }
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            gl.useProgram(program);
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+
+            const posLoc = gl.getAttribLocation(program, 'a_pos');
+            const colorLoc = gl.getAttribLocation(program, 'a_color');
+            if (posLoc >= 0) {
+                gl.enableVertexAttribArray(posLoc);
+                gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 20, 0);
+            }
+            if (colorLoc >= 0) {
+                gl.enableVertexAttribArray(colorLoc);
+                gl.vertexAttribPointer(colorLoc, 3, gl.FLOAT, false, 20, 8);
+            }
+            const timeLoc = gl.getUniformLocation(program, 'u_time');
+            if (timeLoc) {
+                gl.uniform1f(timeLoc, time);
+            }
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+            animationId = requestAnimationFrame(renderFrame);
+        }
+
+        function compileShaders() {
+            if (!wasmInstance || !memoryAccess) { return; }
+            if (!gl) {
+                setStatus('error', 'WebGL not supported');
+                logMessage('WebGL not supported in this browser.', 'error');
+                return;
+            }
+            clearLog();
+            el.vertexOutput.classList.remove('error');
+            el.fragmentOutput.classList.remove('error');
+            setStatus('working', 'Transpiling...');
+            const vertResult = transpileStage(
+                'vertex',
+                el.vertexInput.value,
+                el.vertexInput,
+                el.vertexOutput
+            );
+            const fragResult = transpileStage(
+                'fragment',
+                el.fragmentInput.value,
+                el.fragmentInput,
+                el.fragmentOutput
+            );
+            if (!vertResult.ok || !fragResult.ok) {
+                setStatus('error', 'Transpile failed');
+                return;
+            }
+            logMessage('Transpiled to GLSL.', 'success');
+            const newProgram = createProgram(vertResult.text, fragResult.text);
+            if (!newProgram) {
+                setStatus('error', 'GLSL compile failed');
+                el.vertexOutput.classList.add('error');
+                el.fragmentOutput.classList.add('error');
+                return;
+            }
+            if (program) {
+                gl.deleteProgram(program);
+            }
+            program = newProgram;
+            setupBuffer();
+            startTime = Date.now();
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+            }
+            renderFrame();
+            setStatus('ready', 'Running');
+        }
+
+        el.compileBtn.addEventListener('click', compileShaders);
+        el.resetBtn.addEventListener('click', resetEditors);
+        el.clearBtn.addEventListener('click', () => {
+            clearLog();
+            logMessage('Log cleared.');
+        });
+
+        document.querySelectorAll('textarea').forEach((ta) => {
+            ta.addEventListener('keydown', (e) => {
+                if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const start = ta.selectionStart;
+                    const end = ta.selectionEnd;
+                    ta.value = ta.value.substring(0, start) + '\t' + ta.value.substring(end);
+                    ta.selectionStart = ta.selectionEnd = start + 1;
+                }
+            });
+        });
+
+        window.addEventListener('resize', () => {
+            if (program) {
+                resizeCanvas();
+            }
+        });
+
+        if (!gl) {
+            setStatus('error', 'WebGL not supported');
+        } else {
+            logMessage('WebGL initialized.', 'success');
+            logMessage('Renderer: ' + gl.getParameter(gl.RENDERER), 'info');
+        }
+
+        wasmLoader.loadWasm('bin/pika2c.wasm')
+            .then(({ instance, memory }) => {
+                wasmInstance = instance;
+                wasmMemory = memory || instance.exports.memory;
+                if (!wasmMemory) {
+                    throw new Error('WASM memory not available');
+                }
+                memoryAccess = wasmLoader.createMemoryAccess(wasmMemory);
+                const exports = wasmLoader.bindExports(instance.exports, requiredExports);
+                wasm = {
+                    main: exports.main,
+                    get_stdin_ptr: exports.get_stdin_ptr,
+                    set_stdin_len: exports.set_stdin_len,
+                    get_stdout_ptr: exports.get_stdout_ptr,
+                    get_stdout_len: exports.get_stdout_len,
+                    get_stderr_ptr: exports.get_stderr_ptr,
+                    get_stderr_len: exports.get_stderr_len,
+                    get_error_flag: exports.get_error_flag,
+                };
+                el.compileBtn.disabled = false;
+                setStatus('ready', 'Ready');
+                compileShaders();
+            })
+            .catch((err) => {
+                setStatus('error', 'Failed to load: ' + err.message);
+                logMessage('WASM load failed: ' + err.message, 'error');
+            });
+    </script>
+</body>
+</html>

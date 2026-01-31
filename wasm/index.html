@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hare2C Transpiler</title>
+    <style>
+        :root {
+            --bg: #fff;
+            --fg: #000;
+            --bg-secondary: #f5f5f5;
+            --border: #ccc;
+            --border-focus: #000;
+            --muted: #666;
+            --success: #080;
+            --error: #c00;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #000;
+                --fg: #fff;
+                --bg-secondary: #222;
+                --border: #444;
+                --border-focus: #fff;
+                --muted: #888;
+                --success: #0f0;
+                --error: #f44;
+            }
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: monospace;
+            margin: 0;
+            padding: 20px;
+            background: var(--bg);
+            color: var(--fg);
+            min-height: 100vh;
+        }
+        h1 { margin: 0 0 20px 0; }
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            align-items: center;
+        }
+        button {
+            background: var(--bg-secondary);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            font-family: monospace;
+            cursor: pointer;
+        }
+        button:hover { border-color: var(--border-focus); }
+        button:disabled {
+            color: var(--muted);
+            cursor: not-allowed;
+        }
+        .module-input {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .module-input label {
+            color: var(--muted);
+            font-size: 0.9em;
+        }
+        .module-input input {
+            background: var(--bg-secondary);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 6px 10px;
+            font-family: monospace;
+            font-size: 13px;
+            width: 120px;
+        }
+        .module-input input:focus {
+            outline: none;
+            border-color: var(--border-focus);
+        }
+        .module-input input::placeholder {
+            color: var(--muted);
+        }
+        #status {
+            padding: 8px;
+            color: var(--muted);
+        }
+        #status.ready { color: var(--success); }
+        #status.error { color: var(--error); }
+        .editors {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .pane {
+            flex: 1;
+            min-width: 0;
+        }
+        .pane h3 {
+            margin: 0 0 8px 0;
+            font-size: 1em;
+        }
+        textarea {
+            width: 100%;
+            height: 400px;
+            background: var(--bg-secondary);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 10px;
+            font-family: monospace;
+            font-size: 13px;
+            resize: vertical;
+            tab-size: 4;
+        }
+        textarea:focus {
+            outline: none;
+            border-color: var(--border-focus);
+        }
+        textarea.error { color: var(--error); }
+        .runtime {
+            border-top: 1px solid var(--border);
+            padding-top: 20px;
+        }
+        .runtime h2 {
+            margin: 0 0 10px 0;
+            font-size: 1.2em;
+        }
+        .runtime p {
+            color: var(--muted);
+            margin: 0 0 10px 0;
+        }
+        .tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 10px;
+        }
+        .tab {
+            background: var(--bg-secondary);
+            color: var(--muted);
+            border: 1px solid var(--border);
+            padding: 6px 12px;
+        }
+        .tab.active {
+            color: var(--fg);
+            border-color: var(--border-focus);
+        }
+        .tab:hover:not(.active) { border-color: var(--border-focus); }
+        #runtimeCode {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            padding: 10px;
+            max-height: 400px;
+            overflow: auto;
+            white-space: pre-wrap;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        @media (max-width: 800px) {
+            .editors { flex-direction: column; }
+            textarea { height: 250px; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Hare2C Transpiler</h1>
+    <p><a href="https://git.sr.ht/~alecgraves/hare2c">Source Code (Link)</a></p>
+    <div class="toolbar">
+        <button id="transpileBtn" disabled>Transpile</button>
+        <button id="exampleBtn">Example</button>
+        <button id="clearBtn">Clear</button>
+        <div class="module-input">
+            <label for="modulePrefix">Module:</label>
+            <input type="text" id="modulePrefix" placeholder="(optional)">
+        </div>
+        <span id="status">Loading...</span>
+    </div>
+
+    <div class="editors">
+        <div class="pane">
+            <h3>Hare Input</h3>
+            <textarea id="input" placeholder="Enter Hare code..."></textarea>
+        </div>
+        <div class="pane">
+            <h3>GNU C11 Output</h3>
+            <textarea id="output" readonly placeholder="Generated C code..."></textarea>
+        </div>
+    </div>
+
+    <div class="runtime">
+        <h2>Runtime Library</h2>
+        <p>Include one of these with your transpiled output.</p>
+        <p>Then build with `clang output.c rt.c -o myprogram`</p>
+        <div class="tabs">
+            <button class="tab active" data-runtime="rt">rt.c (Freestanding)</button>
+            <button class="tab" data-runtime="rt_cstd">rt_cstd.c (libc)</button>
+            <button class="tab" data-runtime="rt_wasm">rt_wasm.c (WASM)</button>
+        </div>
+        <pre id="runtimeCode">Loading...</pre>
+    </div>
+
+    <script>
+        window.RUNTIME_SOURCES = {
+            rt: "<RT_C>",
+            rt_cstd: "<RT_CSTD>",
+            rt_wasm: "<RT_WASM>"
+        };
+    </script>
+    <script>
+        const inputEl = document.getElementById('input');
+        const outputEl = document.getElementById('output');
+        const transpileBtn = document.getElementById('transpileBtn');
+        const exampleBtn = document.getElementById('exampleBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const modulePrefixEl = document.getElementById('modulePrefix');
+        const statusEl = document.getElementById('status');
+        const runtimeCodeEl = document.getElementById('runtimeCode');
+        const tabs = document.querySelectorAll('.tab');
+
+        let wasmInstance = null;
+        let wasmMemory = null;
+        let memoryAccess = null;
+        let wasm_main, get_stdin_ptr, set_stdin_len;
+        let get_stdout_ptr, get_stdout_len;
+        let get_stderr_ptr, get_stderr_len, get_error_flag;
+
+        const runtimeCache = {};
+        const runtimeSources = window.RUNTIME_SOURCES || {};
+        const WASM_LOADER = "<WASM_LOADER>";
+        const wasmLoader = new Function(WASM_LOADER + '; return createWasmLoader;')()({ initialPages: 512 });
+        const encoder = wasmLoader.encoder;
+
+        const exampleCode = `use rt;
+use strings;
+
+export fn main() void = {
+    const greetings: []str = [
+        "Hello, world!",
+        "¡Hola Mundo!",
+        "Γειά σου Κόσμε!",
+        "Привіт, світе!",
+        "こんにちは世界！",
+    ];
+
+    for (let greeting .. greetings) {
+        print(greeting);
+        print("\n");
+    };
+};
+
+fn print(msg: str) void = {
+    rt::write(1, strings::toutf8(msg): *[*]u8, len(msg));
+};
+`;
+
+        const requiredExports = [
+            'main',
+            'get_stdin_ptr',
+            'set_stdin_len',
+            'get_stdout_ptr',
+            'get_stdout_len',
+            'get_stderr_ptr',
+            'get_stderr_len',
+            'get_error_flag'
+        ];
+
+        wasmLoader.loadWasm('bin/hare2c.wasm').then(({ instance, memory }) => {
+            wasmInstance = instance;
+            wasmMemory = memory || instance.exports.memory;
+            if (!wasmMemory) {
+                throw new Error('WASM memory not available');
+            }
+            memoryAccess = wasmLoader.createMemoryAccess(wasmMemory);
+            const exports = wasmLoader.bindExports(instance.exports, requiredExports);
+            wasm_main = exports.main;
+            get_stdin_ptr = exports.get_stdin_ptr;
+            set_stdin_len = exports.set_stdin_len;
+            get_stdout_ptr = exports.get_stdout_ptr;
+            get_stdout_len = exports.get_stdout_len;
+            get_stderr_ptr = exports.get_stderr_ptr;
+            get_stderr_len = exports.get_stderr_len;
+            get_error_flag = exports.get_error_flag;
+            transpileBtn.disabled = false;
+            setStatus('ready', 'Ready');
+        }).catch(err => {
+            setStatus('error', 'Failed: ' + err.message);
+        });
+
+        async function loadRuntime(name) {
+            if (runtimeCache[name]) {
+                runtimeCodeEl.textContent = runtimeCache[name];
+                return;
+            }
+            if (Object.prototype.hasOwnProperty.call(runtimeSources, name)) {
+                runtimeCache[name] = runtimeSources[name];
+                runtimeCodeEl.textContent = runtimeCache[name];
+                return;
+            }
+            runtimeCodeEl.textContent = `// Error: runtime "${name}" is not inlined`;
+        }
+
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                tabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                loadRuntime(tab.dataset.runtime);
+            });
+        });
+
+        loadRuntime('rt');
+
+        function setStatus(type, msg) {
+            statusEl.className = type;
+            statusEl.textContent = msg;
+        }
+
+        function transpile() {
+            if (!wasmInstance || !memoryAccess) return;
+            let input = inputEl.value;
+            if (!input.trim()) {
+                setStatus('error', 'No input');
+                outputEl.value = '';
+                return;
+            }
+
+            // Prepend module prefix if specified
+            const modulePrefix = modulePrefixEl.value.trim();
+            if (modulePrefix) {
+                input = '-N ' + modulePrefix + '\n' + input;
+            }
+
+            setStatus('', 'Transpiling...');
+            outputEl.classList.remove('error');
+
+            const bytes = encoder.encode(input);
+            const ptr = get_stdin_ptr();
+            memoryAccess.writeBytes(ptr, bytes);
+            set_stdin_len(bytes.length);
+
+            let result = 0;
+            let trappedError = null;
+            try {
+                result = wasm_main();
+            } catch (err) {
+                trappedError = err;
+            }
+
+            if (get_error_flag() !== 0 || trappedError) {
+                const errPtr = get_stderr_ptr();
+                const errLen = get_stderr_len();
+                outputEl.value = errLen > 0 ? memoryAccess.readUtf8(errPtr, errLen) : (trappedError ? trappedError.message : 'Transpilation failed');
+                outputEl.classList.add('error');
+                setStatus('error', 'Error');
+            } else if (result === 0) {
+                const outPtr = get_stdout_ptr();
+                const outLen = get_stdout_len();
+                outputEl.value = memoryAccess.readUtf8(outPtr, outLen);
+                setStatus('ready', 'Done');
+            } else {
+                const errPtr = get_stderr_ptr();
+                const errLen = get_stderr_len();
+                outputEl.value = errLen > 0 ? memoryAccess.readUtf8(errPtr, errLen) : 'Error ' + result;
+                outputEl.classList.add('error');
+                setStatus('error', 'Error');
+            }
+        }
+
+        transpileBtn.addEventListener('click', transpile);
+        exampleBtn.addEventListener('click', () => { inputEl.value = exampleCode; });
+        clearBtn.addEventListener('click', () => {
+            inputEl.value = '';
+            outputEl.value = '';
+            modulePrefixEl.value = '';
+            outputEl.classList.remove('error');
+            setStatus('ready', 'Ready');
+        });
+
+        inputEl.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                transpile();
+            }
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const s = inputEl.selectionStart;
+                inputEl.value = inputEl.value.substring(0, s) + '\t' + inputEl.value.substring(inputEl.selectionEnd);
+                inputEl.selectionStart = inputEl.selectionEnd = s + 1;
+            }
+        });
+    </script>
+</body>
+</html>

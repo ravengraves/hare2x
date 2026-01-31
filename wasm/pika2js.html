@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pika2JS Demo</title>
+    <style>
+        :root {
+            --bg: #000;
+            --fg: #fff;
+            --bg-secondary: #222;
+            --border: #444;
+            --border-focus: #fff;
+            --muted: #888;
+            --success: #0f0;
+            --error: #f44;
+        }
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg: #fff;
+                --fg: #000;
+                --bg-secondary: #f5f5f5;
+                --border: #ccc;
+                --border-focus: #000;
+                --muted: #666;
+                --success: #080;
+                --error: #c00;
+            }
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: monospace;
+            margin: 0;
+            padding: 20px;
+            background: var(--bg);
+            color: var(--fg);
+            min-height: 100vh;
+        }
+        h1 { margin: 0 0 20px 0; }
+        h3 { margin: 0 0 8px 0; font-size: 1em; }
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        button {
+            background: var(--bg-secondary);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            font-family: monospace;
+            cursor: pointer;
+        }
+        button:hover { border-color: var(--border-focus); }
+        button:disabled {
+            color: var(--muted);
+            cursor: not-allowed;
+        }
+        #status {
+            padding: 8px;
+            color: var(--muted);
+        }
+        #status.ready { color: var(--success); }
+        #status.error { color: var(--error); }
+        .editors {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .pane {
+            min-width: 0;
+        }
+        textarea {
+            width: 100%;
+            height: 360px;
+            background: var(--bg-secondary);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 10px;
+            font-family: monospace;
+            font-size: 13px;
+            resize: vertical;
+            tab-size: 4;
+        }
+        textarea:focus {
+            outline: none;
+            border-color: var(--border-focus);
+        }
+        textarea.error { color: var(--error); }
+        .io-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        pre.output {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            padding: 10px;
+            min-height: 160px;
+            max-height: 260px;
+            overflow: auto;
+            white-space: pre-wrap;
+            font-size: 12px;
+        }
+        .output .err { color: var(--error); }
+        .memory {
+            border-top: 1px solid var(--border);
+            padding-top: 16px;
+        }
+        .memory h2 {
+            margin: 0 0 8px 0;
+            font-size: 1.1em;
+        }
+        .mem-stats {
+            color: var(--muted);
+            margin-bottom: 10px;
+        }
+        .mem-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        canvas {
+            width: 100%;
+            background: #000;
+            border: 1px solid var(--border);
+            image-rendering: pixelated;
+        }
+        @media (max-width: 900px) {
+            .editors { grid-template-columns: 1fr; }
+            .io-grid { grid-template-columns: 1fr; }
+            .mem-grid { grid-template-columns: 1fr; }
+            textarea { height: 260px; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Pika2JS Demo</h1>
+    <p><a href="https://git.sr.ht/~alecgraves/hare2c">Source Code (Link)</a></p> 
+
+    <div class="toolbar">
+        <button id="compileBtn" disabled>Compile</button>
+        <button id="runBtn" disabled>Run</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <button id="exampleBtn">Example</button>
+        <button id="clearBtn">Clear</button>
+        <span id="status">Loading...</span>
+    </div>
+
+    <div class="editors">
+        <div class="pane">
+            <h3>Pika Input</h3>
+            <textarea id="input" placeholder="Enter Pika code..."></textarea>
+        </div>
+        <div class="pane">
+            <h3>Generated JS (editable)</h3>
+            <textarea id="output" placeholder="Generated JS..."></textarea>
+        </div>
+    </div>
+
+    <div class="io-grid">
+        <div class="pane">
+            <h3>stdin</h3>
+            <textarea id="stdin" placeholder="stdin text (optional)..."></textarea>
+        </div>
+        <div class="pane">
+            <h3>output</h3>
+            <pre id="outputText" class="output"></pre>
+        </div>
+    </div>
+
+    <div class="memory">
+        <h2>Static Memory</h2>
+        <div id="memStats" class="mem-stats">No snapshot yet.</div>
+        <div class="mem-grid">
+            <div class="pane">
+                <h3>Occupancy</h3>
+                <canvas id="memOcc"></canvas>
+            </div>
+            <div class="pane">
+                <h3>Entropy</h3>
+                <canvas id="memEnt"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const RUNTIME_JS = "<RUNTIME_JS>";
+        const WASM_LOADER = "<WASM_LOADER>";
+        const wasmLoader = new Function(WASM_LOADER + '; return createWasmLoader;')()({ initialPages: 512 });
+
+        const inputEl = document.getElementById('input');
+        const outputEl = document.getElementById('output');
+        const stdinEl = document.getElementById('stdin');
+        const outputTextEl = document.getElementById('outputText');
+        const memStatsEl = document.getElementById('memStats');
+        const memOcc = document.getElementById('memOcc');
+        const memEnt = document.getElementById('memEnt');
+        const compileBtn = document.getElementById('compileBtn');
+        const runBtn = document.getElementById('runBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const exampleBtn = document.getElementById('exampleBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const statusEl = document.getElementById('status');
+
+        let wasmInstance = null;
+        let wasmMemory = null;
+        let memoryAccess = null;
+        let wasm_main, get_stdin_ptr, set_stdin_len;
+        let get_stdout_ptr, get_stdout_len;
+        let get_stderr_ptr, get_stderr_len, get_error_flag;
+        let worker = null;
+        let runtimeFactory = null;
+        const encoder = wasmLoader.encoder;
+
+        const exampleCode = `use rt;
+use strings;
+
+def greeting: str = "Hello from Pika2JS!";
+
+export fn _main() void = {
+	let n: i32 = 7;
+	let p: nullable *i32 = &n;
+	let v: i32 = match (p) {
+case let ptr: *i32 =>
+		yield *ptr;
+case null =>
+		abort();
+	};
+
+	rt::write(1, strings::toutf8(greeting): *[*]u8, len(greeting));
+	rt::write(1, strings::toutf8("\n"): *[*]u8, 1);
+	if (v == 7) {
+		let msg: str = "match ok";
+		rt::write(1, strings::toutf8(msg): *[*]u8, len(msg));
+	};
+};
+`;
+
+        const requiredExports = [
+            'main',
+            'get_stdin_ptr',
+            'set_stdin_len',
+            'get_stdout_ptr',
+            'get_stdout_len',
+            'get_stderr_ptr',
+            'get_stderr_len',
+            'get_error_flag',
+        ];
+
+        wasmLoader.loadWasm('bin/pika2c.wasm')
+            .then(({ instance, memory }) => {
+                wasmInstance = instance;
+                wasmMemory = memory || instance.exports.memory;
+                if (!wasmMemory) {
+                    throw new Error('WASM memory not available');
+                }
+                memoryAccess = wasmLoader.createMemoryAccess(wasmMemory);
+                const exports = wasmLoader.bindExports(instance.exports, requiredExports);
+                wasm_main = exports.main;
+                get_stdin_ptr = exports.get_stdin_ptr;
+                set_stdin_len = exports.set_stdin_len;
+                get_stdout_ptr = exports.get_stdout_ptr;
+                get_stdout_len = exports.get_stdout_len;
+                get_stderr_ptr = exports.get_stderr_ptr;
+                get_stderr_len = exports.get_stderr_len;
+                get_error_flag = exports.get_error_flag;
+                compileBtn.disabled = false;
+                setStatus('ready', 'Ready');
+            })
+            .catch((err) => {
+                setStatus('error', 'Failed: ' + err.message);
+            });
+
+        function setStatus(type, msg) {
+            statusEl.className = type;
+            statusEl.textContent = msg;
+        }
+
+        function clearRuntime() {
+            outputTextEl.textContent = '';
+            memStatsEl.textContent = 'No snapshot yet.';
+            const ctxOcc = memOcc.getContext('2d');
+            const ctxEnt = memEnt.getContext('2d');
+            ctxOcc.clearRect(0, 0, memOcc.width, memOcc.height);
+            ctxEnt.clearRect(0, 0, memEnt.width, memEnt.height);
+        }
+
+        function appendOutput(text, isErr) {
+            if (!text) return;
+            const span = document.createElement('span');
+            if (isErr) span.className = 'err';
+            span.textContent = text;
+            outputTextEl.appendChild(span);
+            outputTextEl.scrollTop = outputTextEl.scrollHeight;
+        }
+
+        function compilePika() {
+            if (!wasmInstance || !memoryAccess) return null;
+            const input = inputEl.value;
+            if (!input.trim()) {
+                setStatus('error', 'No input');
+                outputEl.value = '';
+                runBtn.disabled = true;
+                return null;
+            }
+            const program = "-T js\n" + input;
+            setStatus('', 'Transpiling...');
+            outputEl.classList.remove('error');
+
+            const bytes = encoder.encode(program);
+            const ptr = get_stdin_ptr();
+            memoryAccess.writeBytes(ptr, bytes);
+            set_stdin_len(bytes.length);
+
+            let result = 0;
+            let trappedError = null;
+            try {
+                result = wasm_main();
+            } catch (err) {
+                trappedError = err;
+            }
+
+            if (get_error_flag() !== 0 || trappedError) {
+                const errPtr = get_stderr_ptr();
+                const errLen = get_stderr_len();
+                outputEl.value = errLen > 0 ? memoryAccess.readUtf8(errPtr, errLen) : (trappedError ? trappedError.message : 'Transpilation failed');
+                outputEl.classList.add('error');
+                runBtn.disabled = true;
+                setStatus('error', 'Error');
+                return null;
+            }
+            if (result !== 0) {
+                const errPtr = get_stderr_ptr();
+                const errLen = get_stderr_len();
+                outputEl.value = errLen > 0 ? memoryAccess.readUtf8(errPtr, errLen) : 'Error ' + result;
+                outputEl.classList.add('error');
+                runBtn.disabled = true;
+                setStatus('error', 'Error');
+                return null;
+            }
+            const outPtr = get_stdout_ptr();
+            const outLen = get_stdout_len();
+            const jsOut = memoryAccess.readUtf8(outPtr, outLen);
+            outputEl.value = jsOut;
+            runBtn.disabled = !jsOut.trim();
+            setStatus('ready', 'Transpiled');
+            return jsOut;
+        }
+
+        function getRuntimeFactory() {
+            if (runtimeFactory) return runtimeFactory;
+            runtimeFactory = new Function(`${RUNTIME_JS}; return buildPikaRuntime;`)();
+            return runtimeFactory;
+        }
+
+        function buildWorkerSource(jsCode, stdinText) {
+            const runtime = getRuntimeFactory()(stdinText || '');
+            const trailer = [
+                'const __pika_program = () => {',
+                runtime,
+                jsCode,
+                'if (typeof _main === "function") { _main(); } else if (typeof main === "function") { main(); }',
+                'return (typeof __pika_snapshot_statics === "function") ? __pika_snapshot_statics() : null;',
+                '};',
+                'let __pika_snapshot = null;',
+                'try {',
+                '\t__pika_snapshot = __pika_program();',
+                '\tif (__pika_snapshot && __pika_snapshot.bytes) {',
+                '\t\tpostMessage({ type: "done", snapshot: __pika_snapshot }, [__pika_snapshot.bytes.buffer]);',
+                '\t} else {',
+                '\t\tpostMessage({ type: "done", snapshot: null });',
+                '\t}',
+                '} catch (err) {',
+                '\tconst msg = err && err.stack ? err.stack : String(err);',
+                '\tpostMessage({ type: "error", text: msg });',
+                '}'
+            ].join('\n');
+            return trailer;
+        }
+
+        function startWorker(jsCode) {
+            if (worker) {
+                worker.terminate();
+                worker = null;
+            }
+            clearRuntime();
+            const src = buildWorkerSource(jsCode, stdinEl.value);
+            const blob = new Blob([src], { type: 'text/javascript' });
+            const url = URL.createObjectURL(blob);
+            worker = new Worker(url);
+            URL.revokeObjectURL(url);
+            stopBtn.disabled = false;
+            worker.onmessage = (e) => {
+                const msg = e.data || {};
+                if (msg.type === 'stdout') {
+                    appendOutput(msg.text, false);
+                } else if (msg.type === 'stderr') {
+                    appendOutput(msg.text, true);
+                } else if (msg.type === 'error') {
+                    appendOutput(msg.text + '\n', true);
+                    setStatus('error', 'Runtime error');
+                } else if (msg.type === 'done') {
+                    setStatus('ready', 'Done');
+                    stopBtn.disabled = true;
+                    if (msg.snapshot && msg.snapshot.bytes) {
+                        renderMemory(msg.snapshot.bytes, msg.snapshot.entries || []);
+                    } else {
+                        memStatsEl.textContent = 'No static snapshot available.';
+                    }
+                }
+            };
+            worker.onerror = (err) => {
+                appendOutput(String(err.message || err) + '\n', true);
+                setStatus('error', 'Worker error');
+                stopBtn.disabled = true;
+            };
+        }
+
+        function runProgram() {
+            const jsCode = outputEl.value;
+            if (!jsCode.trim()) {
+                setStatus('error', 'No JS to run');
+                outputEl.classList.add('error');
+                return;
+            }
+            setStatus('', 'Running...');
+            startWorker(jsCode);
+        }
+
+        function stopProgram() {
+            if (worker) {
+                worker.terminate();
+                worker = null;
+            }
+            stopBtn.disabled = true;
+            setStatus('ready', 'Stopped');
+        }
+
+        function computeOccupancy(bytes, windowSize) {
+            const windows = Math.ceil(bytes.length / windowSize);
+            const out = new Float32Array(windows);
+            let idx = 0;
+            for (let w = 0; w < windows; w += 1) {
+                const start = w * windowSize;
+                const end = Math.min(bytes.length, start + windowSize);
+                let nonzero = 0;
+                for (let i = start; i < end; i += 1) {
+                    if (bytes[i] !== 0) nonzero += 1;
+                }
+                out[idx++] = nonzero / Math.max(1, end - start);
+            }
+            return out;
+        }
+
+        function computeEntropy(bytes, windowSize) {
+            const windows = Math.ceil(bytes.length / windowSize);
+            const out = new Float32Array(windows);
+            const counts = new Uint32Array(256);
+            for (let w = 0; w < windows; w += 1) {
+                counts.fill(0);
+                const start = w * windowSize;
+                const end = Math.min(bytes.length, start + windowSize);
+                const len = end - start;
+                for (let i = start; i < end; i += 1) {
+                    counts[bytes[i]] += 1;
+                }
+                let entropy = 0;
+                for (let i = 0; i < 256; i += 1) {
+                    const c = counts[i];
+                    if (c === 0) continue;
+                    const p = c / len;
+                    entropy -= p * Math.log2(p);
+                }
+                out[w] = entropy / 8;
+            }
+            return out;
+        }
+
+        function renderGrid(canvas, values, cols, colorFn) {
+            const rows = Math.ceil(values.length / cols);
+            const cell = 6;
+            const width = cols * cell;
+            const height = Math.max(1, rows) * cell;
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, width, height);
+            for (let i = 0; i < values.length; i += 1) {
+                const x = (i % cols) * cell;
+                const y = Math.floor(i / cols) * cell;
+                ctx.fillStyle = colorFn(values[i]);
+                ctx.fillRect(x, y, cell, cell);
+            }
+        }
+
+        function renderMemory(bytes, entries) {
+            const total = bytes.length;
+            const entryCount = entries.length || 0;
+            let windowSize = 64;
+            const maxCells = 4096;
+            let cells = Math.ceil(total / windowSize);
+            if (cells > maxCells) {
+                windowSize = Math.ceil(total / maxCells);
+                cells = Math.ceil(total / windowSize);
+            }
+            memStatsEl.textContent = `Tracked bytes: ${total} | Entries: ${entryCount} | Window: ${windowSize} bytes`;
+            const occ = computeOccupancy(bytes, windowSize);
+            const ent = computeEntropy(bytes, windowSize);
+            renderGrid(memOcc, occ, 64, (v) => {
+                const g = Math.max(0, Math.min(255, Math.round(v * 255)));
+                return `rgb(0, ${g}, 0)`;
+            });
+            renderGrid(memEnt, ent, 64, (v) => {
+                const g = Math.max(0, Math.min(255, Math.round(v * 255)));
+                return `rgb(0, ${g}, ${g})`;
+            });
+        }
+
+        compileBtn.addEventListener('click', () => { compilePika(); });
+        runBtn.addEventListener('click', runProgram);
+        stopBtn.addEventListener('click', stopProgram);
+        exampleBtn.addEventListener('click', () => { inputEl.value = exampleCode; });
+        clearBtn.addEventListener('click', () => {
+            inputEl.value = '';
+            outputEl.value = '';
+            stdinEl.value = '';
+            outputEl.classList.remove('error');
+            clearRuntime();
+            runBtn.disabled = true;
+            setStatus('ready', 'Ready');
+        });
+
+        inputEl.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                compilePika();
+            }
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const s = inputEl.selectionStart;
+                inputEl.value = inputEl.value.substring(0, s) + '\t' + inputEl.value.substring(inputEl.selectionEnd);
+                inputEl.selectionStart = inputEl.selectionEnd = s + 1;
+            }
+        });
+
+        outputEl.addEventListener('input', () => {
+            const hasJs = !!outputEl.value.trim();
+            runBtn.disabled = !hasJs;
+            if (hasJs) {
+                outputEl.classList.remove('error');
+            }
+        });
+    </script>
+</body>
+</html>
