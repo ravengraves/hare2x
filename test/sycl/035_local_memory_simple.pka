@@ -1,0 +1,18 @@
+
+// Simple kernel that uses local memory (requires nd_item for local memory)
+#[kernel] fn local_test(item: sycl::nd_item1,
+                     #[global] #[read] input: *[*]f32,
+                     #[global] #[write] output: *[*]f32,
+                     #[local] scratch: *[*]f32,
+                     N: size) void = {
+    let gid = sycl::get_global_id(item, 0);
+    let lid = sycl::get_local_id(item, 0);
+
+    if (gid < N) {
+        // Write to local memory
+        scratch[lid] = input[gid] * 2.0f32;
+
+        // Read from local memory
+        output[gid] = scratch[lid];
+    };
+};

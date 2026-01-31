@@ -1,0 +1,13 @@
+
+#[kernel] fn dot_partial(
+	idx: sycl::id1,
+	#[global] #[read] a: *[*]f32,
+	#[global] #[read] b: *[*]f32,
+	#[global] #[write] partial: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		partial[i] = a[i] * b[i];
+	};
+};

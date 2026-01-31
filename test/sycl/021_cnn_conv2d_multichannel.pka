@@ -1,0 +1,80 @@
+
+// Multi-channel 2D Convolution
+// Input: [in_channels, height, width]
+// Weights: [out_channels, in_channels, kh, kw]
+// Output: [out_channels, out_h, out_w]
+
+#[kernel] fn conv2d_multichannel(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,      // [C_in, H, W]
+	#[global] #[read] weights: *[*]f32,    // [C_out, C_in, KH, KW]
+	#[global] #[read] bias: *[*]f32,       // [C_out]
+	#[global] #[write] output: *[*]f32,    // [C_out, OH, OW]
+	in_channels: size,
+	out_channels: size,
+	in_height: size,
+	in_width: size,
+	out_height: size,
+	out_width: size,
+	kernel_h: size,
+	kernel_w: size,
+	stride: size,
+	padding: size
+) void = {
+	let out_idx = idx[0];
+	let total_outputs = out_channels * out_height * out_width;
+
+	if (out_idx >= total_outputs) {
+		return;
+	};
+
+	// Decode output position: [c_out, y, x]
+	let c_out = out_idx / (out_height * out_width);
+	let spatial_idx = out_idx % (out_height * out_width);
+	let out_y = spatial_idx / out_width;
+	let out_x = spatial_idx % out_width;
+
+	// Starting position in input
+	let in_y_start = (out_y * stride): i64 - (padding: i64);
+	let in_x_start = (out_x * stride): i64 - (padding: i64);
+
+	let sum: f32 = bias[c_out];
+
+	// Convolve across all input channels
+	let c_in: size = 0z;
+	for (c_in < in_channels) {
+		let ky: size = 0z;
+		for (ky < kernel_h) {
+			let kx: size = 0z;
+			for (kx < kernel_w) {
+				let in_y = in_y_start + (ky: i64);
+				let in_x = in_x_start + (kx: i64);
+
+				// Check bounds
+				if (in_y >= 0 && in_y < (in_height: i64) &&
+				    in_x >= 0 && in_x < (in_width: i64)) {
+					// Input position: [c_in, in_y, in_x]
+					let in_pos = c_in * (in_height * in_width) +
+					             (in_y: size) * in_width +
+					             (in_x: size);
+
+					// Weight position: [c_out, c_in, ky, kx]
+					let w_pos = c_out * (in_channels * kernel_h * kernel_w) +
+					            c_in * (kernel_h * kernel_w) +
+					            ky * kernel_w +
+					            kx;
+
+					sum += input[in_pos] * weights[w_pos];
+				};
+
+				kx += 1z;
+			};
+
+			ky += 1z;
+		};
+
+		c_in += 1z;
+	};
+
+	output[out_idx] = sum;
+};

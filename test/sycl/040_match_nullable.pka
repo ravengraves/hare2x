@@ -1,0 +1,23 @@
+// Nullable match test
+
+#[kernel] fn match_nullable(
+	idx: sycl::id1,
+	#[global] #[write] output: *[*]u32,
+	N: size
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		let v: u32 = i: u32;
+		let ptr: nullable *u32 = null;
+		if ((i & 1z) == 0z) {
+			ptr = &v: nullable *u32;
+		};
+		let out_val: u32 = match (ptr) {
+		case let p: *u32 =>
+			yield *p;
+		case null =>
+			yield 0u32;
+		};
+		output[i] = out_val;
+	};
+};

@@ -1,0 +1,30 @@
+
+// f16 conversion tests (f16 <-> f32)
+
+type f16 = struct {
+	bits: u16,
+};
+
+#[kernel] fn f16_to_f32(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f16,
+	#[global] #[write] output: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		output[i] = sycl::f16_to_f32(input[i]);
+	};
+};
+
+#[kernel] fn f32_to_f16(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f16,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		output[i] = sycl::f16_from_f32(input[i]);
+	};
+};

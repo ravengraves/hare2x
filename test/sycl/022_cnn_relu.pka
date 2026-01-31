@@ -1,0 +1,39 @@
+
+// ReLU activation function: max(0, x)
+// Can be fused with convolution or applied separately
+
+#[kernel] fn relu(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	N: size
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		let x = input[i];
+		if (x > 0.0f32) {
+			output[i] = x;
+		} else {
+			output[i] = 0.0f32;
+		};
+	};
+};
+
+// Leaky ReLU: max(alpha * x, x)
+#[kernel] fn leaky_relu(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	alpha: f32,
+	N: size
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		let x = input[i];
+		if (x > 0.0f32) {
+			output[i] = x;
+		} else {
+			output[i] = alpha * x;
+		};
+	};
+};

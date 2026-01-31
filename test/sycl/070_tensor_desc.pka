@@ -1,0 +1,31 @@
+
+// Tensor descriptor test (struct kernel arguments)
+
+type tensor_desc = struct {
+	base_offset: size,
+	stride0: size,
+	stride1: size,
+	dim0: size,
+	dim1: size,
+};
+
+#[kernel] fn tensor_add(
+	idx: sycl::id1,
+	#[global] #[read] a: *[*]f32,
+	#[global] #[read] b: *[*]f32,
+	#[global] #[write] out: *[*]f32,
+	a_desc: tensor_desc,
+	b_desc: tensor_desc,
+	out_desc: tensor_desc,
+) void = {
+	let i = idx[0];
+	let total = out_desc.dim0 * out_desc.dim1;
+	if (i < total) {
+		let row = i / out_desc.dim1;
+		let col = i % out_desc.dim1;
+		let a_idx = a_desc.base_offset + row * a_desc.stride0 + col * a_desc.stride1;
+		let b_idx = b_desc.base_offset + row * b_desc.stride0 + col * b_desc.stride1;
+		let out_idx = out_desc.base_offset + row * out_desc.stride0 + col * out_desc.stride1;
+		out[out_idx] = a[a_idx] + b[b_idx];
+	};
+};

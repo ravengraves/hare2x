@@ -1,0 +1,35 @@
+
+// Comprehensive test for all SYCL atomic operations
+
+#[kernel] fn atomic_comprehensive(
+	idx: sycl::id1,
+	#[global] #[readwrite] counters_u32: *[*]u32,
+	#[global] #[readwrite] counters_i32: *[*]i32,
+	#[global] #[readwrite] counters_f32: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		// Unsigned 32-bit atomics
+		let old_u32_add = sycl::atomic_fetch_add(&counters_u32[0], 1: u32);    // atomic add
+		let old_u32_sub = sycl::atomic_fetch_sub(&counters_u32[1], 1: u32);    // atomic sub
+
+		// Atomic store/load
+		sycl::atomic_store(&counters_u32[2], i: u32);                          // atomic store
+		let val_u32 = sycl::atomic_load(&counters_u32[2]);                     // atomic load
+
+		// Atomic exchange
+		let old_u32_xchg = sycl::atomic_exchange(&counters_u32[3], i: u32);    // atomic exchange
+
+		// Atomic compare-exchange
+		let expected: u32 = i: u32;
+		let desired: u32 = (i + 1: u32);
+		let success = sycl::atomic_compare_exchange(&counters_u32[4], expected, desired);
+
+		// Use results to prevent optimization
+		if (old_u32_add > 0: u32 && old_u32_sub > 0: u32 && val_u32 > 0: u32 &&
+		    old_u32_xchg > 0: u32 && success) {
+			sycl::atomic_store(&counters_u32[5], 1: u32);
+		};
+	};
+};

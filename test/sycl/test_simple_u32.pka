@@ -1,0 +1,11 @@
+
+#[kernel] fn test(
+	idx: sycl::id1,
+	#[global] #[write] data: *[*]u32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		data[i] = 0u32;
+	};
+};

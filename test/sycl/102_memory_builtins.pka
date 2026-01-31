@@ -1,0 +1,32 @@
+
+// Comprehensive test for memory operations and nd_item builtins
+
+#[kernel] fn memory_and_nd_item(
+	item: sycl::nd_item1,
+	#[global] #[read] src: *[*]f32,
+	#[global] #[write] dst: *[*]f32,
+	#[local] scratch: *[*]f32,
+	N: size,
+) void = {
+	// Test nd_item builtin functions
+	let gid = sycl::get_global_id(item, 0);                    // get_global_id
+	let lid = sycl::get_local_id(item, 0);                     // get_local_id
+	let grid = sycl::get_group_id(item, 0);                    // get_group_id
+	let global_range = sycl::get_global_range(item, 0);        // get_global_range
+	let local_range = sycl::get_local_range(item, 0);          // get_local_range
+	let group_range = sycl::get_group_range(item, 0);          // get_group_range
+
+	if (gid < N) {
+		// Basic memory operations
+		dst[gid] = src[gid];                              // direct copy
+		scratch[lid] = src[gid];                          // local memory write
+
+		// Synchronization
+		sycl::barrier(item);                                    // barrier
+
+		// Read from local memory after barrier
+		if (lid < (local_range / 2: size)) {
+			dst[gid] = scratch[lid] + scratch[lid + (local_range / 2: size)];
+		};
+	};
+};

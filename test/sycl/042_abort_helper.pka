@@ -1,0 +1,20 @@
+// Abort inside helper function
+
+fn maybe_abort(x: u32) u32 = {
+	if (x == 2u32) {
+		abort();
+	};
+	return x + 1u32;
+};
+
+#[kernel] fn abort_helper(
+	idx: sycl::id1,
+	#[global] #[write] output: *[*]u32,
+	N: size
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		let v = maybe_abort(i: u32);
+		output[i] = v;
+	};
+};

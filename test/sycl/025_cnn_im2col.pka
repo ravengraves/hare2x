@@ -1,0 +1,73 @@
+
+// Im2Col transformation for optimized convolution
+// Converts sliding windows into columns for GEMM-based convolution
+// Input: [C_in, H, W]
+// Output: [C_in * KH * KW, OH * OW]
+
+#[kernel] fn im2col(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,      // [C_in, H, W]
+	#[global] #[write] output: *[*]f32,    // [C_in * KH * KW, OH * OW]
+	in_channels: size,
+	in_height: size,
+	in_width: size,
+	out_height: size,
+	out_width: size,
+	kernel_h: size,
+	kernel_w: size,
+	stride: size,
+	padding: size
+) void = {
+	let out_idx = idx[0];
+	let total_cols = out_height * out_width;
+
+	if (out_idx >= total_cols) {
+		return;
+	};
+
+	// Decode output spatial position
+	let out_y = out_idx / out_width;
+	let out_x = out_idx % out_width;
+
+	// Starting position in input
+	let in_y_start = (out_y * stride): i64 - (padding: i64);
+	let in_x_start = (out_x * stride): i64 - (padding: i64);
+
+	// Extract column
+	let row_idx: size = 0z;
+
+	let c: size = 0z;
+	for (c < in_channels) {
+		let ky: size = 0z;
+		for (ky < kernel_h) {
+			let kx: size = 0z;
+			for (kx < kernel_w) {
+				let in_y = in_y_start + (ky: i64);
+				let in_x = in_x_start + (kx: i64);
+
+				let val: f32 = 0.0f32;
+
+				// Check bounds (zero padding)
+				if (in_y >= 0 && in_y < (in_height: i64) &&
+				    in_x >= 0 && in_x < (in_width: i64)) {
+					let in_pos = c * (in_height * in_width) +
+					             (in_y: size) * in_width +
+					             (in_x: size);
+					val = input[in_pos];
+				};
+
+				// Write to output column
+				let out_pos = row_idx * total_cols + out_idx;
+				output[out_pos] = val;
+
+				row_idx += 1z;
+
+				kx += 1z;
+			};
+
+			ky += 1z;
+		};
+
+		c += 1z;
+	};
+};

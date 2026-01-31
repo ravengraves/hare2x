@@ -1,0 +1,40 @@
+
+// Batch Normalization (Inference mode)
+// y = gamma * (x - mean) / sqrt(var + epsilon) + beta
+// Parameters are per-channel
+
+#[kernel] fn batchnorm2d(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,      // [C, H, W]
+	#[global] #[write] output: *[*]f32,    // [C, H, W]
+	#[global] #[read] gamma: *[*]f32,      // [C] - scale
+	#[global] #[read] beta: *[*]f32,       // [C] - shift
+	#[global] #[read] mean: *[*]f32,       // [C] - running mean
+	#[global] #[read] var: *[*]f32,        // [C] - running variance
+	channels: size,
+	height: size,
+	width: size,
+	epsilon: f32
+) void = {
+	let i = idx[0];
+	let total_size = channels * height * width;
+
+	if (i >= total_size) {
+		return;
+	};
+
+	// Decode position: [c, y, x]
+	let c = i / (height * width);
+
+	let x = input[i];
+	let m = mean[c];
+	let v = var[c];
+	let g = gamma[c];
+	let b = beta[c];
+
+	// Normalize
+	let normalized = (x - m) / sycl::sqrt(v + epsilon);
+
+	// Scale and shift
+	output[i] = g * normalized + b;
+};

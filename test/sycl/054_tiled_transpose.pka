@@ -1,0 +1,28 @@
+
+// Tiled transpose using local memory (nd_item2)
+#[kernel] fn tiled_transpose(
+	item: sycl::nd_item2,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	#[local] tile: *[*]f32,
+	width: size,
+	height: size,
+) void = {
+	let gx = sycl::get_global_id(item, 0);
+	let gy = sycl::get_global_id(item, 1);
+	let lx = sycl::get_local_id(item, 0);
+	let ly = sycl::get_local_id(item, 1);
+	let local_w = sycl::get_local_range(item, 0);
+	let local_h = sycl::get_local_range(item, 1);
+	let tile_idx = ly * local_w + lx;
+
+	if (gx < width && gy < height) {
+		tile[tile_idx] = input[gy * width + gx];
+	};
+
+	sycl::barrier(item);
+
+	if (gx < width && gy < height) {
+		output[gx * height + gy] = tile[tile_idx];
+	};
+};

@@ -1,0 +1,116 @@
+// Comprehensive SYCL smoke test exercising core backend features
+
+use sycl;
+
+// External device helper (provided by smoketest_ext.hpp)
+@symbol("smoketest_ext_fma") fn ext_fma(a: f32, b: f32, c: f32) f32;
+
+// Global constant data (static device storage)
+const GLOBAL_WEIGHTS: [8]f32 = [
+	0.25f32, 0.5f32, 0.75f32, 1.0f32,
+	1.25f32, 1.5f32, 1.75f32, 2.0f32,
+];
+
+const GLOBAL_BIAS: [4]f32 = [0.1f32, 0.2f32, 0.3f32, 0.4f32];
+
+fn apply_bias(x: f32, bias: f32) f32 = {
+	return ext_fma(x, 1.0f32, bias);
+};
+
+fn select_weight(ptr: *[*]f32, idx: size) f32 = {
+	return ptr[idx];
+};
+
+fn select_bias(ptr: *[*]f32, idx: size) f32 = {
+	return ptr[idx];
+};
+
+fn maybe_abort(v: f32, do_abort: bool) f32 = {
+	if (do_abort) {
+		abort();
+	};
+	return v;
+};
+
+// 1D preprocessing kernel: slicing input, local array slicing, globals
+#[kernel] fn smoke_preprocess(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] tmp: *[*]f32,
+	n: size,
+	start: size,
+) void = {
+	let i = idx[0];
+	if (i < n) {
+		let in_slice = input[start..start + n];
+		let v = in_slice[i];
+
+		let local: [6]f32 = [0...];
+		local[0] = v;
+		local[1] = v + 1.0f32;
+		local[2] = v + 2.0f32;
+		local[3] = v + 3.0f32;
+		local[4] = v + 4.0f32;
+		local[5] = v + 5.0f32;
+
+		let local_slice = local[1..5];
+		local_slice[0] = local_slice[0] + 2.0f32;
+
+		let w_slice = GLOBAL_WEIGHTS[2..6];
+		let w_ptr: *[*]f32 = w_slice: *[*]f32;
+		let b_slice = GLOBAL_BIAS[0..4];
+		let b_ptr: *[*]f32 = b_slice: *[*]f32;
+		let w = select_weight(w_ptr, i % 4z);
+		let b = select_bias(b_ptr, i % 4z);
+		tmp[i] = apply_bias(local_slice[0] + w, b);
+	};
+};
+
+// 2D tiled kernel: local memory, group sync, global slicing
+#[kernel] fn smoke_tile2d(
+	item: sycl::nd_item2,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	#[local] tile: *[*]f32,
+	width: size,
+	height: size,
+) void = {
+	let gx = sycl::get_global_id(item, 0);
+	let gy = sycl::get_global_id(item, 1);
+	let lx = sycl::get_local_id(item, 0);
+	let ly = sycl::get_local_id(item, 1);
+	let local_x = sycl::get_local_range(item, 0);
+	let local_idx = ly * local_x + lx;
+	let idx = gy * width + gx;
+
+	if (gx < width && gy < height) {
+		tile[local_idx] = input[idx];
+	} else {
+		tile[local_idx] = 0.0f32;
+	};
+
+	sycl::barrier(item);
+
+	if (gx < width && gy < height) {
+		let w_slice = GLOBAL_WEIGHTS[2..6];
+		let w_ptr: *[*]f32 = w_slice: *[*]f32;
+		let w = select_weight(w_ptr, (gx + gy) % 4z);
+		output[idx] = tile[local_idx] * w + 1.0f32;
+	};
+};
+
+// 1D check kernel: abort/assert error reporting
+#[kernel] fn smoke_check(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	n: size,
+	do_abort: bool,
+) void = {
+	let i = idx[0];
+	if (i < n) {
+		let v = maybe_abort(input[i], do_abort && i == 1z);
+		assert(v >= 0.0f32);
+		output[i] = v;
+	};
+};

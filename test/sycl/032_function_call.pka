@@ -1,0 +1,24 @@
+
+// Function calling test
+// Helper function (device function)
+fn add_values(a: f32, b: f32) f32 = {
+	return a + b;
+};
+
+fn multiply_add(a: f32, b: f32, c: f32) f32 = {
+	return a * b + c;
+};
+
+#[kernel] fn with_functions(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	N: size
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		let val = input[i];
+		let result = multiply_add(val, 2.0f32, 1.0f32);
+		output[i] = add_values(result, 10.0f32);
+	};
+};

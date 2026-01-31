@@ -1,0 +1,38 @@
+
+// Default arguments test
+// Device function with default arguments
+fn scale_add(value: f32, scale: f32 = 2.0f32, bias: f32 = 1.0f32) f32 = {
+	return value * scale + bias;
+};
+
+// Another device function with partial defaults
+fn multiply(a: f32, b: f32 = 10.0f32) f32 = {
+	return a * b;
+};
+
+#[kernel] fn default_args(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	N: size
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		let val = input[i];
+
+		// Test different default argument scenarios
+		if (i == 0) {
+			// Use all defaults: val * 2.0 + 1.0
+			output[i] = scale_add(val);
+		} else if (i == 1) {
+			// Override scale only: val * 3.0 + 1.0
+			output[i] = scale_add(val, 3.0f32);
+		} else if (i == 2) {
+			// Override both: val * 4.0 + 5.0
+			output[i] = scale_add(val, 4.0f32, 5.0f32);
+		} else {
+			// Use multiply with default: val * 10.0
+			output[i] = multiply(val);
+		};
+	};
+};

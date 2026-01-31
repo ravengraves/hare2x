@@ -1,0 +1,59 @@
+
+// Simple 2D Convolution - Single channel input/output
+// Input: [height, width]
+// Kernel: [kh, kw]
+// Output: [out_h, out_w]
+
+#[kernel] fn conv2d_simple(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,      // Input image [H x W]
+	#[global] #[read] kernel: *[*]f32,     // Convolution kernel [KH x KW]
+	#[global] #[write] output: *[*]f32,    // Output image [OH x OW]
+	in_height: size,
+	in_width: size,
+	out_height: size,
+	out_width: size,
+	kernel_h: size,
+	kernel_w: size,
+	stride: size,
+	padding: size
+) void = {
+	let out_idx = idx[0];
+
+	if (out_idx >= (out_height * out_width)) {
+		return;
+	};
+
+	let out_y = out_idx / out_width;
+	let out_x = out_idx % out_width;
+
+	// Starting position in input (accounting for padding)
+	let in_y_start = (out_y * stride): i64 - (padding: i64);
+	let in_x_start = (out_x * stride): i64 - (padding: i64);
+
+	let sum: f32 = 0.0f32;
+
+	// Convolve
+	let ky: size = 0z;
+	for (ky < kernel_h) {
+		let kx: size = 0z;
+		for (kx < kernel_w) {
+			let in_y = in_y_start + (ky: i64);
+			let in_x = in_x_start + (kx: i64);
+
+			// Check bounds (zero padding)
+			if (in_y >= 0 && in_y < (in_height: i64) &&
+			    in_x >= 0 && in_x < (in_width: i64)) {
+				let in_pos = (in_y: size) * in_width + (in_x: size);
+				let k_pos = ky * kernel_w + kx;
+				sum += input[in_pos] * kernel[k_pos];
+			};
+
+			kx += 1z;
+		};
+
+		ky += 1z;
+	};
+
+	output[out_idx] = sum;
+};

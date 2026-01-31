@@ -1,0 +1,13 @@
+// Assert inside kernel
+
+#[kernel] fn kernel_assert(
+	idx: sycl::id1,
+	#[global] #[write] output: *[*]u32,
+	N: size
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		assert(i == 0z);
+		output[i] = i: u32;
+	};
+};

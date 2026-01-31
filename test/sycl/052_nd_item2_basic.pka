@@ -1,0 +1,17 @@
+
+// nd_item2 test with local ids
+#[kernel] fn nd_item2_basic(
+	item: sycl::nd_item2,
+	#[global] #[write] output: *[*]u32,
+	width: size,
+	height: size,
+) void = {
+	let x = sycl::get_global_id(item, 0);
+	let y = sycl::get_global_id(item, 1);
+	if (x < width && y < height) {
+		let lx = sycl::get_local_id(item, 0);
+		let ly = sycl::get_local_id(item, 1);
+		let idx = y * width + x;
+		output[idx] = idx: u32 + (lx + ly): u32;
+	};
+};

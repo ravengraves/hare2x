@@ -1,0 +1,17 @@
+
+// Matrix transpose using nd_item and work-group coordinates
+#[kernel] fn transpose(
+	item: sycl::nd_item1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	rows: size,
+	cols: size,
+) void = {
+	let gid = sycl::get_global_id(item, 0);
+	let row = gid / cols;
+	let col = gid % cols;
+
+	if (row < rows && col < cols) {
+		output[col * rows + row] = input[row * cols + col];
+	};
+};

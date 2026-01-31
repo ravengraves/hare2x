@@ -1,0 +1,16 @@
+// 3D kernel test using sycl::id3
+#[kernel] fn fill3d(
+	idx: sycl::id3,
+	#[global] #[write] output: *[*]u32,
+	width: size,
+	height: size,
+	depth: size,
+) void = {
+	let x = idx[0];
+	let y = idx[1];
+	let z = idx[2];
+	if (x < width && y < height && z < depth) {
+		let index = (z * height + y) * width + x;
+		output[index] = z * 10000u32 + y * 100u32 + x;
+	};
+};

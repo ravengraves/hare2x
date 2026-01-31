@@ -1,0 +1,14 @@
+
+#[kernel] fn saxpy(
+	idx: sycl::id1,
+	alpha: f32,
+	#[global] #[read] x: *[*]f32,
+	#[global] #[read] y: *[*]f32,
+	#[global] #[write] result: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		result[i] = alpha * x[i] + y[i];
+	};
+};

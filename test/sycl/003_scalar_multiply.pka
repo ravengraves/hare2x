@@ -1,0 +1,13 @@
+
+#[kernel] fn scale(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	factor: f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		output[i] = input[i] * factor;
+	};
+};

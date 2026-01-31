@@ -1,0 +1,18 @@
+
+// Histogram computation using atomic operations
+#[kernel] fn histogram(
+	idx: sycl::id1,
+	#[global] #[read] values: *[*]f32,
+	#[global] #[readwrite] bins: *[*]u32,
+	N: size,
+	num_bins: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		let val = values[i];
+		let bin: u32 = (val * (num_bins: f32)): u32;
+		if (bin < (num_bins: u32)) {
+			sycl::atomic_fetch_add(&bins[bin], 1u32);
+		};
+	};
+};

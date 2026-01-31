@@ -1,0 +1,76 @@
+
+// Simple kernel that uses local memory to copy and process data
+#[kernel] fn local_copy(item: sycl::nd_item1,
+                     #[global] #[read] input: *[*]f32,
+                     #[global] #[write] output: *[*]f32,
+                     #[local] scratch: *[*]f32,
+                     N: size) void = {
+    let gid = sycl::get_global_id(item, 0);
+    let lid = sycl::get_local_id(item, 0);
+
+    // Copy global memory to local memory
+    if (gid < N) {
+        scratch[lid] = input[gid];
+    };
+
+    // Simple processing: multiply by 2
+    if (gid < N) {
+        scratch[lid] = scratch[lid] * 2.0f32;
+    };
+
+    // Copy local memory back to global memory
+    if (gid < N) {
+        output[gid] = scratch[lid];
+    };
+};
+
+// Reduction kernel using local memory
+#[kernel] fn reduce_sum(item: sycl::nd_item1,
+                     #[global] #[read] input: *[*]f32,
+                     #[global] #[write] output: *[*]f32,
+                     #[local] scratch: *[*]f32,
+                     N: size) void = {
+    let gid = sycl::get_global_id(item, 0);
+    let lid = sycl::get_local_id(item, 0);
+    let block_id = sycl::get_group_id(item, 0);
+
+    // Load data to local memory
+    if (gid < N) {
+        scratch[lid] = input[gid];
+    } else {
+        scratch[lid] = 0.0f32;
+    };
+
+    // Reduction tree (simplified - assumes power of 2 work-group size)
+    // In real code, would need barriers here
+    // Unrolled reduction for s = 128, 64, 32, 16, 8, 4, 2, 1
+    if (lid < 128u32 && (gid + 128u32) < N) {
+        scratch[lid] = scratch[lid] + scratch[lid + 128u32];
+    };
+    if (lid < 64u32 && (gid + 64u32) < N) {
+        scratch[lid] = scratch[lid] + scratch[lid + 64u32];
+    };
+    if (lid < 32u32 && (gid + 32u32) < N) {
+        scratch[lid] = scratch[lid] + scratch[lid + 32u32];
+    };
+    if (lid < 16u32 && (gid + 16u32) < N) {
+        scratch[lid] = scratch[lid] + scratch[lid + 16u32];
+    };
+    if (lid < 8u32 && (gid + 8u32) < N) {
+        scratch[lid] = scratch[lid] + scratch[lid + 8u32];
+    };
+    if (lid < 4u32 && (gid + 4u32) < N) {
+        scratch[lid] = scratch[lid] + scratch[lid + 4u32];
+    };
+    if (lid < 2u32 && (gid + 2u32) < N) {
+        scratch[lid] = scratch[lid] + scratch[lid + 2u32];
+    };
+    if (lid < 1u32 && (gid + 1u32) < N) {
+        scratch[lid] = scratch[lid] + scratch[lid + 1u32];
+    };
+
+    // Write result (first work-item in each work-group)
+    if (lid == 0u32 && block_id * 256u32 < N) {
+        output[block_id] = scratch[0];
+    };
+};

@@ -1,0 +1,42 @@
+
+// Kernel 1: Vector addition
+#[kernel] fn add(
+	idx: sycl::id1,
+	#[global] #[read] a: *[*]f32,
+	#[global] #[read] b: *[*]f32,
+	#[global] #[write] c: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		c[i] = a[i] + b[i];
+	};
+};
+
+// Kernel 2: Scalar multiply
+#[kernel] fn scale(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	factor: f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		output[i] = input[i] * factor;
+	};
+};
+
+// Kernel 3: Element-wise multiply
+#[kernel] fn multiply(
+	idx: sycl::id1,
+	#[global] #[read] a: *[*]f32,
+	#[global] #[read] b: *[*]f32,
+	#[global] #[write] c: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		c[i] = a[i] * b[i];
+	};
+};

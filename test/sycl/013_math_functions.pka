@@ -1,0 +1,15 @@
+
+// SYCL math functions test
+#[kernel] fn math_ops(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		let x = input[i];
+		let result = sycl::sqrt(x) + sycl::sin(x) * sycl::cos(x) + sycl::exp(sycl::log(sycl::fabs(x) + 1.0f32));
+		output[i] = result;
+	};
+};

@@ -1,0 +1,25 @@
+
+// Async kernel chaining test
+#[kernel] fn add_one(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		output[i] = input[i] + 1.0f32;
+	};
+};
+
+#[kernel] fn mul_two(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		output[i] = input[i] * 2.0f32;
+	};
+};

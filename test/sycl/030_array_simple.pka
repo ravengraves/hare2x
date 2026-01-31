@@ -1,0 +1,18 @@
+
+// Simple array test - copy array to output
+#[kernel] fn array_copy(
+	idx: sycl::id1,
+	#[global] #[write] output: *[*]f32,
+	N: size
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		// Create a local array
+		let arr: [_]f32 = [1.0f32, 2.0f32, 3.0f32, 4.0f32];
+
+		// Copy one element to output
+		if (i < 4z) {
+			output[i] = arr[i];
+		};
+	};
+};

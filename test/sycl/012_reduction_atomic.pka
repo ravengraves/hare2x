@@ -1,0 +1,13 @@
+
+// Parallel reduction using atomic operations
+#[kernel] fn reduce_atomic(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[readwrite] output: *[*]f32,
+	N: size,
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		sycl::atomic_fetch_add(&output[0], input[i]);
+	};
+};

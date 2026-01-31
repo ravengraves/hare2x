@@ -1,0 +1,4 @@
+
+#[kernel] fn test(idx: sycl::id1) void = {
+	let x: u32 = 5u32;
+};

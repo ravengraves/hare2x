@@ -1,0 +1,48 @@
+
+// Extended math builtins test
+#[kernel] fn math_extended(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	N: size
+) void = {
+	let i = idx[0];
+	if (i < N) {
+		let x = input[i];
+
+		// Test different math functions based on index
+		if (i == 0) {
+			// Trigonometric: tan, asin, acos, atan
+			output[i] = sycl::tan(x) + sycl::asin(x) + sycl::acos(x) + sycl::atan(x);
+		} else if (i == 1) {
+			// Two-argument: atan2, pow
+			output[i] = sycl::atan2(x, 2.0f32) + sycl::pow(x, 2.0f32);
+		} else if (i == 2) {
+			// Rounding: floor, ceil, round, trunc
+			let val = x * 10.0f32;
+			output[i] = sycl::floor(val) + sycl::ceil(val) + sycl::round(val) + sycl::trunc(val);
+		} else if (i == 3) {
+			// Exponential: exp2, log2, log10
+			output[i] = sycl::exp2(x) + sycl::log2(x + 1.0f32) + sycl::log10(x + 1.0f32);
+		} else if (i == 4) {
+			// Min/max: fmin, fmax, clamp
+			let min_a = x;
+			let min_b = x + 1.0f32;
+			output[i] = sycl::fmin(min_a, min_b)
+				+ sycl::fmax(min_a, min_b)
+				+ sycl::clamp(x, 0.0f32, 1.0f32);
+		} else if (i == 5) {
+			// FMA/MAD: fma, mad
+			output[i] = sycl::fma(x, 2.0f32, 1.0f32) + sycl::mad(x, 3.0f32, 2.0f32);
+		} else if (i == 6) {
+			// Other: fabs, sign, rsqrt
+			output[i] = sycl::fabs(x - 0.5f32) + sycl::sign(x) + sycl::rsqrt(x + 1.0f32);
+		} else {
+			// Combination test
+			let pow_val = sycl::pow(x, 2.0f32);
+			let sqrt_val = sycl::sqrt(pow_val);
+			let clamp_val = sycl::clamp(sqrt_val, 0.0f32, 1.0f32);
+			output[i] = clamp_val;
+		};
+	};
+};

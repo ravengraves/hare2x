@@ -1,0 +1,73 @@
+
+// Test: Barrier synchronization with work-group reduction
+
+// Work-group reduction using barriers
+#[kernel] fn barrier_reduction(
+	item: sycl::nd_item1,
+	#[global] #[read] input: *[*]f32,
+	#[global] #[write] output: *[*]f32,
+	#[local] scratch: *[*]f32,
+	N: size
+) void = {
+	let gid = sycl::get_global_id(item, 0);
+	let lid = sycl::get_local_id(item, 0);
+	let wg_size = sycl::get_local_range(item, 0);
+	let group_id = sycl::get_group_id(item, 0);
+
+	// Load data into local memory
+	if (gid < N) {
+		scratch[lid] = input[gid];
+	} else {
+		scratch[lid] = 0.0f32;
+	};
+
+	// Synchronize to ensure all loads complete
+	sycl::barrier(item);
+
+	// Reduction tree - manually unrolled for common work-group size 256
+	let stride = wg_size / 2;
+	if (stride >= 128) {
+		if (lid < 128) { scratch[lid] = scratch[lid] + scratch[lid + 128]; };
+		sycl::barrier(item);
+		stride = 64;
+	};
+	if (stride >= 64) {
+		if (lid < 64) { scratch[lid] = scratch[lid] + scratch[lid + 64]; };
+		sycl::barrier(item);
+		stride = 32;
+	};
+	if (stride >= 32) {
+		if (lid < 32) { scratch[lid] = scratch[lid] + scratch[lid + 32]; };
+		sycl::barrier(item);
+		stride = 16;
+	};
+	if (stride >= 16) {
+		if (lid < 16) { scratch[lid] = scratch[lid] + scratch[lid + 16]; };
+		sycl::barrier(item);
+		stride = 8;
+	};
+	if (stride >= 8) {
+		if (lid < 8) { scratch[lid] = scratch[lid] + scratch[lid + 8]; };
+		sycl::barrier(item);
+		stride = 4;
+	};
+	if (stride >= 4) {
+		if (lid < 4) { scratch[lid] = scratch[lid] + scratch[lid + 4]; };
+		sycl::barrier(item);
+		stride = 2;
+	};
+	if (stride >= 2) {
+		if (lid < 2) { scratch[lid] = scratch[lid] + scratch[lid + 2]; };
+		sycl::barrier(item);
+		stride = 1;
+	};
+	if (stride >= 1) {
+		if (lid < 1) { scratch[lid] = scratch[lid] + scratch[lid + 1]; };
+		sycl::barrier(item);
+	};
+
+	// First work-item writes result
+	if (lid == 0) {
+		output[group_id] = scratch[0];
+	};
+};

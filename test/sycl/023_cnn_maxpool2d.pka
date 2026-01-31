@@ -1,0 +1,63 @@
+
+// Max Pooling 2D
+// Input: [channels, height, width]
+// Output: [channels, out_h, out_w]
+
+#[kernel] fn maxpool2d(
+	idx: sycl::id1,
+	#[global] #[read] input: *[*]f32,      // [C, H, W]
+	#[global] #[write] output: *[*]f32,    // [C, OH, OW]
+	channels: size,
+	in_height: size,
+	in_width: size,
+	out_height: size,
+	out_width: size,
+	pool_h: size,
+	pool_w: size,
+	stride: size
+) void = {
+	let out_idx = idx[0];
+	let total_outputs = channels * out_height * out_width;
+
+	if (out_idx >= total_outputs) {
+		return;
+	};
+
+	// Decode position: [c, y, x]
+	let c = out_idx / (out_height * out_width);
+	let spatial_idx = out_idx % (out_height * out_width);
+	let out_y = spatial_idx / out_width;
+	let out_x = spatial_idx % out_width;
+
+	// Starting position in input
+	let in_y_start = out_y * stride;
+	let in_x_start = out_x * stride;
+
+	// Find maximum in pooling window
+	let max_val: f32 = -3.402823e38f32;  // -FLT_MAX
+
+	let py: size = 0z;
+	for (py < pool_h) {
+		let px: size = 0z;
+		for (px < pool_w) {
+			let in_y = in_y_start + py;
+			let in_x = in_x_start + px;
+
+			if (in_y < in_height && in_x < in_width) {
+				let in_pos = c * (in_height * in_width) +
+				             in_y * in_width +
+				             in_x;
+				let val = input[in_pos];
+				if (val > max_val) {
+					max_val = val;
+				};
+			};
+
+			px += 1z;
+		};
+
+		py += 1z;
+	};
+
+	output[out_idx] = max_val;
+};

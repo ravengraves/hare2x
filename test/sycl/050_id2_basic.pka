@@ -1,0 +1,14 @@
+// 2D kernel test using sycl::id2
+#[kernel] fn fill2d(
+	idx: sycl::id2,
+	#[global] #[write] output: *[*]u32,
+	width: size,
+	height: size,
+) void = {
+	let x = idx[0];
+	let y = idx[1];
+	if (x < width && y < height) {
+		let index = y * width + x;
+		output[index] = y * 1000u32 + x;
+	};
+};
