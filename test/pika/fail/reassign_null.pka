@@ -1,0 +1,4 @@
+// ERROR: cannot assign null to non-nullable pointer
+fn bad(p: *i32) void = {
+	p = null;
+};

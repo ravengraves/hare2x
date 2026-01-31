@@ -1,0 +1,1444 @@
+// pkparse.pka - Pika parsing phase (tokens -> AST)
+// Lexing lives in pklex.pka.
+
+// --- Parsing: State ---
+type parser = struct {
+	t: *tree,
+	c: cursor,
+};
+
+fn p_init(p: *parser, t: *tree) void = {
+	p.t = t;
+	p.c = cur_new(t);
+};
+
+fn type_frame_push(state: u16, wrappers_start: size, tagged_node: uintptr) void = {
+	if (type_frame_top >= TYPE_FRAME_STACK_SIZE) {
+		abort("type too complex (frame stack overflow)");
+	};
+	type_frames[type_frame_top] = type_frame {
+		state = state,
+		wrappers_start = wrappers_start,
+		tagged_node = tagged_node
+	};
+	type_frame_top += 1;
+};
+
+fn type_wrapper_push(kind: u16, flags: u16, size_node: uintptr) void = {
+	if (type_wrapper_top >= TYPE_WRAPPER_STACK_SIZE) {
+		abort("type too complex (wrapper stack overflow)");
+	};
+	type_wrappers[type_wrapper_top] = type_wrapper {
+		kind = kind,
+		flags = flags,
+		size_node = size_node
+	};
+	type_wrapper_top += 1;
+};
+
+// --- Parsing: Types ---
+fn p_type(p: *parser) *tnode = {
+	let saved_frame_top = type_frame_top;
+
+	type_frame_push(TPS_PARSE, type_wrapper_top, 0);
+
+	let result: nullable *tnode = null;
+	let wrapper: type_wrapper = type_wrapper { kind = 0, flags = 0, size_node = 0 };
+	let wrapper_node: *tnode = p.t.root;
+	let cur_tagged: *tnode = p.t.root;
+	for (type_frame_top > saved_frame_top) {
+		type_frame_top -= 1;
+		let f = type_frames[type_frame_top];
+
+		if (f.state == TPS_PARSE) {
+			let ws = type_wrapper_top;
+
+			for (true) {
+				let is_nullable = m_opt(&p.c, TK_NULLABLE) != null;
+				let flags: u16 = 0;
+				if (is_nullable) { flags = F_NULLABLE: u16; };
+
+				if (m_peek_is(&p.c, TK_STAR)) {
+					m_kind(&p.c, TK_STAR);
+					type_wrapper_push(N_T_PTR, flags, 0);
+					continue;
+				};
+				if (m_peek_is(&p.c, TK_BANG)) {
+					m_kind(&p.c, TK_BANG);
+					type_wrapper_push(N_T_ERR, flags, 0);
+					continue;
+				};
+
+				if (m_peek_is(&p.c, TK_LBRACKET)) {
+					m_kind(&p.c, TK_LBRACKET);
+					if (m_peek_is(&p.c, TK_RBRACKET)) {
+						m_kind(&p.c, TK_RBRACKET);
+						type_wrapper_push(N_T_SLICE, flags, 0);
+						continue;
+					};
+					if (m_peek_is(&p.c, TK_STAR)) {
+						m_kind(&p.c, TK_STAR);
+						m_need(&p.c, TK_RBRACKET);
+						type_wrapper_push(N_T_UARR, flags, 0);
+						continue;
+					};
+					let sz: nullable *tnode = null;
+					m_cap(&p.c, &sz);
+					let sz_nn = unwrap(sz);
+					m_need(&p.c, TK_RBRACKET);
+					let arr_flags = flags;
+					if (bref_match(sz_nn.ref, "_", p.t.src)) {
+						arr_flags = arr_flags | F_INFERRED;
+					};
+					type_wrapper_push(N_T_ARR, arr_flags, sz_nn: uintptr);
+					continue;
+				};
+
+				break;
+			};
+
+			if (m_peek_is(&p.c, TK_LPAREN)) {
+				m_kind(&p.c, TK_LPAREN);
+				cur_tagged = t_new(p.t, N_T_TAGGED);
+
+				type_frame_push(TPS_APPLY, ws, 0);
+
+				type_frame_push(TPS_TAGGED_MORE, 0, cur_tagged: uintptr);
+
+				type_frame_push(TPS_PARSE, type_wrapper_top, cur_tagged: uintptr);
+				continue;
+			};
+
+			let k = m_peek_kind(&p.c);
+			if (k == TK_STRUCT) {
+				result = p_struct_type(p);
+			} else if (k == TK_UNION) {
+				result = p_union_type(p);
+			} else if (k == TK_ENUM) {
+				result = p_enum_type(p);
+			} else if (k == TK_FN) {
+				result = p_fn_type(p);
+		} else if (k == TK_VOID) {
+			let vt_nn: *tnode = m_need(&p.c, TK_VOID);
+			result = t_new_ref(p.t, N_T_PRIM, vt_nn.ref);
+			} else {
+				let name: nullable *tnode = null;
+				if (!m_cap_kind(&p.c, TK_IDENT, &name)) {
+					err_cursor(&p.c, "expected type");
+				};
+				let name_nn = unwrap(name);
+				if (m_peek_is(&p.c, TK_COLONCOLON)) {
+					m_kind(&p.c, TK_COLONCOLON);
+					let inner_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+					wrapper_node = t_new(p.t, N_T_QUAL);
+					wrapper_node.ref = name_nn.ref;
+					t_append(wrapper_node, inner_nn);
+					result = wrapper_node;
+				} else if (is_prim_type(name_nn.ref, p.t.src)) {
+					result = t_new_ref(p.t, N_T_PRIM, name_nn.ref);
+				} else {
+					result = t_new_ref(p.t, N_T_ALIAS, name_nn.ref);
+				};
+			};
+
+			for (type_wrapper_top > ws) {
+				type_wrapper_top -= 1;
+				wrapper = type_wrappers[type_wrapper_top];
+				if (wrapper.kind == N_T_ARR && result != null && unwrap(result).kind == N_T_ARR) {
+					err_cursor(&p.c, "multidimensional arrays not supported");
+				};
+				if (wrapper.kind == N_T_ERR && result != null) {
+					let inner_ty_parse = unwrap(result);
+					if (!type_is_void(inner_ty_parse, p.t.src)) {
+						err_cursor(&p.c, "only !void is supported in pika");
+					};
+				};
+				if (wrapper.kind == N_T_PTR && result != null) {
+					let inner_ptr_type = unwrap(result);
+					if (inner_ptr_type.kind == N_T_PRIM && bref_match(inner_ptr_type.ref, "void", p.t.src)) {
+						err_cursor(&p.c, "cannot have pointer to void; use *opaque instead");
+					};
+				};
+				wrapper_node = t_new(p.t, wrapper.kind);
+				wrapper_node.flags = wrapper.flags;
+				t_append(wrapper_node, unwrap(result));
+				if (wrapper.kind == N_T_ARR) {
+					t_append(wrapper_node, wrapper.size_node: *tnode);
+				};
+				result = wrapper_node;
+			};
+
+			if (f.tagged_node != 0) {
+				cur_tagged = f.tagged_node: *tnode;
+				let member = unwrap(result);
+				if (member.kind == N_T_ERR) {
+					err_cursor(&p.c, "tagged union members cannot be !void; use a named alias");
+				};
+				if (type_is_void(member, p.t.src)) {
+					err_cursor(&p.c, "tagged union members cannot be void; use a named alias");
+				};
+				if (!(member.kind == N_T_ALIAS || member.kind == N_T_PRIM || member.kind == N_T_QUAL)) {
+					err_cursor(&p.c, "tagged union members must be named types");
+				};
+				t_append(cur_tagged, member);
+			};
+		} else if (f.state == TPS_TAGGED_MORE) {
+			cur_tagged = f.tagged_node: *tnode;
+			if (m_peek_is(&p.c, TK_PIPE)) {
+				m_kind(&p.c, TK_PIPE);
+
+				type_frame_push(TPS_TAGGED_MORE, 0, cur_tagged: uintptr);
+
+				type_frame_push(TPS_PARSE, type_wrapper_top, cur_tagged: uintptr);
+			} else {
+				m_need(&p.c, TK_RPAREN);
+				result = cur_tagged;
+			};
+		} else if (f.state == TPS_APPLY) {
+			for (type_wrapper_top > f.wrappers_start) {
+				type_wrapper_top -= 1;
+				wrapper = type_wrappers[type_wrapper_top];
+				if (wrapper.kind == N_T_ARR && result != null && unwrap(result).kind == N_T_ARR) {
+					err_cursor(&p.c, "multidimensional arrays not supported");
+				};
+				if (wrapper.kind == N_T_ERR && result != null) {
+					let inner_ty_apply = unwrap(result);
+					if (!type_is_void(inner_ty_apply, p.t.src)) {
+						err_cursor(&p.c, "only !void is supported in pika");
+					};
+				};
+				wrapper_node = t_new(p.t, wrapper.kind);
+				wrapper_node.flags = wrapper.flags;
+				t_append(wrapper_node, unwrap(result));
+				if (wrapper.kind == N_T_ARR) {
+					t_append(wrapper_node, wrapper.size_node: *tnode);
+				};
+				result = wrapper_node;
+			};
+		};
+	};
+
+	return unwrap(result);
+};
+
+fn p_aggregate_type(p: *parser, kw: u16, nk: u16) *tnode = {
+	m_kind(&p.c, kw);
+	m_need(&p.c, TK_LBRACE);
+	let n: *tnode = t_new(p.t, nk);
+	for (!m_peek_is(&p.c, TK_RBRACE) && !cur_eof(&p.c)) {
+		let fname_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+		m_need(&p.c, TK_COLON);
+		let ftype = p_type(p);
+		let field = t_new_ref(p.t, N_FIELD, fname_nn.ref);
+		t_append(field, ftype);
+		t_append(n, field);
+		if (!m_peek_is(&p.c, TK_RBRACE)) { m_need(&p.c, TK_COMMA); };
+	};
+	m_need(&p.c, TK_RBRACE);
+	return n;
+};
+
+fn p_struct_type(p: *parser) *tnode = {
+	return p_aggregate_type(p, TK_STRUCT, N_T_STRUCT);
+};
+
+fn p_union_type(p: *parser) *tnode = {
+	err_cursor(&p.c, "Pika does not allow union types; use tagged unions (T | U) with match, or use pointer casts for reinterpretation");
+	return t_new(p.t, N_T_UNION);
+};
+
+fn p_enum_type(p: *parser) *tnode = {
+	m_kind(&p.c, TK_ENUM);
+	let n: *tnode = t_new(p.t, N_T_ENUM);
+	if (m_peek_is(&p.c, TK_IDENT)) {
+		let base = p_type(p);
+		t_append(n, base);
+	};
+	m_need(&p.c, TK_LBRACE);
+	for (!m_peek_is(&p.c, TK_RBRACE) && !cur_eof(&p.c)) {
+		let mname_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+		let mem: *tnode = t_new_ref(p.t, N_ENUM_MEM, mname_nn.ref);
+		if (m_peek_is(&p.c, TK_EQ)) {
+			m_kind(&p.c, TK_EQ);
+			let val_nn: *tnode = m_need(&p.c, TK_INT);
+			mem.ival = parse_int_base(val_nn.ref, p.t.src).val;
+		};
+		t_append(n, mem);
+		if (!m_peek_is(&p.c, TK_RBRACE)) { m_need(&p.c, TK_COMMA); };
+	};
+	m_need(&p.c, TK_RBRACE);
+	return n;
+};
+
+fn p_fn_type(p: *parser) *tnode = {
+	err_cursor(&p.c, "function pointer types not allowed");
+	return t_new(p.t, 0);
+};
+
+// --- Parsing: Expressions ---
+fn prec(k: u16) i32 = {
+	if (k == TK_OR) { return 1; };
+	if (k == TK_LXOR) { return 2; };
+	if (k == TK_AND) { return 3; };
+	if (k == TK_EQ_EQ || k == TK_NE) { return 4; };
+	if (k == TK_LT || k == TK_GT || k == TK_LE || k == TK_GE) { return 5; };
+	if (k == TK_PIPE) { return 6; };
+	if (k == TK_CARET) { return 7; };
+	if (k == TK_AMP) { return 8; };
+	if (k == TK_SHL || k == TK_SHR) { return 9; };
+	if (k == TK_PLUS || k == TK_MINUS) { return 10; };
+	if (k == TK_STAR || k == TK_SLASH || k == TK_PERCENT) { return 11; };
+	return 0;
+};
+
+fn is_prim_type(r: bref, src: *[*]u8) bool = {
+	let n = r.length;
+	if (n == 2) { return bref_match(r, "i8", src) || bref_match(r, "u8", src); };
+	if (n == 3) {
+		return bref_match(r, "i16", src) || bref_match(r, "i32", src) ||
+		       bref_match(r, "i64", src) || bref_match(r, "u16", src) ||
+		       bref_match(r, "u32", src) || bref_match(r, "u64", src) ||
+		       bref_match(r, "f32", src) || bref_match(r, "f64", src) ||
+		       bref_match(r, "int", src) || bref_match(r, "str", src);
+	};
+	if (n == 4) {
+		return bref_match(r, "uint", src) || bref_match(r, "size", src) ||
+		       bref_match(r, "bool", src);
+	};
+	if (n == 6) { return bref_match(r, "intptr", src); };
+	if (n == 7) { return bref_match(r, "uintptr", src); };
+	return false;
+};
+
+fn num_suffix_tok_at(src: *[*]u8, pos: size, max_len: size, out_len: *size) u16 = {
+	*out_len = 0;
+	let c0: u8 = 0;
+	let c1: u8 = 0;
+	let c2: u8 = 0;
+	if (max_len >= 1) { c0 = src[pos]; };
+	if (max_len >= 2) { c1 = src[pos + 1]; };
+	if (max_len >= 3) { c2 = src[pos + 2]; };
+	if (max_len >= 3) {
+		if (c0 == 'f' && c1 == '3' && c2 == '2') { *out_len = 3; return TK_F32; };
+		if (c0 == 'f' && c1 == '6' && c2 == '4') { *out_len = 3; return TK_F64; };
+		if (c0 == 'i') {
+			if (c1 == '1' && c2 == '6') { *out_len = 3; return TK_I16; };
+			if (c1 == '3' && c2 == '2') { *out_len = 3; return TK_I32; };
+			if (c1 == '6' && c2 == '4') { *out_len = 3; return TK_I64; };
+		} else if (c0 == 'u') {
+			if (c1 == '1' && c2 == '6') { *out_len = 3; return TK_U16; };
+			if (c1 == '3' && c2 == '2') { *out_len = 3; return TK_U32; };
+			if (c1 == '6' && c2 == '4') { *out_len = 3; return TK_U64; };
+		};
+	};
+	if (max_len >= 2) {
+		if (c0 == 'i' && c1 == '8') { *out_len = 2; return TK_I8; };
+		if (c0 == 'u' && c1 == '8') { *out_len = 2; return TK_U8; };
+	};
+	if (max_len >= 1) {
+		if (c0 == 'z') { *out_len = 1; return TK_SIZE; };
+		if (c0 == 'i') { *out_len = 1; return TK_PRIM_INT; };
+		if (c0 == 'u') { *out_len = 1; return TK_PRIM_UINT; };
+	};
+	return 0;
+};
+
+fn num_suffix_tok_end(r: bref, src: *[*]u8, out_len: *size) u16 = {
+	*out_len = 0;
+	if (r.length == 0) { return 0; };
+	let tok: u16 = 0;
+	let slen: size = 0;
+	if (r.length >= 3) {
+		slen = 0;
+		tok = num_suffix_tok_at(src, r.pos + r.length - 3, 3, &slen);
+		if (tok != 0 && slen == 3) { *out_len = slen; return tok; };
+	};
+	if (r.length >= 2) {
+		slen = 0;
+		tok = num_suffix_tok_at(src, r.pos + r.length - 2, 2, &slen);
+		if (tok != 0 && slen == 2) { *out_len = slen; return tok; };
+	};
+	slen = 0;
+	tok = num_suffix_tok_at(src, r.pos + r.length - 1, 1, &slen);
+	if (tok != 0) { *out_len = slen; return tok; };
+	return 0;
+};
+
+fn p_cast(p: *parser) *tnode = {
+	let expr: *tnode = p_unary(p);
+	for (m_peek_is(&p.c, TK_COLON)) {
+		let colon_nn: *tnode = m_need(&p.c, TK_COLON);
+		let ty = p_type(p);
+		let cast = t_new_ref(p.t, N_CAST, colon_nn.ref);
+		t_append(cast, expr);
+		t_append(cast, ty);
+		expr = cast;
+	};
+	return expr;
+};
+
+fn p_struct_lit(p: *parser, ref: bref) *tnode = {
+	m_kind(&p.c, TK_LBRACE);
+	let result_node = t_new_ref(p.t, N_STRUCT_LIT, ref);
+	if (m_peek_is(&p.c, TK_ELLIPSIS)) {
+		m_kind(&p.c, TK_ELLIPSIS);
+		result_node.flags |= F_VARIADIC;
+		if (!m_peek_is(&p.c, TK_RBRACE)) {
+			err_cursor(&p.c, "struct literal fill must be the only entry");
+		};
+		m_need(&p.c, TK_RBRACE);
+		return result_node;
+	};
+	for (!m_peek_is(&p.c, TK_RBRACE) && !cur_eof(&p.c)) {
+		if (m_peek_is(&p.c, TK_ELLIPSIS)) {
+			err_cursor(&p.c, "struct literal fill must be the only entry");
+		};
+		let fname_nn = m_need_ident(&p.c, TK_IDENT);
+		m_need(&p.c, TK_EQ);
+		let fval_node = p_expr(p, 1);
+		let field_node = t_new_ref(p.t, N_FIELD, fname_nn.ref);
+		t_append(field_node, fval_node);
+		t_append(result_node, field_node);
+		if (!m_peek_is(&p.c, TK_RBRACE)) { m_need(&p.c, TK_COMMA); };
+	};
+	m_need(&p.c, TK_RBRACE);
+	return result_node;
+};
+
+fn p_expr(p: *parser, min_prec: i32) *tnode = {
+	let saved_operator_top = expr_operator_top;
+
+	let cur_op: binop_entry = binop_entry { op = 0, ref_pos = 0, ref_len = 0 };
+	let cur_prec: i32 = 0;
+	let bin_right: *tnode = p.t.root;
+	let bin_left: *tnode = p.t.root;
+	let bin_node: *tnode = p.t.root;
+
+	let first = p_cast(p);
+	push_operand(first: uintptr);
+
+	for (!cur_eof(&p.c)) {
+		let op_node = m_peek(&p.c);
+		if (op_node == null) { break; };
+		let opn: *tnode = unwrap(op_node);
+		let op = opn.kind;
+		let op_prec = prec(op);
+		if (op_prec < min_prec) { break; };
+
+		for (!binop_stack_empty() && expr_operator_top > saved_operator_top) {
+			cur_op = binop_stack_top();
+			cur_prec = prec(cur_op.op);
+			if (cur_prec < op_prec) { break; };
+			pop_binop();
+			bin_right = pop_operand(): *tnode;
+			bin_left = pop_operand(): *tnode;
+			bin_node = t_new_ref(p.t, N_BIN, bref { pos = cur_op.ref_pos, length = cur_op.ref_len });
+			bin_node.ival = cur_op.op: i64;
+			t_append(bin_node, bin_left);
+			t_append(bin_node, bin_right);
+			push_operand(bin_node: uintptr);
+		};
+
+		push_binop(op, opn.ref.pos, opn.ref.length);
+		m_any(&p.c);
+
+		let operand = p_cast(p);
+		push_operand(operand: uintptr);
+	};
+
+	for (!binop_stack_empty() && expr_operator_top > saved_operator_top) {
+		cur_op = pop_binop();
+		bin_right = pop_operand(): *tnode;
+		bin_left = pop_operand(): *tnode;
+		bin_node = t_new_ref(p.t, N_BIN, bref { pos = cur_op.ref_pos, length = cur_op.ref_len });
+		bin_node.ival = cur_op.op: i64;
+		t_append(bin_node, bin_left);
+		t_append(bin_node, bin_right);
+		push_operand(bin_node: uintptr);
+	};
+
+	let result: *tnode = pop_operand(): *tnode;
+	return result;
+};
+
+fn p_unary(p: *parser) *tnode = {
+	let local_unary_top: size = 0;
+	let local_unary_ops: [64]unop_entry = [unop_entry { op = 0, ref_pos = 0, ref_len = 0 }...];
+
+	for (true) {
+		let k = m_peek_kind(&p.c);
+		if (!tok_is_unary(k)) { break; };
+		let op: nullable *tnode = null;
+		m_cap(&p.c, &op);
+		let op_nn = unwrap(op);
+		if (local_unary_top >= 64) {
+			abort("too many chained unary operators");
+		};
+		local_unary_ops[local_unary_top].op = k;
+		local_unary_ops[local_unary_top].ref_pos = op_nn.ref.pos;
+		local_unary_ops[local_unary_top].ref_len = op_nn.ref.length;
+		local_unary_top += 1;
+	};
+
+	let expr: *tnode = p_postfix(p);
+
+	for (local_unary_top > 0) {
+		local_unary_top -= 1;
+		let entry = local_unary_ops[local_unary_top];
+		let n: *tnode = t_new_ref(p.t, N_UN, bref { pos = entry.ref_pos, length = entry.ref_len });
+		n.ival = entry.op: i64;
+		t_append(n, expr);
+		expr = n;
+	};
+
+	return expr;
+};
+
+fn p_postfix(p: *parser) *tnode = {
+	let expr: *tnode = p_primary(p);
+	let call_node: *tnode = p.t.root;
+	let arg_node: *tnode = p.t.root;
+	let slice_node: *tnode = p.t.root;
+	let slice_end: nullable *tnode = null;
+	let idx_node: *tnode = p.t.root;
+	let fld_node: *tnode = p.t.root;
+	let field_nn: *tnode = p.t.root;
+	let zero_node: *tnode = p.t.root;
+	let idx_expr: *tnode = p.t.root;
+
+	for (!cur_eof(&p.c)) {
+		let k = m_peek_kind(&p.c);
+		if (k == TK_LPAREN) {
+			m_kind(&p.c, TK_LPAREN);
+			call_node = t_new(p.t, N_CALL);
+			call_node.ref = expr.ref;
+			t_append(call_node, expr);
+			for (!m_peek_is(&p.c, TK_RPAREN) && !cur_eof(&p.c)) {
+				arg_node = p_expr(p, 1);
+				t_append(call_node, arg_node);
+				if (!m_peek_is(&p.c, TK_RPAREN)) { m_need(&p.c, TK_COMMA); };
+			};
+			m_need(&p.c, TK_RPAREN);
+			expr = call_node;
+			continue;
+		};
+		if (k == TK_LBRACKET) {
+			m_kind(&p.c, TK_LBRACKET);
+			if (m_peek_is(&p.c, TK_DOTDOT)) {
+				m_kind(&p.c, TK_DOTDOT);
+				slice_end = p_expr(p, 1);
+				m_need(&p.c, TK_RBRACKET);
+				slice_node = t_new(p.t, N_SLICE);
+				t_append(slice_node, expr);
+				zero_node = t_new(p.t, N_INT);
+				zero_node.ival = 0;
+				t_append(slice_node, zero_node);
+				t_append(slice_node, unwrap(slice_end));
+				expr = slice_node;
+				continue;
+			};
+			idx_expr = p_expr(p, 1);
+			if (m_peek_is(&p.c, TK_DOTDOT)) {
+				m_kind(&p.c, TK_DOTDOT);
+				slice_end = null;
+				if (!m_peek_is(&p.c, TK_RBRACKET)) {
+					slice_end = p_expr(p, 1);
+				};
+				m_need(&p.c, TK_RBRACKET);
+				slice_node = t_new(p.t, N_SLICE);
+				t_append(slice_node, expr);
+				t_append(slice_node, idx_expr);
+				match (slice_end) { case let e: *tnode => t_append(slice_node, e); case null => void; };
+				expr = slice_node;
+				continue;
+			};
+			m_need(&p.c, TK_RBRACKET);
+			idx_node = t_new(p.t, N_IDX);
+			t_append(idx_node, expr);
+			t_append(idx_node, idx_expr);
+			expr = idx_node;
+			continue;
+		};
+		if (k == TK_DOT) {
+			m_kind(&p.c, TK_DOT);
+			field_nn = m_need_ident(&p.c, TK_IDENT);
+			fld_node = t_new_ref(p.t, N_FLD, field_nn.ref);
+			t_append(fld_node, expr);
+			expr = fld_node;
+			continue;
+		};
+		break;
+	};
+	return expr;
+};
+
+fn p_cap_lit(p: *parser, nk: u16) *tnode = {
+	let tok_nn: *tnode = m_need(&p.c, m_peek_kind(&p.c));
+	return t_new_ref(p.t, nk, tok_nn.ref);
+};
+
+fn p_builtin_assert(p: *parser, name_ref: bref) *tnode = {
+	m_any(&p.c);
+	m_need(&p.c, TK_LPAREN);
+	let n: *tnode = t_new_ref(p.t, N_ASSERT, name_ref);
+	let cond: *tnode = p_expr(p, 1);
+	t_append(n, cond);
+	if (m_peek_is(&p.c, TK_COMMA)) {
+		m_kind(&p.c, TK_COMMA);
+		let msg: *tnode = p_expr(p, 1);
+		t_append(n, msg);
+	};
+	m_need(&p.c, TK_RPAREN);
+	return n;
+};
+
+fn p_builtin_abort(p: *parser, name_ref: bref) *tnode = {
+	m_any(&p.c);
+	m_need(&p.c, TK_LPAREN);
+	let n: *tnode = t_new_ref(p.t, N_ABORT, name_ref);
+	if (!m_peek_is(&p.c, TK_RPAREN)) {
+		let msg: *tnode = p_expr(p, 1);
+		t_append(n, msg);
+	};
+	m_need(&p.c, TK_RPAREN);
+	return n;
+};
+
+fn p_builtin_len(p: *parser) *tnode = {
+	m_any(&p.c);
+	m_need(&p.c, TK_LPAREN);
+	let n: *tnode = t_new(p.t, N_LEN);
+	let expr: *tnode = p_expr(p, 1);
+	t_append(n, expr);
+	m_need(&p.c, TK_RPAREN);
+	return n;
+};
+
+fn p_builtin_size(p: *parser) *tnode = {
+	m_any(&p.c);
+	m_need(&p.c, TK_LPAREN);
+	let n: *tnode = t_new(p.t, N_SIZE);
+	let ty: *tnode = p_type(p);
+	t_append(n, ty);
+	m_need(&p.c, TK_RPAREN);
+	return n;
+};
+
+fn p_primary(p: *parser) *tnode = {
+	let tok_nn: *tnode = p.t.root;
+	let result_node: *tnode = p.t.root;
+	let inner_expr: *tnode = p.t.root;
+	let peek_node: nullable *tnode = null;
+	let peek_nn: *tnode = p.t.root;
+	let id_nn: *tnode = p.t.root;
+	let member_nn: *tnode = p.t.root;
+	let suf_len: size = 0;
+	let suf_tok: u16 = 0;
+	let lit_ref: bref = bref_empty();
+	let lit: *tnode = p.t.root;
+	let ty: *tnode = p.t.root;
+	let cast: *tnode = p.t.root;
+
+	let k = m_peek_kind(&p.c);
+
+	if (k == TK_INT) {
+		tok_nn = m_need(&p.c, TK_INT);
+		suf_len = 0;
+		suf_tok = num_suffix_tok_end(tok_nn.ref, p.t.src, &suf_len);
+		lit_ref = tok_nn.ref;
+		if (suf_len > 0) {
+			lit_ref = bref { pos = tok_nn.ref.pos, length = tok_nn.ref.length - suf_len };
+		};
+		lit = t_new_ref_int(p.t, N_INT, lit_ref, parse_int_base(lit_ref, p.t.src).val);
+		if (suf_tok != 0) {
+			ty = type_prim_dummy(p.t, suf_tok);
+			cast = t_new_ref(p.t, N_CAST, tok_nn.ref);
+			t_append(cast, lit);
+			t_append(cast, ty);
+			return cast;
+		};
+		return lit;
+	};
+	if (k == TK_FLOAT) {
+		tok_nn = m_need(&p.c, TK_FLOAT);
+		suf_len = 0;
+		suf_tok = num_suffix_tok_end(tok_nn.ref, p.t.src, &suf_len);
+		lit_ref = tok_nn.ref;
+		if (suf_len > 0) {
+			lit_ref = bref { pos = tok_nn.ref.pos, length = tok_nn.ref.length - suf_len };
+		};
+		lit = t_new_ref(p.t, N_FLOAT, lit_ref);
+		if (suf_tok != 0) {
+			ty = type_prim_dummy(p.t, suf_tok);
+			cast = t_new_ref(p.t, N_CAST, tok_nn.ref);
+			t_append(cast, lit);
+			t_append(cast, ty);
+			return cast;
+		};
+		return lit;
+	};
+	if (tok_is_str(k)) {
+		let nk: u16 = N_RAWSTR;
+		if (k == TK_STR) { nk = N_STR; };
+		let str_node = p_cap_lit(p, nk);
+		for (tok_is_str(m_peek_kind(&p.c))) {
+			let sk = m_peek_kind(&p.c);
+			nk = N_RAWSTR;
+			if (sk == TK_STR) { nk = N_STR; };
+			t_append(str_node, p_cap_lit(p, nk));
+		};
+		return str_node;
+	};
+	if (k == TK_CHAR) { return p_cap_lit(p, N_CHAR); };
+	if (k == TK_VOID) { return p_cap_lit(p, N_T_PRIM); };
+	if (k == TK_TRUE) { m_any(&p.c); return t_new_int(p.t, N_BOOL, 1); };
+	if (k == TK_FALSE) { m_any(&p.c); return t_new_int(p.t, N_BOOL, 0); };
+	if (k == TK_NULL) { return p_cap_lit(p, N_NULL); };
+
+	if (k == TK_LBRACKET) {
+		m_kind(&p.c, TK_LBRACKET);
+		result_node = t_new(p.t, N_ARR_LIT);
+		for (!m_peek_is(&p.c, TK_RBRACKET) && !cur_eof(&p.c)) {
+			inner_expr = p_expr(p, 1);
+			t_append(result_node, inner_expr);
+			if (m_peek_is(&p.c, TK_ELLIPSIS)) {
+				m_kind(&p.c, TK_ELLIPSIS);
+				result_node.flags |= F_VARIADIC;
+				break;
+			};
+			if (!m_peek_is(&p.c, TK_RBRACKET)) { m_need(&p.c, TK_COMMA); };
+		};
+		m_need(&p.c, TK_RBRACKET);
+		return result_node;
+	};
+
+	if (k == TK_LPAREN) {
+		m_kind(&p.c, TK_LPAREN);
+		inner_expr = p_expr(p, 1);
+		m_need(&p.c, TK_RPAREN);
+		return inner_expr;
+	};
+
+	if (k == TK_IDENT) {
+		peek_node = m_peek(&p.c);
+		if (peek_node != null) {
+			peek_nn = unwrap(peek_node);
+			if (bref_match(peek_nn.ref, "assert", p.t.src)) { return p_builtin_assert(p, peek_nn.ref); };
+			if (bref_match(peek_nn.ref, "abort", p.t.src)) { return p_builtin_abort(p, peek_nn.ref); };
+			if (bref_match(peek_nn.ref, "len", p.t.src)) { return p_builtin_len(p); };
+			if (bref_match(peek_nn.ref, "size", p.t.src)) { return p_builtin_size(p); };
+		};
+		id_nn = m_need_ident(&p.c, TK_IDENT);
+		if (m_peek_is(&p.c, TK_COLONCOLON)) {
+			m_kind(&p.c, TK_COLONCOLON);
+			member_nn = m_need_ident(&p.c, TK_IDENT);
+			if (m_peek_is(&p.c, TK_LBRACE)) {
+				let end = member_nn.ref.pos + member_nn.ref.length;
+				let qual_ref = bref_new(id_nn.ref.pos, end - id_nn.ref.pos);
+				return p_struct_lit(p, qual_ref);
+			};
+			result_node = t_new_ref(p.t, N_QUAL_ID, id_nn.ref);
+			t_append(result_node, member_nn);
+			return result_node;
+		};
+		if (m_peek_is(&p.c, TK_LBRACE)) {
+			return p_struct_lit(p, id_nn.ref);
+		};
+		result_node = t_new_ref(p.t, N_ID, id_nn.ref);
+		return result_node;
+	};
+
+	if (k == TK_MATCH) {
+		return p_match(p);
+	};
+
+	err_cursor(&p.c, "expected expression");
+	return t_new(p.t, N_NULL);
+};
+
+// --- Parsing: Statements ---
+fn p_simple_kw(p: *parser, tk: u16, nk: u16) *tnode = {
+	m_kind(&p.c, tk);
+	let n: *tnode = t_new(p.t, nk);
+	m_need(&p.c, TK_SEMI);
+	return n;
+};
+
+fn p_stmt(p: *parser) *tnode = {
+	let result: *tnode = p.t.root;
+	let val_expr: *tnode = p.t.root;
+	let op_nn: *tnode = p.t.root;
+	let k = m_peek_kind(&p.c);
+
+	if (k == TK_STATIC) {
+		m_kind(&p.c, TK_STATIC);
+		result = p_let(p, true);
+		result.flags |= F_STATIC;
+		return result;
+	};
+	if (k == TK_LET) { return p_let(p, true); };
+	if (k == TK_CONST) { return p_let(p, false); };
+	if (k == TK_RETURN) {
+		m_kind(&p.c, TK_RETURN);
+		result = t_new(p.t, N_RET);
+		if (!m_peek_is(&p.c, TK_SEMI)) {
+			val_expr = p_expr(p, 1);
+			t_append(result, val_expr);
+		};
+		m_need(&p.c, TK_SEMI);
+		return result;
+	};
+	if (k == TK_IF) { result = p_if(p); m_need(&p.c, TK_SEMI); return result; };
+	if (k == TK_FOR) { result = p_for(p); m_need(&p.c, TK_SEMI); return result; };
+	if (k == TK_SWITCH) { result = p_switch(p); m_need(&p.c, TK_SEMI); return result; };
+	if (k == TK_MATCH) { result = p_match(p); m_need(&p.c, TK_SEMI); return result; };
+	if (k == TK_BREAK) { return p_simple_kw(p, TK_BREAK, N_BREAK); };
+	if (k == TK_CONTINUE) { return p_simple_kw(p, TK_CONTINUE, N_CONTINUE); };
+
+	if (k == TK_YIELD) {
+		m_kind(&p.c, TK_YIELD);
+		result = t_new(p.t, N_YIELD);
+		val_expr = p_expr(p, 1);
+		t_append(result, val_expr);
+		m_need(&p.c, TK_SEMI);
+		return result;
+	};
+
+	if (k == TK_LBRACE) { result = p_block(p); m_need(&p.c, TK_SEMI); return result; };
+
+	let expr = p_expr(p, 1);
+	let opk = m_peek_kind(&p.c);
+	if (tok_is_assign(opk)) {
+		op_nn = m_need(&p.c, opk);
+		val_expr = p_expr(p, 1);
+		m_need(&p.c, TK_SEMI);
+		result = t_new(p.t, N_ASGN);
+		result.ival = op_nn.kind: i64;
+		t_append(result, expr);
+		t_append(result, val_expr);
+		return result;
+	};
+	m_need(&p.c, TK_SEMI);
+	result = t_new(p.t, N_EXPR_STMT);
+	t_append(result, expr);
+	return result;
+};
+
+fn p_let(p: *parser, mutable: bool) *tnode = {
+	if (mutable) { m_kind(&p.c, TK_LET); } else { m_kind(&p.c, TK_CONST); };
+	let name_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+	let n: *tnode = t_new_ref(p.t, N_LET, name_nn.ref);
+	if (mutable) { n.flags |= F_MUTABLE; };
+	if (m_peek_is(&p.c, TK_COLON)) {
+		m_kind(&p.c, TK_COLON);
+		let ty = p_type(p);
+		if (type_is_void(ty, p.t.src)) {
+			err_cursor(&p.c, "cannot declare variable of type void");
+		};
+		if (ty.kind == N_T_ERR) {
+			err_cursor(&p.c, "use a named alias for !void");
+		};
+		t_append(n, ty);
+	};
+	m_need(&p.c, TK_EQ);
+	let init = p_expr(p, 1);
+	t_append(n, init);
+	m_need(&p.c, TK_SEMI);
+	return n;
+};
+
+fn p_block(p: *parser) *tnode = {
+	m_need(&p.c, TK_LBRACE);
+	let block = t_new(p.t, N_BLOCK);
+	for (!m_peek_is(&p.c, TK_RBRACE) && !cur_eof(&p.c)) {
+		let stmt = p_stmt(p);
+		t_append(block, stmt);
+	};
+	if (block.first_child == null) {
+		err_cursor(&p.c, "empty block not allowed; use 'void;' instead");
+	};
+	m_need(&p.c, TK_RBRACE);
+	return block;
+};
+
+fn p_if(p: *parser) *tnode = {
+	m_kind(&p.c, TK_IF);
+	m_need(&p.c, TK_LPAREN);
+	let cond: *tnode = p_expr(p, 1);
+	m_need(&p.c, TK_RPAREN);
+	let then_block = p_block(p);
+	let root: *tnode = t_new(p.t, N_IF);
+	t_append(root, cond);
+	t_append(root, then_block);
+
+	let current: *tnode = root;
+
+	for (m_peek_is(&p.c, TK_ELSE)) {
+		m_kind(&p.c, TK_ELSE);
+		if (m_peek_is(&p.c, TK_IF)) {
+			m_kind(&p.c, TK_IF);
+			m_need(&p.c, TK_LPAREN);
+			let else_cond: *tnode = p_expr(p, 1);
+			m_need(&p.c, TK_RPAREN);
+			let else_then = p_block(p);
+			let else_if: *tnode = t_new(p.t, N_IF);
+			t_append(else_if, else_cond);
+			t_append(else_if, else_then);
+			t_append(current, else_if);
+			current = else_if;
+		} else {
+			let else_block = p_block(p);
+			t_append(current, else_block);
+			break;
+		};
+	};
+	return root;
+};
+
+fn p_for(p: *parser) *tnode = {
+	m_kind(&p.c, TK_FOR);
+	m_need(&p.c, TK_LPAREN);
+	let n: *tnode = t_new(p.t, N_FOR);
+	if (m_peek_is(&p.c, TK_SEMI)) {
+		err_cursor(&p.c, "empty for loop initializer not allowed");
+	} else if (m_peek_is(&p.c, TK_LET)) {
+		let init = p_let(p, true);
+		t_append(n, init);
+		n.ival |= 1;
+		p_for_cond_after(p, n);
+	} else {
+		let first_expr = p_expr(p, 1);
+		if (m_peek_is(&p.c, TK_SEMI)) {
+			m_kind(&p.c, TK_SEMI);
+			t_append(n, first_expr);
+			n.ival |= 1;
+			p_for_cond_after(p, n);
+		} else {
+			n.flags |= F_NULLABLE;
+			t_append(n, first_expr);
+			m_need(&p.c, TK_RPAREN);
+		};
+	};
+	let body = p_block(p);
+	t_append(n, body);
+	return n;
+};
+
+fn p_for_cond_after(p: *parser, n: *tnode) void = {
+	if (!m_peek_is(&p.c, TK_SEMI)) {
+		let cond: *tnode = p_expr(p, 1);
+		t_append(n, cond);
+		n.ival |= 2;
+	};
+	m_need(&p.c, TK_SEMI);
+	if (!m_peek_is(&p.c, TK_RPAREN)) {
+		p_for_after(p, n);
+		n.ival |= 4;
+	};
+	m_need(&p.c, TK_RPAREN);
+};
+
+fn p_for_after(p: *parser, n: *tnode) void = {
+	let after = p_expr(p, 1);
+	let opk = m_peek_kind(&p.c);
+	if (kind_in4(opk, TK_PLUS_EQ, TK_MINUS_EQ, TK_STAR_EQ, TK_SLASH_EQ)) {
+		let op_nn: *tnode = m_need(&p.c, opk);
+		let val = p_expr(p, 1);
+		let asgn: *tnode = t_new(p.t, N_ASGN);
+		asgn.ival = op_nn.kind: i64;
+		t_append(asgn, after);
+		t_append(asgn, val);
+		t_append(n, asgn);
+	} else {
+		t_append(n, after);
+	};
+};
+
+fn p_case_body(p: *parser, case_node: *tnode) void = {
+	if (m_peek_is(&p.c, TK_LBRACE)) {
+		t_append(case_node, p_block(p));
+		m_need(&p.c, TK_SEMI);
+	} else {
+		let first = p_stmt(p);
+		if (!m_peek_is(&p.c, TK_CASE) && !m_peek_is(&p.c, TK_RBRACE)) {
+			let block = t_new(p.t, N_BLOCK);
+			t_append(block, first);
+			for (!m_peek_is(&p.c, TK_CASE) && !m_peek_is(&p.c, TK_RBRACE) && !cur_eof(&p.c)) {
+				t_append(block, p_stmt(p));
+			};
+			t_append(case_node, block);
+		} else {
+			t_append(case_node, first);
+		};
+	};
+};
+
+fn p_case_head_switch(p: *parser, case_node: *tnode) void = {
+	if (!m_peek_is(&p.c, TK_ARROW)) {
+		for (!m_peek_is(&p.c, TK_ARROW) && !cur_eof(&p.c)) {
+			t_append(case_node, p_expr(p, 1));
+			if (m_peek_is(&p.c, TK_COMMA)) { m_kind(&p.c, TK_COMMA); };
+		};
+	} else {
+		case_node.flags |= F_STATIC;
+	};
+};
+
+fn p_case_head_match(p: *parser, root: *tnode, case_node: *tnode) void = {
+	let k = m_peek_kind(&p.c);
+	if (k == TK_NULL) {
+		m_kind(&p.c, TK_NULL);
+		t_append(case_node, t_new(p.t, N_NULL));
+		root.flags |= F_NULLABLE;
+		return;
+	};
+	if (k == TK_LET) {
+		m_kind(&p.c, TK_LET);
+		let bind_name_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+		m_need(&p.c, TK_COLON);
+		let bind_type = p_type(p);
+		if (type_is_void(bind_type, p.t.src)) {
+			err_cursor(&p.c, "case type cannot be void");
+		};
+		if (bind_type.kind == N_T_ERR) {
+			err_cursor(&p.c, "use a named alias for !void");
+		};
+		let binding = t_new_ref(p.t, N_LET, bind_name_nn.ref);
+		t_append(binding, bind_type);
+		t_append(case_node, binding);
+		case_node.flags |= F_MUTABLE;  // mark as having binding
+		root.flags |= F_NULLABLE;  // case let binding indicates nullable match
+		return;
+	};
+	if (k == TK_ARROW) {
+		case_node.flags |= F_STATIC;  // mark as default case
+		return;
+	};
+	let case_type = p_type(p);
+	if (type_is_void(case_type, p.t.src)) {
+		err_cursor(&p.c, "case type cannot be void");
+	};
+	if (case_type.kind == N_T_ERR) {
+		err_cursor(&p.c, "use a named alias for !void");
+	};
+	t_append(case_node, case_type);
+};
+
+fn p_case_list(p: *parser, root: *tnode, is_match: bool) void = {
+	for (!m_peek_is(&p.c, TK_RBRACE) && !cur_eof(&p.c)) {
+		m_need(&p.c, TK_CASE);
+		let case_node: *tnode = t_new(p.t, N_CASE);
+		if (is_match) {
+			p_case_head_match(p, root, case_node);
+		} else {
+			p_case_head_switch(p, case_node);
+		};
+		m_need(&p.c, TK_ARROW);
+		p_case_body(p, case_node);
+		t_append(root, case_node);
+	};
+};
+
+fn p_switch(p: *parser) *tnode = {
+	m_kind(&p.c, TK_SWITCH);
+	m_need(&p.c, TK_LPAREN);
+	let val = p_expr(p, 1);
+	m_need(&p.c, TK_RPAREN);
+	m_need(&p.c, TK_LBRACE);
+	let n: *tnode = t_new(p.t, N_SWITCH);
+	t_append(n, val);
+	p_case_list(p, n, false);
+	m_need(&p.c, TK_RBRACE);
+	return n;
+};
+
+fn p_match(p: *parser) *tnode = {
+	m_kind(&p.c, TK_MATCH);
+	m_need(&p.c, TK_LPAREN);
+	let val = p_expr(p, 1);
+	m_need(&p.c, TK_RPAREN);
+	m_need(&p.c, TK_LBRACE);
+	let n: *tnode = t_new(p.t, N_MATCH);
+	t_append(n, val);
+	p_case_list(p, n, true);
+	m_need(&p.c, TK_RBRACE);
+	return n;
+};
+
+// --- Parsing: Declarations ---
+fn p_decl(p: *parser) *tnode = {
+	let symbol_name: nullable *tnode = null;
+	let is_kernel = false;
+	let glsl_qual: u16 = 0;
+	let packed = false;
+
+	// Annotations/attributes before export
+	for (m_peek_is(&p.c, TK_HASH) || m_peek_is(&p.c, TK_AT)) {
+		if (m_peek_is(&p.c, TK_HASH)) {
+			m_kind(&p.c, TK_HASH);
+			m_need(&p.c, TK_LBRACKET);
+			let annot_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+			m_need(&p.c, TK_RBRACKET);
+			if (bref_match(annot_nn.ref, "kernel", p.t.src)) {
+				is_kernel = true;
+			} else if (bref_match(annot_nn.ref, "attribute", p.t.src)) {
+				if (glsl_qual != 0) {
+					err_cursor(&p.c, "only one GLSL qualifier annotation is allowed");
+				};
+				glsl_qual = F_GLSL_ATTRIBUTE;
+			} else if (bref_match(annot_nn.ref, "uniform", p.t.src)) {
+				if (glsl_qual != 0) {
+					err_cursor(&p.c, "only one GLSL qualifier annotation is allowed");
+				};
+				glsl_qual = F_GLSL_UNIFORM;
+			} else if (bref_match(annot_nn.ref, "varying", p.t.src)) {
+				if (glsl_qual != 0) {
+					err_cursor(&p.c, "only one GLSL qualifier annotation is allowed");
+				};
+				glsl_qual = F_GLSL_VARYING;
+			} else if (bref_match(annot_nn.ref, "builtin", p.t.src)) {
+				if (glsl_qual != 0) {
+					err_cursor(&p.c, "only one GLSL qualifier annotation is allowed");
+				};
+				glsl_qual = F_GLSL_BUILTIN;
+			} else {
+				err_cursor(&p.c, "unknown annotation");
+			};
+		} else {
+			m_kind(&p.c, TK_AT);
+			let attr_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+			if (bref_match(attr_nn.ref, "symbol", p.t.src)) {
+				if (symbol_name != null) {
+					err_cursor(&p.c, "duplicate @symbol attribute");
+				};
+				m_need(&p.c, TK_LPAREN);
+				let str_tok_nn: *tnode = m_need(&p.c, TK_STR);
+				symbol_name = t_new_ref(p.t, N_SYMBOL_NAME, str_tok_nn.ref);
+				m_need(&p.c, TK_RPAREN);
+				if (m_peek_is(&p.c, TK_EXPORT)) {
+					err_cursor(&p.c, "@symbol must follow 'export', not precede it");
+				};
+			} else if (bref_match(attr_nn.ref, "packed", p.t.src)) {
+				packed = true;
+			} else if (bref_match(attr_nn.ref, "kernel", p.t.src) ||
+				bref_match(attr_nn.ref, "attribute", p.t.src) ||
+				bref_match(attr_nn.ref, "uniform", p.t.src) ||
+				bref_match(attr_nn.ref, "varying", p.t.src) ||
+				bref_match(attr_nn.ref, "builtin", p.t.src)) {
+				err_cursor(&p.c, "environment-specific annotations use #[name], not @name");
+			} else {
+				err_cursor(&p.c, "unknown attribute");
+			};
+		};
+	};
+
+	let exported = m_opt(&p.c, TK_EXPORT) != null;
+
+	// Annotations/attributes after export
+	for (m_peek_is(&p.c, TK_HASH) || m_peek_is(&p.c, TK_AT)) {
+		if (m_peek_is(&p.c, TK_HASH)) {
+			m_kind(&p.c, TK_HASH);
+			m_need(&p.c, TK_LBRACKET);
+			let annot2: *tnode = m_need_ident(&p.c, TK_IDENT);
+			m_need(&p.c, TK_RBRACKET);
+			if (bref_match(annot2.ref, "kernel", p.t.src)) {
+				is_kernel = true;
+			} else if (bref_match(annot2.ref, "attribute", p.t.src)) {
+				if (glsl_qual != 0) {
+					err_cursor(&p.c, "only one GLSL qualifier annotation is allowed");
+				};
+				glsl_qual = F_GLSL_ATTRIBUTE;
+			} else if (bref_match(annot2.ref, "uniform", p.t.src)) {
+				if (glsl_qual != 0) {
+					err_cursor(&p.c, "only one GLSL qualifier annotation is allowed");
+				};
+				glsl_qual = F_GLSL_UNIFORM;
+			} else if (bref_match(annot2.ref, "varying", p.t.src)) {
+				if (glsl_qual != 0) {
+					err_cursor(&p.c, "only one GLSL qualifier annotation is allowed");
+				};
+				glsl_qual = F_GLSL_VARYING;
+			} else if (bref_match(annot2.ref, "builtin", p.t.src)) {
+				if (glsl_qual != 0) {
+					err_cursor(&p.c, "only one GLSL qualifier annotation is allowed");
+				};
+				glsl_qual = F_GLSL_BUILTIN;
+			} else {
+				err_cursor(&p.c, "unknown annotation");
+			};
+		} else {
+			m_kind(&p.c, TK_AT);
+			let attr2: *tnode = m_need_ident(&p.c, TK_IDENT);
+			if (bref_match(attr2.ref, "symbol", p.t.src)) {
+				if (symbol_name != null) {
+					err_cursor(&p.c, "duplicate @symbol attribute");
+				};
+				m_need(&p.c, TK_LPAREN);
+				let str2: *tnode = m_need(&p.c, TK_STR);
+				symbol_name = t_new_ref(p.t, N_SYMBOL_NAME, str2.ref);
+				m_need(&p.c, TK_RPAREN);
+			} else if (bref_match(attr2.ref, "packed", p.t.src)) {
+				packed = true;
+			} else if (bref_match(attr2.ref, "kernel", p.t.src) ||
+				bref_match(attr2.ref, "attribute", p.t.src) ||
+				bref_match(attr2.ref, "uniform", p.t.src) ||
+				bref_match(attr2.ref, "varying", p.t.src) ||
+				bref_match(attr2.ref, "builtin", p.t.src)) {
+				err_cursor(&p.c, "environment-specific annotations use #[name], not @name");
+			} else {
+				err_cursor(&p.c, "unknown attribute");
+			};
+		};
+	};
+
+	if (is_kernel && !m_peek_is(&p.c, TK_FN)) {
+		err_cursor(&p.c, "#[kernel] must be used with a function declaration");
+	};
+	if (glsl_qual != 0 && !(m_peek_is(&p.c, TK_LET) || m_peek_is(&p.c, TK_CONST))) {
+		err_cursor(&p.c, "GLSL qualifier annotations must be used with global variables");
+	};
+	if (packed && !m_peek_is(&p.c, TK_TYPE)) {
+		err_cursor(&p.c, "@packed is only valid on type declarations");
+	};
+	if (symbol_name != null && !m_peek_is(&p.c, TK_FN)) {
+		err_cursor(&p.c, "@symbol is only valid on function declarations");
+	};
+
+	if (m_peek_is(&p.c, TK_FN)) { return p_fn_with_symbol(p, exported, symbol_name, is_kernel); };
+	if (m_peek_is(&p.c, TK_TYPE)) { return p_typedef(p, exported, packed); };
+	if (m_peek_is(&p.c, TK_DEF)) { return p_def(p); };
+	if (m_peek_is(&p.c, TK_USE)) { return p_use(p); };
+	if (m_peek_is(&p.c, TK_LET) || m_peek_is(&p.c, TK_CONST)) {
+		return p_global(p, exported, glsl_qual);
+	};
+	err_cursor(&p.c, "expected declaration");
+	return t_new(p.t, N_NULL);
+};
+
+fn p_global(p: *parser, exported: bool, glsl_qual: u16) *tnode = {
+	let mutable = m_peek_is(&p.c, TK_LET);
+	if (mutable) { m_kind(&p.c, TK_LET); } else { m_kind(&p.c, TK_CONST); };
+	let name_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+	let n: *tnode = t_new_ref(p.t, N_GLOBAL, name_nn.ref);
+	if (exported) { n.flags |= F_EXPORTED; };
+	if (mutable) { n.flags |= F_MUTABLE; };
+	if (glsl_qual != 0) { n.flags |= glsl_qual; };
+	if (m_peek_is(&p.c, TK_COLON)) {
+		m_kind(&p.c, TK_COLON);
+		let ty = p_type(p);
+		if (type_is_void(ty, p.t.src)) {
+			err_cursor(&p.c, "cannot declare variable of type void");
+		};
+		if (ty.kind == N_T_ERR) {
+			err_cursor(&p.c, "use a named alias for !void");
+		};
+		t_append(n, ty);
+	};
+	m_need(&p.c, TK_EQ);
+	let init = p_expr(p, 1);
+	t_append(n, init);
+	m_need(&p.c, TK_SEMI);
+	return n;
+};
+
+fn p_fn_with_symbol(p: *parser, exported: bool, symbol_name: nullable *tnode, is_kernel: bool) *tnode = {
+	m_kind(&p.c, TK_FN);
+	let name_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+	let n: *tnode = t_new_ref(p.t, N_FN, name_nn.ref);
+	if (exported) { n.flags |= F_EXPORTED; };
+	if (is_kernel) { n.flags |= F_KERNEL; };
+	match (symbol_name) {
+	case let s: *tnode =>
+		n.flags |= F_SYMBOL;
+		t_append(n, s);
+	case null => void;
+	};
+	m_need(&p.c, TK_LPAREN);
+	let saw_default = false;
+	for (!m_peek_is(&p.c, TK_RPAREN) && !cur_eof(&p.c)) {
+		let param_flags: u16 = 0;
+		let saw_addr_attr = false;
+		let saw_param_attr = false;
+		for (m_peek_is(&p.c, TK_HASH) || m_peek_is(&p.c, TK_AT)) {
+			saw_param_attr = true;
+			if (m_peek_is(&p.c, TK_HASH)) {
+				m_kind(&p.c, TK_HASH);
+				m_need(&p.c, TK_LBRACKET);
+				let annot_param: *tnode = m_need_ident(&p.c, TK_IDENT);
+				m_need(&p.c, TK_RBRACKET);
+				if (bref_match(annot_param.ref, "local", p.t.src)) {
+					if (saw_addr_attr) {
+						err_cursor(&p.c, "duplicate address space annotation");
+					};
+					saw_addr_attr = true;
+					param_flags |= F_SYCL_LOCAL;
+				} else if (bref_match(annot_param.ref, "global", p.t.src)) {
+					if (saw_addr_attr) {
+						err_cursor(&p.c, "duplicate address space annotation");
+					};
+					saw_addr_attr = true;
+				} else if (bref_match(annot_param.ref, "read", p.t.src)) {
+					if ((param_flags & F_SYCL_READ) != 0) {
+						err_cursor(&p.c, "duplicate access annotation");
+					};
+					param_flags |= F_SYCL_READ;
+				} else if (bref_match(annot_param.ref, "write", p.t.src)) {
+					if ((param_flags & F_SYCL_WRITE) != 0) {
+						err_cursor(&p.c, "duplicate access annotation");
+					};
+					param_flags |= F_SYCL_WRITE;
+				} else if (bref_match(annot_param.ref, "readwrite", p.t.src)) {
+					if ((param_flags & (F_SYCL_READ | F_SYCL_WRITE)) != 0) {
+						err_cursor(&p.c, "duplicate access annotation");
+					};
+					param_flags |= F_SYCL_READ | F_SYCL_WRITE;
+				} else {
+					err_cursor(&p.c, "unknown parameter annotation");
+				};
+			} else {
+				m_kind(&p.c, TK_AT);
+				let attr_param: *tnode = m_need_ident(&p.c, TK_IDENT);
+				if (bref_match(attr_param.ref, "local", p.t.src) ||
+					bref_match(attr_param.ref, "global", p.t.src) ||
+					bref_match(attr_param.ref, "read", p.t.src) ||
+					bref_match(attr_param.ref, "write", p.t.src) ||
+					bref_match(attr_param.ref, "readwrite", p.t.src)) {
+					err_cursor(&p.c, "kernel parameter annotations use #[name], not @name");
+				} else {
+					err_cursor(&p.c, "unknown parameter attribute");
+				};
+			};
+		};
+		if (saw_param_attr && !is_kernel) {
+			err_cursor(&p.c, "kernel parameter annotations require #[kernel]");
+		};
+		let pname_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+		m_need(&p.c, TK_COLON);
+		let ptype = p_type(p);
+		if (ptype.kind == N_T_ERR) {
+			err_cursor(&p.c, "use a named alias for !void");
+		};
+		let default_val: nullable *tnode = null;
+		if (m_peek_is(&p.c, TK_EQ)) {
+			m_kind(&p.c, TK_EQ);
+			default_val = p_expr(p, 1);
+			saw_default = true;
+		} else if (saw_default) {
+			err_cursor(&p.c, "non-default parameter follows default parameter");
+		};
+		let param = t_new_ref(p.t, N_PARAM, pname_nn.ref);
+		if (param_flags != 0) {
+			param.flags |= param_flags;
+		};
+		t_append(param, ptype);
+		match (default_val) {
+		case let def_val: *tnode => t_append(param, def_val);
+		case null => void;
+		};
+		t_append(n, param);
+		if (!m_peek_is(&p.c, TK_RPAREN)) { m_need(&p.c, TK_COMMA); };
+	};
+	m_need(&p.c, TK_RPAREN);
+	let ret_type = p_type(p);
+	if (ret_type.kind == N_T_ERR) {
+		err_cursor(&p.c, "use a named alias for !void");
+	};
+	t_append(n, ret_type);
+	if (m_peek_is(&p.c, TK_SEMI)) {
+		m_need(&p.c, TK_SEMI);
+		n.flags |= F_EXTERN;
+		return n;
+	};
+	m_need(&p.c, TK_EQ);
+	let body = p_block(p);
+	t_append(n, body);
+	m_need(&p.c, TK_SEMI);
+	return n;
+};
+
+fn p_typedef(p: *parser, exported: bool, packed: bool) *tnode = {
+	m_kind(&p.c, TK_TYPE);
+	let name_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+	m_need(&p.c, TK_EQ);
+	let ty = p_type(p);
+	if (packed) {
+		if (ty.kind != N_T_STRUCT) {
+			err_cursor(&p.c, "@packed is only valid on struct types");
+		};
+		ty.flags |= F_PACKED;
+	};
+	if (type_is_void(ty, p.t.src)) {
+		err_cursor(&p.c, "cannot alias void; use !void instead");
+	};
+	m_need(&p.c, TK_SEMI);
+	let n: *tnode = t_new_ref(p.t, N_TYPEDEF, name_nn.ref);
+	if (exported) { n.flags |= F_EXPORTED; };
+	t_append(n, ty);
+	return n;
+};
+
+fn p_def(p: *parser) *tnode = {
+	m_kind(&p.c, TK_DEF);
+	let name_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+	let n: *tnode = t_new_ref(p.t, N_DEF, name_nn.ref);
+	if (m_peek_is(&p.c, TK_COLON)) {
+		m_kind(&p.c, TK_COLON);
+		let ty = p_type(p);
+		t_append(n, ty);
+	};
+	m_need(&p.c, TK_EQ);
+	let val = p_expr(p, 1);
+	t_append(n, val);
+	m_need(&p.c, TK_SEMI);
+	return n;
+};
+
+fn p_use(p: *parser) *tnode = {
+	m_kind(&p.c, TK_USE);
+	let first_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
+
+	if (m_peek_is(&p.c, TK_EQ)) {  // explicit alias: use t = path;
+		m_kind(&p.c, TK_EQ);
+		let path_start: *tnode = m_need_ident(&p.c, TK_IDENT);
+		let last_nn: *tnode = path_start;
+		for (m_peek_is(&p.c, TK_COLONCOLON)) {
+			m_kind(&p.c, TK_COLONCOLON);
+			last_nn = m_need_ident(&p.c, TK_IDENT);
+		};
+		// Build full path ref spanning from path_start to last_nn
+		let full_ref_explicit = bref_new(path_start.ref.pos, last_nn.ref.pos + last_nn.ref.length - path_start.ref.pos);
+		let use_node_explicit: *tnode = t_new_ref(p.t, N_USE, full_ref_explicit);
+		t_append(use_node_explicit, first_nn);  // alias as child
+		m_need(&p.c, TK_SEMI);
+		return use_node_explicit;
+	};
+
+	// Regular use: parse path, implicit alias = last component
+	let path_last: *tnode = first_nn;
+	for (m_peek_is(&p.c, TK_COLONCOLON)) {
+		m_kind(&p.c, TK_COLONCOLON);
+		path_last = m_need_ident(&p.c, TK_IDENT);
+	};
+	// Build full path ref spanning from first_nn to last_nn
+	let full_ref_implicit = bref_new(first_nn.ref.pos, path_last.ref.pos + path_last.ref.length - first_nn.ref.pos);
+	let use_node_implicit: *tnode = t_new_ref(p.t, N_USE, full_ref_implicit);
+	t_append(use_node_implicit, path_last);  // implicit alias (last component)
+	m_need(&p.c, TK_SEMI);
+	return use_node_implicit;
+};
+
+// --- Parsing: Top Level ---
+fn parse(t: *tree) void = {
+	let p: parser = parser { t = t, c = cursor { node = null, src = t.src, src_len = t.src_len } };
+	p_init(&p, t);
+	let unit: *tnode = t_new(t, N_UNIT);
+	for (!cur_eof(&p.c)) {
+		let decl = p_decl(&p);
+		t_append(unit, decl);
+	};
+	t.root.first_child = unit;
+	t.root.last_child = unit;
+	unit.parent = t.root;
+	unit.prev = null;
+	unit.next = null;
+};

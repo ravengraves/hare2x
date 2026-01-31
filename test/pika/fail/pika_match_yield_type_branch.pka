@@ -1,0 +1,18 @@
+// ERROR: match yields different types
+fn main() void = {
+	let x: i32 = 1;
+	let p: nullable *i32 = &x;
+
+	let val = match (p) {
+	case let ptr: *i32 =>
+		if (true) {
+			yield *ptr;
+		} else {
+			yield 0f32;
+		};
+	case null =>
+		yield 0i32;
+	};
+
+	if (val == 0i32) { void; };
+};

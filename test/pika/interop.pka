@@ -1,0 +1,30 @@
+// interop.ha - Test @symbol attribute for C interop
+use rt;
+
+// Function with custom C symbol name
+export @symbol("my_c_function") fn my_c_function() i32 = {
+	return 42;
+};
+
+// Another example - exposed as compute_sum in C
+@symbol("compute_sum") fn compute_sum(a: i32, b: i32) i32 = {
+	return a + b;
+};
+
+// Regular function (no @symbol)
+fn regular_func() i32 = {
+	return 100;
+};
+
+export fn main() void = {
+	// Call the @symbol functions by their symbol name
+	let x = my_c_function();
+	assert(x == 42);
+
+	let y = compute_sum(10, 20);
+	assert(y == 30);
+
+	// Regular function works as normal
+	let z = regular_func();
+	assert(z == 100);
+};

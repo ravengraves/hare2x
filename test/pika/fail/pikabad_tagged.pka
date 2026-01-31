@@ -1,0 +1,94 @@
+// tagged.ha - Tagged union and match tests
+
+// Simple tagged union
+// ERROR on next line: This type is not exported but used in exported function (line 10, 14)
+// Expected: "/tmp/tagged.ha:10:7: error: Can't use unexported type number in exported declaration"
+// Fix: Add 'export' keyword: export type number = (i32 | f32);
+type number = (i32 | f32);
+
+// Tagged union with !void alias
+// ERROR on next line: This type is not exported but used in exported function (line 27, 31)
+// Expected: "error: Can't use unexported type optional_int in exported declaration"
+// Fix: Add 'export' keyword: export type optional_int = (i32 | none);
+type none = !void;
+type optional_int = (i32 | none);
+
+// Create tagged union values
+export fn make_int(v: i32) number = {
+	return v: number;
+};
+
+export fn make_float(v: f32) number = {
+	return v: number;
+};
+
+// Match on tagged union
+export fn get_as_int(n: number) i32 = {
+	match (n) {
+	case i32 => return n: i32;
+	case f32 => return (n: f32): i32;
+	};
+};
+
+// Optional pattern
+export fn make_some(v: i32) optional_int = {
+	return v: optional_int;
+};
+
+export fn make_none() optional_int = {
+	return none: optional_int;
+};
+
+// Multi-variant tagged union
+// ERROR on next line: This type is not exported but used in exported function (line 38)
+// Expected: "error: Can't use unexported type value in exported declaration"
+// Fix: Add 'export' keyword: export type value = (i32 | u32 | f64 | bool);
+type value = (i32 | u32 | f64 | bool);
+
+export fn value_to_int(v: value) i32 = {
+	match (v) {
+	case i32 => return v: i32;
+	case u32 => return (v: u32): i32;
+	case f64 => return (v: f64): i32;
+	case bool => {
+		if (v: bool) {
+			return 1;
+		};
+		return 0;
+	};
+	};
+};
+
+// Named type alias for tagged
+// ERROR on next line: This type is not exported but used in exported function (line 55)
+// Expected: "error: Can't use unexported type result_int in exported declaration"
+// Fix: Add 'export' keyword: export type result_int = (i32 | bool);
+type result_int = (i32 | bool);
+
+export fn get_result(success: bool, val: i32) result_int = {
+	if (success) {
+		return val: result_int;
+	};
+	return false: result_int;
+};
+
+export fn _main() void = {
+	let n1 = make_int(42);
+	let n2 = make_float(3.14);
+
+	let i1 = get_as_int(n1);
+	let i2 = get_as_int(n2);
+
+	let some = make_some(100);
+	let none = make_none();
+
+	// ERROR on next line: Invalid cast from u32 to tagged union without explicit type
+	// Expected: "/tmp/tagged.ha:72:27: error: Invalid cast from u32 to value"
+	// Fix: Explicitly specify the variant: let v1 = (42: i32): value;
+	let v1 = 42: value;
+	let v2 = true: value;
+	let vi1 = value_to_int(v1);
+	let vi2 = value_to_int(v2);
+
+	let r = get_result(true, 99);
+};

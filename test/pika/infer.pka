@@ -1,0 +1,144 @@
+// Test: Type inference from function calls for auto-deref
+use rt;
+
+type point = struct {
+	x: i32,
+	y: i32,
+};
+
+// Function returning pointer to struct
+fn make_point(x: i32, y: i32, pt: *point) *point = {
+	pt.x = x;
+	pt.y = y;
+	return pt;
+};
+
+// Test: infer type from function call, then use auto-deref
+fn test_infer_call() void = {
+	let storage = point { x = 0, y = 0 };
+	let p = make_point(10, 20, &storage);
+	// p is inferred as *point from function return type
+	// p.x should auto-deref to p->x
+	assert(p.x == 10);
+	assert(p.y == 20);
+};
+
+// Test: chained field access after inferred type
+fn test_chained() void = {
+	let storage = point { x = 5, y = 15 };
+	let p = make_point(5, 15, &storage);
+	let sum = p.x + p.y;
+	assert(sum == 20);
+};
+
+// Function returning non-pointer
+fn get_value() i32 = {
+	return 42;
+};
+
+// Test: ensure non-pointer return works
+fn test_non_ptr_return() void = {
+	let v = get_value();
+	assert(v == 42);
+};
+
+// Test: type inference through match/yield with nullable pointer
+fn test_match_yield_nullable() void = {
+	let storage = point { x = 100, y = 200 };
+	let nullable_ptr: nullable *point = &storage;
+
+	// Match expression with case let binding - type should be inferred as *point
+	let p = match (nullable_ptr) {
+	case let ptr: *point =>
+		yield ptr;
+	case =>
+		yield &storage;
+	};
+
+	// p.x should auto-deref because p is inferred as *point
+	assert(p.x == 100);
+	assert(p.y == 200);
+};
+
+// Test: match yield with function call inside
+fn test_match_yield_with_call() void = {
+	let storage = point { x = 0, y = 0 };
+	let nullable_ptr: nullable *point = &storage;
+
+	let p = match (nullable_ptr) {
+	case let ptr: *point =>
+		yield make_point(50, 60, ptr);
+	case =>
+		yield &storage;
+	};
+
+	assert(p.x == 50);
+	assert(p.y == 60);
+};
+
+// Test: auto-deref on returned struct pointer (direct return)
+let global_pt: point = point { x = 77, y = 88 };
+
+fn get_point_ptr() *point = {
+	return &global_pt;
+};
+
+fn test_return_ptr_deref() void = {
+	let p = get_point_ptr();  // inferred as *point
+	// p.x should auto-deref to p->x
+	assert(p.x == 77);
+	assert(p.y == 88);
+	// Also test chained operations
+	let sum = p.x + p.y;
+	assert(sum == 165);
+};
+
+// Test: auto-deref on returned pointer used directly in expression
+fn test_return_ptr_direct() void = {
+	// Direct field access on function call result
+	assert(get_point_ptr().x == 77);
+	assert(get_point_ptr().y == 88);
+};
+
+// Test: infer type from pointer parameter assignment
+fn process_point(n: *point) i32 = {
+	// n is *point, so current should be inferred as *point
+	let current = n;
+	// current.x should auto-deref to current->x
+	return current.x + current.y;
+};
+
+fn test_param_assign() void = {
+	let pt = point { x = 7, y = 8 };
+	let result = process_point(&pt);
+	assert(result == 15);
+};
+
+// Test: multiple assignments from pointer param
+fn walk_points(start: *point, count: i32) i32 = {
+	let p = start;  // inferred as *point
+	let sum: i32 = 0;
+	for (let i: i32 = 0; i < count; i += 1) {
+		sum += p.x + p.y;  // auto-deref
+		p = start;  // reassign still works
+	};
+	return sum;
+};
+
+fn test_param_reassign() void = {
+	let pt = point { x = 3, y = 4 };
+	let result = walk_points(&pt, 3);
+	assert(result == 21);  // (3+4) * 3 = 21
+};
+
+export fn main() void = {
+	test_infer_call();
+	test_chained();
+	test_non_ptr_return();
+	test_match_yield_nullable();
+	test_match_yield_with_call();
+	test_return_ptr_deref();
+	test_return_ptr_direct();
+	test_param_assign();
+	test_param_reassign();
+};

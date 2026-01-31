@@ -1,0 +1,1205 @@
+// gen_sycl.pka - SYCL-specific codegen helpers
+
+// Error accessor reference kind (current scope)
+def SYCL_ERROR_REF_NONE: u8 = 0;
+def SYCL_ERROR_REF_PARAM: u8 = 1;
+def SYCL_ERROR_REF_MEMBER: u8 = 2;
+
+// Track which error accessor name should be emitted in the current scope.
+let sycl_current_error_ref: u8 = SYCL_ERROR_REF_NONE;
+
+fn sycl_emit_error_ref(g: *codegen) void = {
+	if (sycl_current_error_ref == SYCL_ERROR_REF_PARAM) {
+		emit_s(&g.em, "psycl_error_acc");
+		return;
+	};
+	if (sycl_current_error_ref == SYCL_ERROR_REF_MEMBER) {
+		emit_s(&g.em, "psycl_error_acc_");
+		return;
+	};
+	emit_s(&g.em, "/*no_error*/");
+};
+
+fn sycl_emit_symbol_name(g: *codegen, n: *tnode) bool = {
+	if ((n.flags & F_SYMBOL) == 0) { return false; };
+	let sym: *tnode = t_first_nn(n);
+	let r: bref = sym.ref;
+	if (r.length <= 2) { return true; };
+	let inner = bref { pos = r.pos + 1, length = r.length - 2 };
+	e_bref(&g.em, inner);
+	return true;
+};
+
+fn sycl_emit_return_default(g: *codegen) void = {
+	match (g.cur_ret_type) {
+	case let ty: *tnode =>
+		let t = ty;
+		match (resolve_alias_type(g, t)) {
+		case let resolved: *tnode => t = resolved;
+		case null => void;
+		};
+		if (type_is_void(t, g.t.src)) {
+			emit_s(&g.em, "return;");
+			return;
+		};
+		// Value-initialize for non-void returns
+		emit_s(&g.em, "return {};");
+	case null =>
+		emit_s(&g.em, "return;");
+	};
+};
+
+fn sycl_emit_fail_call(g: *codegen, code: u32, pos: size) void = {
+	let lc = pos_to_line_col(pos, g.t.src, g.t.src_len);
+	emit_s(&g.em, "psycl_fail(");
+	sycl_emit_error_ref(g);
+	emit_s(&g.em, ", ");
+	e_u(&g.em, code: u64);
+	emit_s(&g.em, ", ");
+	e_u(&g.em, lc.line);
+	emit_s(&g.em, ", ");
+	e_u(&g.em, lc.col);
+	emit_s(&g.em, ");");
+};
+
+fn sycl_emit_fail_return(g: *codegen, code: u32, pos: size) void = {
+	sycl_emit_fail_call(g, code, pos);
+	e_nl(&g.em);
+	sycl_emit_return_default(g);
+};
+
+// ----------------------------------------------------------------------------
+// String/char literal helpers (mirrors GNU C11 semantics)
+// ----------------------------------------------------------------------------
+
+fn sycl_hex_digit(v: u8) u8 = {
+	if (v < 10) { return '0' + v; };
+	return 'a' + v - 10;
+};
+
+fn sycl_hex_byte(em: *emitter, b: u8) void = {
+	e_raw(em, "\\x");
+	e_raw_c(em, sycl_hex_digit(b >> 4));
+	e_raw_c(em, sycl_hex_digit(b & 0xf));
+};
+
+fn sycl_parse_hex(src: *[*]u8, pos: size, count: size) u32 = {
+	let val: u32 = 0;
+	for (let i = 0z; i < count; i += 1) {
+		let c = src[pos + i];
+		val <<= 4;
+		if (c >= '0' && c <= '9') { val |= (c - '0'): u32; }
+		else if (c >= 'a' && c <= 'f') { val |= (c - 'a' + 10): u32; }
+		else if (c >= 'A' && c <= 'F') { val |= (c - 'A' + 10): u32; };
+	};
+	return val;
+};
+
+fn sycl_parse_oct(src: *[*]u8, pos: size, count: size) u32 = {
+	let val: u32 = 0;
+	for (let i = 0z; i < count; i += 1) {
+		let c = src[pos + i];
+		val <<= 3;
+		if (c >= '0' && c <= '7') { val |= (c - '0'): u32; };
+	};
+	return val;
+};
+
+fn sycl_utf8_len(cp: u32) size = {
+	if (cp < 0x80) { return 1; };
+	if (cp < 0x800) { return 2; };
+	if (cp < 0x10000) { return 3; };
+	return 4;
+};
+
+fn sycl_emit_utf8(em: *emitter, cp: u32) void = {
+	if (cp < 0x80) {
+		e_raw(em, "\\x");
+		sycl_hex_fixed(em, cp, 2);
+		return;
+	};
+	if (cp < 0x800) {
+		let b1_2 = (0xC0 | (cp >> 6)): u8;
+		let b2_2 = (0x80 | (cp & 0x3F)): u8;
+		e_raw(em, "\\x"); sycl_hex_fixed(em, b1_2, 2);
+		e_raw(em, "\\x"); sycl_hex_fixed(em, b2_2, 2);
+		return;
+	};
+	if (cp < 0x10000) {
+		let b1_3 = (0xE0 | (cp >> 12)): u8;
+		let b2_3 = (0x80 | ((cp >> 6) & 0x3F)): u8;
+		let b3_3 = (0x80 | (cp & 0x3F)): u8;
+		e_raw(em, "\\x"); sycl_hex_fixed(em, b1_3, 2);
+		e_raw(em, "\\x"); sycl_hex_fixed(em, b2_3, 2);
+		e_raw(em, "\\x"); sycl_hex_fixed(em, b3_3, 2);
+		return;
+	};
+	let b1_4 = (0xF0 | (cp >> 18)): u8;
+	let b2_4 = (0x80 | ((cp >> 12) & 0x3F)): u8;
+	let b3_4 = (0x80 | ((cp >> 6) & 0x3F)): u8;
+	let b4_4 = (0x80 | (cp & 0x3F)): u8;
+	e_raw(em, "\\x"); sycl_hex_fixed(em, b1_4, 2);
+	e_raw(em, "\\x"); sycl_hex_fixed(em, b2_4, 2);
+	e_raw(em, "\\x"); sycl_hex_fixed(em, b3_4, 2);
+	e_raw(em, "\\x"); sycl_hex_fixed(em, b4_4, 2);
+};
+
+fn sycl_is_hex_digit(c: u8) bool = {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+};
+
+fn sycl_hex_fixed(em: *emitter, v: u32, digits: size) void = {
+	for (let i = 0z; i < digits; i += 1) {
+		let shift = (digits - i - 1) * 4;
+		let nib = ((v >> (shift: u32)) & 0xf): u8;
+		e_raw_c(em, sycl_hex_digit(nib));
+	};
+};
+
+// Emit string content with proper C escaping and multi-line handling.
+// r is bref including quotes, returns actual byte length.
+fn sycl_str_content(em: *emitter, r: bref, src: *[*]u8) size = {
+	let slen = 0z;
+	let i = 1z; // Skip opening quote
+	let end = r.length - 1; // Skip closing quote
+	e_raw_c(em, '"');
+	for (i < end) {
+		let c = src[r.pos + i];
+		if (c == '\\' && i + 1 < end) {
+			let next = src[r.pos + i + 1];
+			if (next == 'o' && i + 6 <= end) {
+				let cp_o4 = sycl_parse_oct(src, r.pos + i + 2, 4);
+				sycl_emit_utf8(em, cp_o4);
+				slen += sycl_utf8_len(cp_o4);
+				i += 6;
+				if (i < end && sycl_is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+				continue;
+			};
+			if (next == 'O' && i + 10 <= end) {
+				let cp_O8 = sycl_parse_oct(src, r.pos + i + 2, 8);
+				sycl_emit_utf8(em, cp_O8);
+				slen += sycl_utf8_len(cp_O8);
+				i += 10;
+				if (i < end && sycl_is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+				continue;
+			};
+			e_raw_c(em, '\\');
+			e_raw_c(em, next);
+			if (next == 'x' && i + 4 <= end) {
+				e_raw_c(em, src[r.pos + i + 2]);
+				e_raw_c(em, src[r.pos + i + 3]);
+				i += 4;
+				slen += 1;
+				if (i < end && sycl_is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+			} else if (next == 'u' && i + 6 <= end) {
+				for (let j = 0z; j < 4; j += 1) { e_raw_c(em, src[r.pos + i + 2 + j]); };
+				slen += sycl_utf8_len(sycl_parse_hex(src, r.pos + i + 2, 4));
+				i += 6;
+				if (i < end && sycl_is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+			} else if (next == 'U' && i + 10 <= end) {
+				for (let j = 0z; j < 8; j += 1) { e_raw_c(em, src[r.pos + i + 2 + j]); };
+				slen += sycl_utf8_len(sycl_parse_hex(src, r.pos + i + 2, 8));
+				i += 10;
+				if (i < end && sycl_is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+			} else {
+				i += 2;
+				slen += 1;
+			};
+		} else if (c == '\n') {
+			e_raw(em, "\\n\"\n\"");
+			i += 1;
+			slen += 1;
+		} else if (c == '\t') {
+			e_raw(em, "\\t");
+			i += 1;
+			slen += 1;
+		} else if (c == '\r') {
+			e_raw(em, "\\r");
+			i += 1;
+			slen += 1;
+		} else {
+			e_raw_c(em, c);
+			i += 1;
+			slen += 1;
+		};
+	};
+	e_raw_c(em, '"');
+	return slen;
+};
+
+// Emit raw string with selective escaping (no escape processing).
+fn sycl_rawstr_content(em: *emitter, r: bref, src: *[*]u8) size = {
+	let i = 1z; // Skip opening backtick
+	let end = r.length - 1; // Skip closing backtick
+	e_raw_c(em, '"');
+	for (i < end) {
+		let c = src[r.pos + i];
+		if (c == '\\') { e_raw(em, "\\\\"); }
+		else if (c == '"') { e_raw(em, "\\\""); }
+		else if (c >= 32 && c <= 126) { e_raw_c(em, c); }
+		else {
+			sycl_hex_byte(em, c);
+			if (i + 1 < end && sycl_is_hex_digit(src[r.pos + i + 1])) {
+				e_raw(em, "\"\"");
+			};
+		};
+		i += 1;
+	};
+	e_raw_c(em, '"');
+	return end - 1;
+};
+
+fn sycl_char_val(r: bref, src: *[*]u8) u32 = {
+	if (r.length < 2) { return 0; };
+	let i = 1z;
+	let end = r.length - 1;
+	let c = src[r.pos + i];
+	if (c == '\\' && i + 1 < end) {
+		let next = src[r.pos + i + 1];
+		if (next == 'n') { return '\n': u32; };
+		if (next == 'r') { return '\r': u32; };
+		if (next == 't') { return '\t': u32; };
+		if (next == '0') { return 0; };
+		if (next == 'x' && i + 3 < end) { return sycl_parse_hex(src, r.pos + i + 2, 2); };
+		if (next == 'o' && i + 5 < end) { return sycl_parse_oct(src, r.pos + i + 2, 4); };
+		if (next == 'O' && i + 9 < end) { return sycl_parse_oct(src, r.pos + i + 2, 8); };
+		if (next == 'u' && i + 5 < end) { return sycl_parse_hex(src, r.pos + i + 2, 4); };
+		if (next == 'U' && i + 9 < end) { return sycl_parse_hex(src, r.pos + i + 2, 8); };
+		return next: u32;
+	};
+	return c: u32;
+};
+
+fn sycl_str_part(g: *codegen, n: *tnode) size = {
+	if (n.kind == N_STR) { return sycl_str_content(&g.em, n.ref, g.t.src); };
+	if (n.kind == N_RAWSTR) { return sycl_rawstr_content(&g.em, n.ref, g.t.src); };
+	sycl_err(g, n.ref, "sycl: unsupported string literal");
+	return 0;
+};
+
+fn sycl_emit_str_literal(g: *codegen, n: *tnode) void = {
+	if (!node_is_str(n)) {
+		sycl_err(g, n.ref, "sycl: unsupported string literal");
+		return;
+	};
+	emit_s(&g.em, "psycl_str{psycl_str_lit(");
+	let slen = sycl_str_part(g, n);
+	let child_opt = t_first(n);
+	for (child_opt != null) {
+		let child = unwrap(child_opt);
+		slen += sycl_str_part(g, child);
+		child_opt = child.next;
+	};
+	emit_s(&g.em, "), ");
+	e_u(&g.em, slen: u64);
+	emit_s(&g.em, "}");
+};
+
+// ----------------------------------------------------------------------------
+// Type Emission Helpers
+// ----------------------------------------------------------------------------
+
+fn sycl_emit_base_type(g: *codegen, r: bref) void = {
+	// Emit base C++ type for SYCL (without address space qualifiers)
+	if (bref_match(r, "f32", g.t.src)) { emit_s(&g.em, "float"); return; };
+	if (bref_match(r, "f64", g.t.src)) { emit_s(&g.em, "double"); return; };
+	if (bref_match(r, "i8", g.t.src)) { emit_s(&g.em, "int8_t"); return; };
+	if (bref_match(r, "i16", g.t.src)) { emit_s(&g.em, "int16_t"); return; };
+	if (bref_match(r, "i32", g.t.src)) { emit_s(&g.em, "int32_t"); return; };
+	if (bref_match(r, "i64", g.t.src)) { emit_s(&g.em, "int64_t"); return; };
+	if (bref_match(r, "u8", g.t.src)) { emit_s(&g.em, "uint8_t"); return; };
+	if (bref_match(r, "u16", g.t.src)) { emit_s(&g.em, "uint16_t"); return; };
+	if (bref_match(r, "u32", g.t.src)) { emit_s(&g.em, "uint32_t"); return; };
+	if (bref_match(r, "u64", g.t.src)) { emit_s(&g.em, "uint64_t"); return; };
+	if (bref_match(r, "bool", g.t.src)) { emit_s(&g.em, "bool"); return; };
+	if (bref_match(r, "size", g.t.src)) { emit_s(&g.em, "size_t"); return; };
+	if (bref_match(r, "void", g.t.src)) { emit_s(&g.em, "void"); return; };
+	if (bref_match(r, "str", g.t.src)) { emit_s(&g.em, "psycl_str"); return; };
+
+	// Unknown type - pass through
+	e_bref(&g.em, r);
+};
+
+fn sycl_bref_suffix_digit(name: bref, base: str, src: *[*]u8) u8 = {
+	let blen = len(base);
+	if (name.length != blen + 1) { return 0; };
+	let head = bref { pos = name.pos, length = blen };
+	if (!bref_match(head, base, src)) { return 0; };
+	let c = src[name.pos + blen];
+	if (c == '1': u8) { return 1; };
+	if (c == '2': u8) { return 2; };
+	if (c == '3': u8) { return 3; };
+	return 0;
+};
+
+fn sycl_bref_has_suffix_digit(name: bref, base: str, src: *[*]u8) bool = {
+	return sycl_bref_suffix_digit(name, base, src) != 0;
+};
+
+fn sycl_emit_dim_type_name(g: *codegen, r: bref, base: str, fmt: str) bool = {
+	let dim = sycl_bref_suffix_digit(r, base, g.t.src);
+	if (dim == 0) { return false; };
+	ef1_i(&g.em, fmt, dim: i64);
+	return true;
+};
+
+fn sycl_emit_type_name(g: *codegen, r: bref) void = {
+	// Check for SYCL builtin types first
+	if (sycl_emit_dim_type_name(g, r, "sycl::id", "sycl::id<%>")) { return; };
+	if (sycl_emit_dim_type_name(g, r, "sycl::range", "sycl::range<%>")) { return; };
+	if (sycl_emit_dim_type_name(g, r, "sycl::item", "sycl::item<%>")) { return; };
+	if (sycl_emit_dim_type_name(g, r, "sycl::nd_item", "sycl::nd_item<%>")) { return; };
+
+	// Fall back to standard C++ types
+	sycl_emit_base_type(g, r);
+};
+
+fn sycl_emit_slice_type(g: *codegen, elem_node: *tnode) void = {
+	emit_s(&g.em, "psycl_slice<");
+	sycl_emit_type(g, elem_node);
+	e_c(&g.em, '>');
+};
+
+// ----------------------------------------------------------------------------
+// Header/impl boilerplate helpers
+// ----------------------------------------------------------------------------
+
+fn sycl_emit_header_prelude(g: *codegen) void = {
+	emit_s(&g.em,
+`// Generated by Pika SYCL backend
+//
+// Usage:
+//   - Include in C code to get kernel launch declarations
+//   - Compile with SYCL: define PIKA_SYCL_IMPL and use icpx -fsycl
+//
+
+#ifndef PIKA_KERNEL_H_INCLUDED
+#define PIKA_KERNEL_H_INCLUDED
+
+#include "pika_sycl_runtime.h"
+#include <stddef.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+typedef struct psycl_str {
+	uint8_t* data;
+	size_t len;
+} psycl_str;
+
+`);
+};
+
+fn sycl_emit_header_guard_end(g: *codegen) void = {
+	emit_s(&g.em, "#endif // PIKA_KERNEL_H_INCLUDED\n");
+};
+
+fn sycl_emit_extern_c_open(g: *codegen) void = {
+	emit_s(&g.em,
+`#ifdef __cplusplus
+extern "C" {
+#endif
+`);
+};
+
+fn sycl_emit_extern_c_close(g: *codegen) void = {
+	emit_s(&g.em,
+`#ifdef __cplusplus
+}
+#endif
+`);
+};
+
+fn sycl_emit_impl_prelude(g: *codegen) void = {
+	emit_s(&g.em,
+`#ifdef PIKA_SYCL_IMPL
+
+#include <sycl/sycl.hpp>
+#include <cstdint>
+#include <cstdio>
+`);
+};
+
+fn sycl_emit_string_helpers(g: *codegen) void = {
+	emit_s(&g.em,
+`static inline uint8_t* psycl_str_lit(const char* s) {
+	return const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(s));
+}
+
+static inline int rt_strcmp(psycl_str a, psycl_str b) {
+	if (a.len != b.len) { return 0; }
+	for (size_t i = 0; i < a.len; i += 1) {
+		if (a.data[i] != b.data[i]) { return 0; }
+	}
+	return 1;
+}
+
+static inline psycl_slice<uint8_t> strings_toutf8(psycl_str s) {
+	return psycl_slice<uint8_t>{s.data, s.len, s.len};
+}
+
+static inline psycl_str strings_fromutf8_unsafe(psycl_slice<uint8_t> in) {
+	return psycl_str{in.data, in.len};
+}
+
+namespace rt {
+static inline bool strcmp(psycl_str a, psycl_str b) {
+	return rt_strcmp(a, b) != 0;
+}
+}
+
+`);
+};
+
+fn sycl_emit_f16_helpers(g: *codegen) void = {
+	emit_s(&g.em,
+`// f16 helpers (require Pika f16 type definition)
+namespace sycl {
+static inline sycl::half f16_to_half(::f16 x) {
+	return sycl::bit_cast<sycl::half>(x.bits);
+}
+static inline ::f16 f16_from_half(sycl::half x) {
+	::f16 out;
+	out.bits = sycl::bit_cast<uint16_t>(x);
+	return out;
+}
+static inline ::f16 f16_from_bits(uint16_t bits) {
+	::f16 out;
+	out.bits = bits;
+	return out;
+}
+static inline uint16_t f16_to_bits(::f16 x) {
+	return x.bits;
+}
+static inline ::f16 f16_from_f32(float x) {
+	return f16_from_half(sycl::half(x));
+}
+static inline float f16_to_f32(::f16 x) {
+	return static_cast<float>(f16_to_half(x));
+}
+static inline ::f16 f16_add(::f16 a, ::f16 b) {
+	return f16_from_half(f16_to_half(a) + f16_to_half(b));
+}
+static inline ::f16 f16_sub(::f16 a, ::f16 b) {
+	return f16_from_half(f16_to_half(a) - f16_to_half(b));
+}
+static inline ::f16 f16_mul(::f16 a, ::f16 b) {
+	return f16_from_half(f16_to_half(a) * f16_to_half(b));
+}
+static inline ::f16 f16_div(::f16 a, ::f16 b) {
+	return f16_from_half(f16_to_half(a) / f16_to_half(b));
+}
+static inline ::f16 f16_neg(::f16 a) {
+	return f16_from_half(-f16_to_half(a));
+}
+static inline ::f16 f16_fma(::f16 a, ::f16 b, ::f16 c) {
+	return f16_from_half(sycl::fma(f16_to_half(a), f16_to_half(b), f16_to_half(c)));
+}
+} // namespace sycl
+
+`);
+};
+
+fn sycl_emit_exception_helper(g: *codegen) void = {
+	emit_s(&g.em,
+`static inline int psycl_handle_exception(const char* name, int code) {
+	try { throw; }
+	catch (const sycl::exception& e) {
+		fprintf(stderr, "%s: SYCL exception: %s", name, e.what());
+		auto ec = e.code();
+		if (ec.value() != 0) {
+			fprintf(stderr, " (%s)", ec.message().c_str());
+		}
+		fprintf(stderr, "\n");
+		return code;
+	}
+	catch (const std::exception& e) {
+		fprintf(stderr, "%s: std::exception: %s\n", name, e.what());
+		return code;
+	}
+	catch (...) {
+		fprintf(stderr, "%s: unknown exception\n", name);
+		return code;
+	}
+}
+`);
+};
+
+fn sycl_emit_fail_helper(g: *codegen) void = {
+	emit_s(&g.em,
+`using psycl_error_acc_t = sycl::accessor<uint32_t, 1, sycl::access::mode::read_write>;
+static inline void psycl_fail(psycl_error_acc_t error, uint32_t code, uint32_t line, uint32_t col) {
+	using atom_t = sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed,
+		sycl::memory_scope::device, sycl::access::address_space::global_space>;
+	atom_t atom(error[0]);
+	uint32_t expected = 0;
+	if (atom.compare_exchange_strong(expected, code)) {
+		error[1] = ((line & 0xFFFFu) << 16) | (col & 0xFFFFu);
+	}
+}
+
+`);
+};
+
+// ----------------------------------------------------------------------------
+// Common SYCL emission helpers
+// ----------------------------------------------------------------------------
+
+fn sycl_emit_args(g: *codegen, first: *tnode) void = {
+	let el = el_start(&g.em);
+	let arg_opt: nullable *tnode = first;
+	for (arg_opt != null) {
+		el_sep(&el);
+		sycl_expr(g, unwrap(arg_opt));
+		arg_opt = unwrap(arg_opt).next;
+	};
+};
+
+fn sycl_emit_sycl_call(g: *codegen, name: bref, args: nullable *tnode) void = {
+	emit_s(&g.em, "sycl::");
+	e_bref(&g.em, name);
+	e_c(&g.em, '(');
+	if (args != null) { sycl_emit_args(g, unwrap(args)); };
+	e_c(&g.em, ')');
+};
+
+fn sycl_emit_sycl_call_alias(g: *codegen, name: str, args: nullable *tnode) void = {
+	emit_s(&g.em, "sycl::");
+	emit_s(&g.em, name);
+	e_c(&g.em, '(');
+	if (args != null) { sycl_emit_args(g, unwrap(args)); };
+	e_c(&g.em, ')');
+};
+
+fn sycl_emit_item_method_call(g: *codegen, args: nullable *tnode, method: str) void = {
+	if (args == null) { return; };
+	let arg0 = unwrap(args);
+	sycl_expr(g, arg0);
+	emit_s(&g.em, ".");
+	emit_s(&g.em, method);
+	emit_s(&g.em, "()");
+};
+
+fn sycl_emit_item_method_call_index(g: *codegen, args: nullable *tnode, method: str) void = {
+	if (args == null) { return; };
+	let arg0 = unwrap(args);
+	sycl_expr(g, arg0);
+	emit_s(&g.em, ".");
+	emit_s(&g.em, method);
+	emit_s(&g.em, "(");
+	let arg1 = arg0.next;
+	if (arg1 != null) {
+		sycl_expr(g, unwrap(arg1));
+	} else {
+		emit_s(&g.em, "0");
+	};
+	e_c(&g.em, ')');
+};
+
+fn sycl_emit_item_method_indexed(g: *codegen, args: nullable *tnode, method: str) void = {
+	if (args == null) { return; };
+	let arg0 = unwrap(args);
+	sycl_expr(g, arg0);
+	emit_s(&g.em, ".");
+	emit_s(&g.em, method);
+	emit_s(&g.em, "()[");
+	let arg1 = arg0.next;
+	if (arg1 != null) {
+		sycl_expr(g, unwrap(arg1));
+	} else {
+		emit_s(&g.em, "0");
+	};
+	e_c(&g.em, ']');
+};
+
+fn sycl_emit_item_group_method_call(g: *codegen, args: nullable *tnode, method: str) void = {
+	if (args == null) { return; };
+	let arg0 = unwrap(args);
+	sycl_expr(g, arg0);
+	emit_s(&g.em, ".get_group().");
+	emit_s(&g.em, method);
+	emit_s(&g.em, "()");
+};
+
+fn sycl_emit_item_group_method_indexed(g: *codegen, args: nullable *tnode, method: str) void = {
+	if (args == null) { return; };
+	let arg0 = unwrap(args);
+	sycl_expr(g, arg0);
+	emit_s(&g.em, ".get_group().");
+	emit_s(&g.em, method);
+	emit_s(&g.em, "()[");
+	let arg1 = arg0.next;
+	if (arg1 != null) {
+		sycl_expr(g, unwrap(arg1));
+	} else {
+		emit_s(&g.em, "0");
+	};
+	e_c(&g.em, ']');
+};
+
+def SYCL_ITEM_METHOD_CALL: u8 = 0;
+def SYCL_ITEM_METHOD_CALL_INDEX: u8 = 1;
+def SYCL_ITEM_METHOD_INDEXED: u8 = 2;
+def SYCL_ITEM_GROUP_METHOD_CALL: u8 = 3;
+def SYCL_ITEM_GROUP_METHOD_INDEXED: u8 = 4;
+
+fn sycl_emit_item_method_mode(
+	g: *codegen,
+	args: nullable *tnode,
+	method: str,
+	mode: u8
+) void = {
+	if (mode == SYCL_ITEM_METHOD_CALL) {
+		sycl_emit_item_method_call(g, args, method);
+		return;
+	};
+	if (mode == SYCL_ITEM_METHOD_CALL_INDEX) {
+		sycl_emit_item_method_call_index(g, args, method);
+		return;
+	};
+	if (mode == SYCL_ITEM_METHOD_INDEXED) {
+		sycl_emit_item_method_indexed(g, args, method);
+		return;
+	};
+	if (mode == SYCL_ITEM_GROUP_METHOD_CALL) {
+		sycl_emit_item_group_method_call(g, args, method);
+		return;
+	};
+	if (mode == SYCL_ITEM_GROUP_METHOD_INDEXED) {
+		sycl_emit_item_group_method_indexed(g, args, method);
+		return;
+	};
+};
+
+fn sycl_emit_item_method_suffix(
+	g: *codegen,
+	name: bref,
+	args: nullable *tnode,
+	base: str,
+	method: str,
+	base_mode: u8,
+	suffix_mode: u8
+) bool = {
+	let src = g.t.src;
+	if (bref_match(name, base, src)) {
+		sycl_emit_item_method_mode(g, args, method, base_mode);
+		return true;
+	};
+	if (sycl_bref_has_suffix_digit(name, base, src)) {
+		sycl_emit_item_method_mode(g, args, method, suffix_mode);
+		return true;
+	};
+	return false;
+};
+
+fn sycl_emit_atomic_ref(g: *codegen, arg: *tnode) void = {
+	emit_s(&g.em, "sycl::atomic_ref<std::remove_reference_t<decltype(*");
+	sycl_expr(g, arg);
+	emit_s(&g.em, ")>, sycl::memory_order::relaxed, sycl::memory_scope::device, ");
+	emit_s(&g.em, "sycl::access::address_space::global_space>(*");
+	sycl_expr(g, arg);
+	emit_s(&g.em, ")");
+};
+
+fn sycl_emit_atomic_op(g: *codegen, args: nullable *tnode, op: str) void = {
+	if (args == null) { return; };
+	let arg0 = unwrap(args);
+	sycl_emit_atomic_ref(g, arg0);
+	emit_s(&g.em, ".");
+	emit_s(&g.em, op);
+	emit_s(&g.em, "(");
+	let arg1 = arg0.next;
+	if (arg1 != null) {
+		sycl_expr(g, unwrap(arg1));
+	};
+	e_c(&g.em, ')');
+};
+
+fn sycl_emit_atomic_load(g: *codegen, args: nullable *tnode) void = {
+	if (args == null) { return; };
+	let arg0 = unwrap(args);
+	sycl_emit_atomic_ref(g, arg0);
+	emit_s(&g.em, ".load()");
+};
+
+fn sycl_emit_atomic_compare_exchange(g: *codegen, args: nullable *tnode) void = {
+	if (args == null) { return; };
+	let arg0 = unwrap(args);
+	sycl_emit_atomic_ref(g, arg0);
+	emit_s(&g.em, ".compare_exchange_strong(");
+	let arg1 = arg0.next;
+	if (arg1 != null) {
+		let expected = unwrap(arg1);
+		sycl_expr(g, expected);
+		if (expected.next != null) {
+			emit_s(&g.em, ", ");
+			sycl_expr(g, unwrap(expected.next));
+		};
+	};
+	e_c(&g.em, ')');
+};
+
+fn sycl_emit_dim_params(g: *codegen, dim: i64, prefix: str) void = {
+	for (let i: i64 = 0; i < dim; i += 1) {
+		emit_s(&g.em, ", size_t ");
+		emit_s(&g.em, prefix);
+		e_i(&g.em, i);
+	};
+};
+
+fn sycl_emit_dim_list(g: *codegen, dim: i64, prefix: str) void = {
+	for (let i: i64 = 0; i < dim; i += 1) {
+		if (i > 0) { emit_s(&g.em, ", "); };
+		emit_s(&g.em, prefix);
+		e_i(&g.em, i);
+	};
+};
+
+fn sycl_emit_range_expr(g: *codegen, dim: i64, prefix: str) void = {
+	emit_s(&g.em, "sycl::range<");
+	e_i(&g.em, dim);
+	emit_s(&g.em, ">{");
+	sycl_emit_dim_list(g, dim, prefix);
+	emit_s(&g.em, "}");
+};
+
+// ----------------------------------------------------------------------------
+// Slice helpers
+// ----------------------------------------------------------------------------
+
+fn sycl_type_is_slice(g: *codegen, ty: *tnode) bool = {
+	let t = sycl_resolve_type(g, ty);
+	return t.kind == N_T_SLICE;
+};
+
+fn sycl_type_is_ptr_to_slice(g: *codegen, ty: *tnode) bool = {
+	let t = sycl_resolve_type(g, ty);
+	if (t.kind != N_T_PTR) { return false; };
+	let inner_opt = t_first(t);
+	if (inner_opt == null) { return false; };
+	let inner = sycl_resolve_type(g, unwrap(inner_opt));
+	return inner.kind == N_T_SLICE;
+};
+
+fn sycl_type_is_ptr_to_uarr(g: *codegen, ty: *tnode) bool = {
+	let t = sycl_resolve_type(g, ty);
+	if (t.kind != N_T_PTR) { return false; };
+	let inner_opt = t_first(t);
+	if (inner_opt == null) { return false; };
+	let inner = sycl_resolve_type(g, unwrap(inner_opt));
+	return inner.kind == N_T_UARR;
+};
+
+fn sycl_emit_expr_field(g: *codegen, expr: *tnode, field: str) void = {
+	e_c(&g.em, '(');
+	sycl_expr(g, expr);
+	emit_s(&g.em, ").");
+	emit_s(&g.em, field);
+};
+
+fn sycl_emit_error_args(g: *codegen, pos: size) void = {
+	let lc = pos_to_line_col(pos, g.t.src, g.t.src_len);
+	emit_s(&g.em, ", ");
+	sycl_emit_error_ref(g);
+	ef2_i(&g.em, ", %, %", lc.line: i64, lc.col: i64);
+};
+
+fn sycl_emit_slice_field(g: *codegen, slice_expr: *tnode, is_ptr: bool, field: str) void = {
+	e_c(&g.em, '(');
+	if (is_ptr) {
+		emit_s(&g.em, "*(");
+		sycl_expr(g, slice_expr);
+		e_c(&g.em, ')');
+	} else {
+		sycl_expr(g, slice_expr);
+	};
+	emit_s(&g.em, ").");
+	emit_s(&g.em, field);
+};
+
+fn sycl_emit_slice_data(g: *codegen, slice_expr: *tnode, is_ptr: bool) void = {
+	sycl_emit_slice_field(g, slice_expr, is_ptr, "data");
+};
+
+fn sycl_emit_slice_len(g: *codegen, slice_expr: *tnode, is_ptr: bool) void = {
+	sycl_emit_slice_field(g, slice_expr, is_ptr, "len");
+};
+
+fn sycl_emit_slice_cap(g: *codegen, slice_expr: *tnode, is_ptr: bool) void = {
+	sycl_emit_slice_field(g, slice_expr, is_ptr, "cap");
+};
+
+fn sycl_emit_slice_value(g: *codegen, slice_expr: *tnode, is_ptr: bool) void = {
+	if (is_ptr) {
+		emit_s(&g.em, "*(");
+		sycl_expr(g, slice_expr);
+		e_c(&g.em, ')');
+	} else {
+		sycl_expr(g, slice_expr);
+	};
+};
+
+fn sycl_emit_array_len_expr(g: *codegen, expr: *tnode) void = {
+	emit_s(&g.em, "HARE_ARRAY_LEN(");
+	sycl_expr(g, expr);
+	e_c(&g.em, ')');
+};
+
+fn sycl_emit_len(g: *codegen, n: *tnode) void = {
+	let expr: *tnode = t_first_nn(n);
+	match (get_expr_type(g, expr)) {
+	case let ty: *tnode =>
+		let resolved_opt = resolve_alias_type(g, ty);
+		if (resolved_opt != null) {
+			let rty: *tnode = unwrap(resolved_opt);
+			if (rty.kind == N_T_SLICE || type_is_str(rty, g.t.src)) {
+				sycl_emit_expr_field(g, expr, "len");
+				return;
+			};
+		};
+		if (sycl_type_is_ptr_to_uarr(g, ty)) {
+			sycl_err(g, n.ref, "len() on *[*] requires explicit length in SYCL");
+			return;
+		};
+	case null => void;
+	};
+	sycl_emit_array_len_expr(g, expr);
+};
+
+fn sycl_emit_slice_expr(g: *codegen, n: *tnode) void = {
+	let slice_arr = t_first_nn(n);
+	let slice_start = slice_arr.next;
+	let slice_end_opt: nullable *tnode = null;
+	match (slice_start) {
+	case let s: *tnode => slice_end_opt = s.next;
+	case null => void;
+	};
+
+	let slice_arr_ty_opt = get_expr_type(g, slice_arr);
+	if (slice_arr_ty_opt == null) {
+		sycl_err(g, n.ref, "cannot slice unknown type in SYCL");
+		return;
+	};
+
+	let slice_arr_ty = sycl_resolve_type(g, unwrap(slice_arr_ty_opt));
+	let slice_make_is_ptr = false;
+	let slice_arr_is_ptr_uarr = sycl_type_is_ptr_to_uarr(g, unwrap(slice_arr_ty_opt));
+	let slice_ty: nullable *tnode = null;
+
+	if (slice_arr_ty.kind == N_T_SLICE) {
+		slice_ty = slice_arr_ty;
+	} else if (sycl_type_is_ptr_to_slice(g, unwrap(slice_arr_ty_opt))) {
+		slice_make_is_ptr = true;
+		match (t_first(slice_arr_ty)) {
+		case let inner: *tnode => slice_ty = sycl_resolve_type(g, inner);
+		case null => void;
+		};
+	};
+
+	let slice_elem_ty: nullable *tnode = null;
+	if (slice_ty != null) {
+		slice_elem_ty = t_first(unwrap(slice_ty));
+	} else if (slice_arr_ty.kind == N_T_ARR || slice_arr_ty.kind == N_T_UARR) {
+		slice_elem_ty = t_first(slice_arr_ty);
+	} else if (slice_arr_is_ptr_uarr) {
+		let ptr_ty = sycl_resolve_type(g, unwrap(slice_arr_ty_opt));
+		match (t_first(ptr_ty)) {
+		case let uarr_inner: *tnode =>
+			let uarr_inner_res = sycl_resolve_type(g, uarr_inner);
+			slice_elem_ty = t_first(uarr_inner_res);
+		case null => void;
+		};
+	};
+
+	let slice_elem: *tnode = match (slice_elem_ty) {
+	case let e: *tnode => yield e;
+	case null =>
+		sycl_err(g, n.ref, "invalid slice element type in SYCL");
+		return;
+	};
+
+	if (slice_ty != null || slice_arr_ty.kind == N_T_ARR || slice_arr_ty.kind == N_T_UARR) {
+		// Pointer-backed slice from array/slice
+		emit_s(&g.em, "psycl_slice_make_ptr(");
+		if (slice_ty != null) {
+			sycl_emit_slice_data(g, slice_arr, slice_make_is_ptr);
+		} else {
+			e_c(&g.em, '(');
+			sycl_emit_type(g, slice_elem);
+			emit_s(&g.em, "*)(");
+			sycl_expr(g, slice_arr);
+			e_c(&g.em, ')');
+		};
+
+		emit_s(&g.em, ", ");
+		if (slice_ty != null) {
+			sycl_emit_slice_len(g, slice_arr, slice_make_is_ptr);
+		} else {
+			sycl_emit_array_len_expr(g, slice_arr);
+		};
+
+		emit_s(&g.em, ", ");
+		if (slice_ty != null) {
+			sycl_emit_slice_cap(g, slice_arr, slice_make_is_ptr);
+		} else {
+			sycl_emit_array_len_expr(g, slice_arr);
+		};
+
+		emit_s(&g.em, ", ");
+		match (slice_start) {
+		case let s: *tnode => sycl_expr(g, s);
+		case null => emit_s(&g.em, "0");
+		};
+
+		emit_s(&g.em, ", ");
+		match (slice_end_opt) {
+		case let e: *tnode =>
+			sycl_expr(g, e);
+		case null =>
+			if (slice_ty != null) {
+				sycl_emit_slice_len(g, slice_arr, slice_make_is_ptr);
+			} else {
+				sycl_emit_array_len_expr(g, slice_arr);
+			};
+		};
+
+		sycl_emit_error_args(g, n.ref.pos);
+		e_c(&g.em, ')');
+		return;
+	};
+
+	if (slice_arr_is_ptr_uarr) {
+		// Accessor-backed slice from *[*] buffer
+		emit_s(&g.em, "psycl_slice_make_acc(");
+		sycl_expr(g, slice_arr);
+		emit_s(&g.em, ", ");
+		match (slice_start) {
+		case let s: *tnode => sycl_expr(g, s);
+		case null => emit_s(&g.em, "0");
+		};
+		emit_s(&g.em, ", ");
+		match (slice_end_opt) {
+		case let e: *tnode =>
+			sycl_expr(g, e);
+		case null =>
+			emit_s(&g.em, "psycl_acc_len(");
+			sycl_expr(g, slice_arr);
+			e_c(&g.em, ')');
+		};
+		sycl_emit_error_args(g, n.ref.pos);
+		e_c(&g.em, ')');
+		return;
+	};
+};
+
+fn sycl_emit_slice_index_expr(g: *codegen, n: *tnode, arr: *tnode, idx: *tnode) bool = {
+	let idx_slice_is_ptr = false;
+	let idx_slice_index = false;
+	match (get_expr_type(g, arr)) {
+	case let slice_ty: *tnode =>
+		if (sycl_type_is_slice(g, slice_ty)) {
+			idx_slice_index = true;
+		} else if (sycl_type_is_ptr_to_slice(g, slice_ty)) {
+			idx_slice_index = true;
+			idx_slice_is_ptr = true;
+		};
+	case null => void;
+	};
+	if (!idx_slice_index) { return false; };
+	emit_s(&g.em, "psycl_slice_at(");
+	sycl_emit_slice_value(g, arr, idx_slice_is_ptr);
+	emit_s(&g.em, ", ");
+	sycl_expr(g, idx);
+	sycl_emit_error_args(g, n.ref.pos);
+	e_c(&g.em, ')');
+	return true;
+};
+
+fn sycl_emit_slice_assign(
+	g: *codegen,
+	target: *tnode,
+	val: *tnode,
+	expected: nullable *tnode,
+	op: u16
+) bool = {
+	if (target.kind != N_IDX) { return false; };
+	let arr = t_first_nn(target);
+	let idx = t_next_nn(arr);
+	let slice_is_ptr = false;
+	let slice_index = false;
+	match (get_expr_type(g, arr)) {
+	case let arr_ty: *tnode =>
+		if (sycl_type_is_slice(g, arr_ty)) {
+			slice_index = true;
+		} else if (sycl_type_is_ptr_to_slice(g, arr_ty)) {
+			slice_index = true;
+			slice_is_ptr = true;
+		};
+	case null => void;
+	};
+	if (!slice_index) { return false; };
+
+	e_block_start(&g.em);
+	emit_s(&g.em, "auto* __psycl_slice_ptr = psycl_slice_ptr(");
+	sycl_emit_slice_value(g, arr, slice_is_ptr);
+	emit_s(&g.em, ", ");
+	sycl_expr(g, idx);
+	sycl_emit_error_args(g, target.ref.pos);
+	emit_s(&g.em, ");");
+	e_nl(&g.em);
+	emit_s(&g.em, "if (!__psycl_slice_ptr) return;");
+	e_nl(&g.em);
+	emit_s(&g.em, "*__psycl_slice_ptr");
+	sycl_emit_asgn_op(g, op);
+	sycl_expr_expected(g, val, expected);
+	e_stmt_end(&g.em);
+	e_block_end(&g.em);
+	e_nl(&g.em);
+	return true;
+};
+
+fn sycl_emit_slice_structs(g: *codegen) void = {
+	emit_s(&g.em,
+`#define HARE_ARRAY_LEN(x) (sizeof(x)/sizeof((x)[0]))
+
+template <typename T>
+struct psycl_slice {
+	T* data;
+	size_t len;
+	size_t cap;
+};
+
+template <typename Acc>
+struct psycl_slice_acc {
+	Acc acc;
+	size_t off;
+	size_t len;
+	size_t cap;
+};
+
+`);
+};
+
+fn sycl_emit_slice_helpers(g: *codegen) void = {
+	emit_s(&g.em,
+`template <typename T>
+static inline psycl_slice<T> psycl_slice_make_ptr(
+	T* data,
+	size_t len,
+	size_t cap,
+	size_t start,
+	size_t end,
+	psycl_error_acc_t error,
+	uint32_t line,
+	uint32_t col
+) {
+	if (end < start || end > len) {
+		psycl_fail(error, 1u, line, col);
+		return psycl_slice<T>{data, 0, 0};
+	}
+	return psycl_slice<T>{data + start, end - start, cap - start};
+}
+
+template <typename Acc>
+static inline size_t psycl_acc_len(Acc acc) {
+	return acc.get_range()[0];
+}
+
+template <typename Acc>
+static inline psycl_slice_acc<Acc> psycl_slice_make_acc(
+	Acc acc,
+	size_t start,
+	size_t end,
+	psycl_error_acc_t error,
+	uint32_t line,
+	uint32_t col
+) {
+	size_t len = psycl_acc_len(acc);
+	if (end < start || end > len) {
+		psycl_fail(error, 1u, line, col);
+		return psycl_slice_acc<Acc>{acc, 0, 0, 0};
+	}
+	return psycl_slice_acc<Acc>{acc, start, end - start, len - start};
+}
+
+template <typename T>
+static inline T psycl_slice_at(
+	psycl_slice<T> s,
+	size_t idx,
+	psycl_error_acc_t error,
+	uint32_t line,
+	uint32_t col
+) {
+	if (idx >= s.len) {
+		psycl_fail(error, 1u, line, col);
+		return T{};
+	}
+	return s.data[idx];
+}
+
+template <typename Acc>
+static inline typename Acc::value_type psycl_slice_at(
+	psycl_slice_acc<Acc> s,
+	size_t idx,
+	psycl_error_acc_t error,
+	uint32_t line,
+	uint32_t col
+) {
+	if (idx >= s.len) {
+		psycl_fail(error, 1u, line, col);
+		return typename Acc::value_type{};
+	}
+	return s.acc[s.off + idx];
+}
+
+template <typename T>
+static inline T* psycl_slice_data(psycl_slice<T> s) {
+	return s.data;
+}
+
+template <typename Acc>
+static inline auto psycl_slice_data(psycl_slice_acc<Acc> s) -> decltype(&s.acc[0]) {
+	return &s.acc[s.off];
+}
+
+template <typename T>
+static inline T* psycl_slice_ptr(
+	psycl_slice<T> s,
+	size_t idx,
+	psycl_error_acc_t error,
+	uint32_t line,
+	uint32_t col
+) {
+	if (idx >= s.len) {
+		psycl_fail(error, 1u, line, col);
+		return nullptr;
+	}
+	return &s.data[idx];
+}
+
+template <typename Acc>
+static inline auto psycl_slice_ptr(
+	psycl_slice_acc<Acc> s,
+	size_t idx,
+	psycl_error_acc_t error,
+	uint32_t line,
+	uint32_t col
+) -> decltype(&s.acc[0]) {
+	if (idx >= s.len) {
+		psycl_fail(error, 1u, line, col);
+		return nullptr;
+	}
+	return &s.acc[s.off + idx];
+}
+
+`);
+};

@@ -1,0 +1,84 @@
+// features.pka - Test array features: size(), inferred arrays
+use rt;
+
+// Feature 1: size(T) builtin
+fn test_size_primitives() void = {
+	// Test primitive types
+	assert(size(i8) == 1, "size(i8)");
+	assert(size(u8) == 1, "size(u8)");
+	assert(size(i16) == 2, "size(i16)");
+	assert(size(u16) == 2, "size(u16)");
+	assert(size(i32) == 4, "size(i32)");
+	assert(size(u32) == 4, "size(u32)");
+	assert(size(i64) == 8, "size(i64)");
+	assert(size(u64) == 8, "size(u64)");
+	assert(size(f32) == 4, "size(f32)");
+	assert(size(f64) == 8, "size(f64)");
+	assert(size(bool) == 1, "size(bool)");
+};
+
+fn test_size_arrays() void = {
+	// Test array sizes
+	assert(size([4]i32) == 16, "size([4]i32)");
+	assert(size([10]u8) == 10, "size([10]u8)");
+	assert(size([2]i64) == 16, "size([2]i64)");
+	assert(size([8]f32) == 32, "size([8]f32)");
+};
+
+fn test_size_pointers() void = {
+	// Pointer sizes (assuming 64-bit)
+	assert(size(*i32) == 8, "size(*i32)");
+	assert(size(*u8) == 8, "size(*u8)");
+	assert(size(*[*]i32) == 8, "size(*[*]i32)");
+};
+
+// Feature 2: Inferred arrays [_]T
+fn test_inferred_basic() void = {
+	let arr1: [_]i32 = [1, 2, 3, 4, 5];
+	assert(len(arr1) == 5, "inferred len 5");
+	assert(arr1[0] == 1, "inferred[0]");
+	assert(arr1[4] == 5, "inferred[4]");
+
+	let arr2: [_]u8 = [10, 20, 30];
+	assert(len(arr2) == 3, "inferred len 3");
+	assert(arr2[0] == 10, "inferred u8[0]");
+	assert(arr2[2] == 30, "inferred u8[2]");
+};
+
+fn test_inferred_various_types() void = {
+	let floats: [_]f64 = [1.0, 2.0, 3.0, 4.0];
+	assert(len(floats) == 4, "inferred f64 len");
+
+	let bools: [_]bool = [true, false, true];
+	assert(len(bools) == 3, "inferred bool len");
+	assert(bools[0] == true, "inferred bool[0]");
+	assert(bools[1] == false, "inferred bool[1]");
+};
+
+fn test_inferred_single_element() void = {
+	let single: [_]i32 = [42];
+	assert(len(single) == 1, "inferred single len");
+	assert(single[0] == 42, "inferred single[0]");
+};
+
+// Combined features test
+fn test_combined() void = {
+	// Use size() with inferred array type variable
+	let arr: [_]i32 = [1, 2, 3, 4];
+	assert(len(arr) == 4, "combined len");
+};
+
+export fn main() void = {
+	// Feature 1: size(T)
+	test_size_primitives();
+	test_size_arrays();
+	test_size_pointers();
+
+	// Feature 2: Inferred arrays
+	test_inferred_basic();
+	test_inferred_various_types();
+	test_inferred_single_element();
+
+	// Combined test
+	test_combined();
+};

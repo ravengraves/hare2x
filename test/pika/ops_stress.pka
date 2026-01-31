@@ -1,0 +1,42 @@
+// ops_stress.pka - Basic operations stress test
+
+fn int_ops() i32 = {
+	let a: i32 = 0x10i32;
+	let b: i32 = 0o7i32;
+	let c: i32 = 0b1010i32;
+	let d: i32 = 123i32;
+	let e: i32 = -10i32;
+	let acc: i32 = a + b;
+	acc *= c;
+	acc += d;
+	acc += e;
+	acc <<= 2;
+	acc ^= 0x5ai32;
+	acc &= 0xffi32;
+	return acc;
+};
+
+fn uint_ops() u32 = {
+	let a: u32 = 0xffu32;
+	let b: u32 = 0x10u32;
+	let c: u32 = (a | b) ^ 0x55u32;
+	let d: u32 = c << 1u32;
+	return d;
+};
+
+fn float_ops() f32 = {
+	let a: f32 = 1.0f32;
+	let b: f32 = 10e-4f32;
+	let c: f32 = 0.25f32;
+	let d: f32 = (a + b) * c;
+	return d;
+};
+
+export fn main() void = {
+	let r = int_ops();
+	let u = uint_ops();
+	let f = float_ops();
+	assert(r >= 0 && r <= 255);
+	assert(u > 0u32);
+	assert(f > 0.0f32);
+};

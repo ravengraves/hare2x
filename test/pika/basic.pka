@@ -1,0 +1,39 @@
+// basic.ha - Basic Pika language features
+
+// Constants
+def MAX_SIZE: size = 1024;
+
+// Simple types
+type byte = u8;
+type word = u32;
+
+// Function with primitives
+export fn add(a: i32, b: i32) i32 = {
+	return a + b;
+};
+
+// Function with multiple statements
+export fn factorial_iterative(n: i32) i32 = {
+	let result: i32 = 1;
+	for (let i: i32 = 1; i <= n; i += 1) {
+		result *= i;
+	};
+	return result;
+};
+
+// Void function
+export fn do_nothing() void = {
+	return;
+};
+
+// Using constants
+export fn get_max() size = {
+	return MAX_SIZE;
+};
+
+// Entry point
+export fn main() void = {
+	let x = add(10, 20);
+	let y = factorial_iterative(5);
+	do_nothing();
+};

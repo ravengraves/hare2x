@@ -1,0 +1,4 @@
+// ERROR: cannot assign null to non-nullable pointer
+fn bad() void = {
+	let p: *i32 = null;
+};

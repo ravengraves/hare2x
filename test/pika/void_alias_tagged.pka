@@ -1,0 +1,37 @@
+// Pika: tagged union with !void alias.
+
+type err1 = !void;
+type mytype = (u32 | err1);
+// type mytype2 = (u32 | !void);  // should error in pika (only named type supported)
+type err2 = !void;
+type err3 = !void;
+type mytype2 = (u32 | err2 | err1 | err3);
+
+
+export fn main() void = {
+	let a: mytype = 7u32: mytype;
+	let e: mytype2 = err1;
+
+	match (a) {
+	case u32 => void;
+	case err1 => abort();
+	};
+
+	match (e) {
+	case u32 => abort();
+	case err1 => void;
+	case err2 => abort();
+	case err3 => abort();
+	};
+
+	// let v = void:mytype2; // should error in pika (only named type [err1/err2/err3] supported)
+	let v:mytype2 = err2;
+	match (v) {
+	case u32 => abort();
+	// case void => // should fail in pika (!void or void are not allowd as unnamed types in mytype2)
+	// case !void => // should fail in pika (same as above)
+	case err1 => abort();
+	case err2 => void;
+	case err3 => abort();
+	};
+};

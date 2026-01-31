@@ -1,0 +1,965 @@
+// gen_gnuc11.pka - GNU C11 code generation utilities
+use strings;
+
+// ============================================================================
+// C Operator Constants
+// ============================================================================
+
+def C_ADD: u8 = 1;
+def C_SUB: u8 = 2;
+def C_MUL: u8 = 3;
+def C_DIV: u8 = 4;
+def C_MOD: u8 = 5;
+def C_AND: u8 = 6;
+def C_OR: u8 = 7;
+def C_XOR: u8 = 8;
+def C_SHL: u8 = 9;
+def C_SHR: u8 = 10;
+def C_EQ: u8 = 11;
+def C_NE: u8 = 12;
+def C_LT: u8 = 13;
+def C_GT: u8 = 14;
+def C_LE: u8 = 15;
+def C_GE: u8 = 16;
+def C_LAND: u8 = 17;
+def C_LOR: u8 = 18;
+
+def C_NEG: u8 = 20;
+def C_NOT: u8 = 21;
+def C_BNOT: u8 = 22;
+def C_ADDR: u8 = 23;
+def C_DEREF: u8 = 24;
+
+def C_ASGN: u8 = 30;
+def C_ASGN_ADD: u8 = 31;
+def C_ASGN_SUB: u8 = 32;
+def C_ASGN_MUL: u8 = 33;
+def C_ASGN_DIV: u8 = 34;
+def C_ASGN_MOD: u8 = 35;
+def C_ASGN_AND: u8 = 36;
+def C_ASGN_OR: u8 = 37;
+def C_ASGN_XOR: u8 = 38;
+def C_ASGN_SHL: u8 = 39;
+def C_ASGN_SHR: u8 = 40;
+
+def C_SUFFIX_NONE: u8 = 0;
+def C_SUFFIX_U: u8 = 1;
+def C_SUFFIX_L: u8 = 2;
+def C_SUFFIX_UL: u8 = 3;
+def C_SUFFIX_LL: u8 = 4;
+def C_SUFFIX_ULL: u8 = 5;
+
+// ============================================================================
+// C Operator Emission
+// ============================================================================
+
+fn c_binop(em: *emitter, op: u8) void = {
+	if (op == C_ADD) { emit_s(em, " + "); }
+	else if (op == C_SUB) { emit_s(em, " - "); }
+	else if (op == C_MUL) { emit_s(em, " * "); }
+	else if (op == C_DIV) { emit_s(em, " / "); }
+	else if (op == C_MOD) { emit_s(em, " % "); }
+	else if (op == C_AND) { emit_s(em, " & "); }
+	else if (op == C_OR) { emit_s(em, " | "); }
+	else if (op == C_XOR) { emit_s(em, " ^ "); }
+	else if (op == C_SHL) { emit_s(em, " << "); }
+	else if (op == C_SHR) { emit_s(em, " >> "); }
+	else if (op == C_EQ) { emit_s(em, " == "); }
+	else if (op == C_NE) { emit_s(em, " != "); }
+	else if (op == C_LT) { emit_s(em, " < "); }
+	else if (op == C_GT) { emit_s(em, " > "); }
+	else if (op == C_LE) { emit_s(em, " <= "); }
+	else if (op == C_GE) { emit_s(em, " >= "); }
+	else if (op == C_LAND) { emit_s(em, " && "); }
+	else if (op == C_LOR) { emit_s(em, " || "); };
+};
+
+fn c_unop(em: *emitter, op: u8) void = {
+	if (op == C_NEG) { e_c(em, '-'); }
+	else if (op == C_NOT) { e_c(em, '!'); }
+	else if (op == C_BNOT) { e_c(em, '~'); }
+	else if (op == C_ADDR) { e_c(em, '&'); }
+	else if (op == C_DEREF) { e_c(em, '*'); };
+};
+
+fn c_asgn(em: *emitter, op: u8) void = {
+	if (op == C_ASGN) { emit_s(em, " = "); }
+	else if (op == C_ASGN_ADD) { emit_s(em, " += "); }
+	else if (op == C_ASGN_SUB) { emit_s(em, " -= "); }
+	else if (op == C_ASGN_MUL) { emit_s(em, " *= "); }
+	else if (op == C_ASGN_DIV) { emit_s(em, " /= "); }
+	else if (op == C_ASGN_MOD) { emit_s(em, " %= "); }
+	else if (op == C_ASGN_AND) { emit_s(em, " &= "); }
+	else if (op == C_ASGN_OR) { emit_s(em, " |= "); }
+	else if (op == C_ASGN_XOR) { emit_s(em, " ^= "); }
+	else if (op == C_ASGN_SHL) { emit_s(em, " <<= "); }
+	else if (op == C_ASGN_SHR) { emit_s(em, " >>= "); };
+};
+
+fn c_int_suffix(em: *emitter, suffix: u8) void = {
+	if (suffix == C_SUFFIX_U) { e_c(em, 'U'); }
+	else if (suffix == C_SUFFIX_L) { e_c(em, 'L'); }
+	else if (suffix == C_SUFFIX_UL) { emit_s(em, "UL"); }
+	else if (suffix == C_SUFFIX_LL) { emit_s(em, "LL"); }
+	else if (suffix == C_SUFFIX_ULL) { emit_s(em, "ULL"); };
+};
+
+// ============================================================================
+// C Type Emission
+// ============================================================================
+
+fn c_void(em: *emitter) void = { emit_s(em, "void"); };
+fn c_bool(em: *emitter) void = { emit_s(em, "_Bool"); };
+fn c_char(em: *emitter) void = { emit_s(em, "char"); };
+fn c_int(em: *emitter) void = { emit_s(em, "int"); };
+
+fn c_i8(em: *emitter) void = { emit_s(em, "int8_t"); };
+fn c_i16(em: *emitter) void = { emit_s(em, "int16_t"); };
+fn c_i32(em: *emitter) void = { emit_s(em, "int32_t"); };
+fn c_i64(em: *emitter) void = { emit_s(em, "int64_t"); };
+
+fn c_u8(em: *emitter) void = { emit_s(em, "uint8_t"); };
+fn c_u16(em: *emitter) void = { emit_s(em, "uint16_t"); };
+fn c_u32(em: *emitter) void = { emit_s(em, "uint32_t"); };
+fn c_u64(em: *emitter) void = { emit_s(em, "uint64_t"); };
+
+fn c_f32(em: *emitter) void = { emit_s(em, "float"); };
+fn c_f64(em: *emitter) void = { emit_s(em, "double"); };
+
+fn c_size_t(em: *emitter) void = { emit_s(em, "size_t"); };
+fn c_intptr(em: *emitter) void = { emit_s(em, "intptr_t"); };
+fn c_uintptr(em: *emitter) void = { emit_s(em, "uintptr_t"); };
+fn c_str(em: *emitter) void = { emit_s(em, "hare_str"); };
+
+fn c_ptr(em: *emitter) void = { e_c(em, '*'); };
+fn c_auto(em: *emitter) void = { emit_s(em, "__auto_type"); };
+
+// ============================================================================
+// C Keywords and Constants
+// ============================================================================
+
+fn c_null(em: *emitter) void = { emit_s(em, "NULL"); };
+fn c_return(em: *emitter) void = { emit_s(em, "return"); };
+fn c_break(em: *emitter) void = { emit_s(em, "break"); };
+fn c_continue(em: *emitter) void = { emit_s(em, "continue"); };
+fn c_if(em: *emitter) void = { emit_s(em, "if"); };
+fn c_else(em: *emitter) void = { emit_s(em, "else"); };
+fn c_for(em: *emitter) void = { emit_s(em, "for"); };
+fn c_switch(em: *emitter) void = { emit_s(em, "switch"); };
+fn c_case(em: *emitter) void = { emit_s(em, "case"); };
+fn c_default(em: *emitter) void = { emit_s(em, "default"); };
+fn c_typedef(em: *emitter) void = { emit_s(em, "typedef"); };
+fn c_struct(em: *emitter) void = { emit_s(em, "struct"); };
+fn c_union(em: *emitter) void = { emit_s(em, "union"); };
+fn c_enum(em: *emitter) void = { emit_s(em, "enum"); };
+fn c_define(em: *emitter) void = { emit_s(em, "#define"); };
+
+fn c_if_open(em: *emitter) void = { c_if(em); emit_s(em, " ("); };
+fn c_for_open(em: *emitter) void = { c_for(em); emit_s(em, " ("); };
+fn c_switch_open(em: *emitter) void = { c_switch(em); emit_s(em, " ("); };
+fn c_cond_close(em: *emitter) void = { emit_s(em, ") "); };
+
+// ============================================================================
+// C Standard Prelude
+// ============================================================================
+
+fn c_prelude(em: *emitter) void = {
+	emit_s(em, "#include <stdint.h>\n");
+	emit_s(em, "#include <stddef.h>\n");
+	emit_s(em, "#ifndef NULL\n");
+	emit_s(em, "#define NULL ((void*)0)\n");
+	emit_s(em, "#endif\n");
+	emit_s(em, "typedef struct { uint8_t* data; size_t len; } hare_str;\n");
+	emit_s(em, "static hare_str __hare_file __attribute__((unused)) = {.data=(uint8_t*)\"<stdin>\",.len=7};\n");
+	e_nl(em);
+	// Slice support
+	emit_s(em, "#define HARE_DEFINE_SLICE(T, name) typedef struct { T* data; size_t len; size_t cap; } name\n");
+	e_nl(em);
+	emit_s(em, "extern void rt_abort(hare_str*,uint64_t,uint64_t,hare_str) __attribute__((noreturn));\n");
+	emit_s(em, "extern void rt_abort_fixed(hare_str*,uint64_t,uint64_t,uint64_t) __attribute__((noreturn));\n");
+	emit_s(em, "extern int rt_strcmp(hare_str a, hare_str b);\n");
+	emit_s(em, "extern void rt_memset(void* dst, int val, size_t n);\n");
+	emit_s(em, "#define HARE_BOUNDS_CHECK(i,len) ((void)((size_t)(i)>=(size_t)(len)?(rt_abort_fixed(&__hare_file,0,0,0),0):0))\n");
+	emit_s(em, "#define HARE_ARRAY_LEN(x) (sizeof(x)/sizeof((x)[0]))\n");
+	e_nl(em);
+};
+
+fn c_rt_decls(em: *emitter) void = {
+	emit_s(em, "// Runtime declarations\n");
+	emit_s(em, "extern void rt_memcpy(void* dst, const void* src, size_t n);\n");
+	emit_s(em, "extern void rt_memmove(void* dst, const void* src, size_t n);\n");
+	emit_s(em, "extern void rt_memset(void* dst, int val, size_t n);\n");
+	emit_s(em, "extern int64_t rt_read(int fd, void* buf, size_t count);\n");
+	emit_s(em, "extern int64_t rt_write(int fd, const void* buf, size_t count);\n");
+	emit_s(em, "extern void rt_exit(int status) __attribute__((noreturn));\n");
+	e_nl(em);
+	emit_s(em, "#define HARE_ASSERT(c,m) do { if (!(c)) rt_abort(&__hare_file,0,0,(m)); } while(0)\n");
+	emit_s(em, "#define HARE_ASSERT_FIXED(c,i) do { if (!(c)) rt_abort_fixed(&__hare_file,0,0,(i)); } while(0)\n");
+	emit_s(em, "#define HARE_ARRAY_LEN(x) (sizeof(x)/sizeof((x)[0]))\n");
+	emit_s(em, "#define HARE_BOUNDS_CHECK(i,len) ((void)((size_t)(i)>=(size_t)(len)?(rt_abort_fixed(&__hare_file,0,0,0),0):0))\n");
+	e_nl(em);
+};
+
+fn c_strings_decls(em: *emitter) void = {
+	emit_s(em, "// strings:: module - function prototypes (implementations in lib/pika/rt.c)\n");
+	emit_s(em, "extern hare_slice_uint8_t strings_toutf8(hare_str s);\n");
+	emit_s(em, "extern hare_str strings_fromutf8_unsafe(hare_slice_uint8_t in);\n");
+	e_nl(em);
+};
+
+// ============================================================================
+// C Construct Helpers
+// ============================================================================
+
+fn c_cast_open(em: *emitter) void = {
+	emit_s(em, "((");
+};
+
+fn c_cast_close(em: *emitter) void = {
+	e_c(em, ')');
+};
+
+fn c_generated_by(em: *emitter, tool: str) void = {
+	emit_s(em, "// Generated by ");
+	emit_s(em, tool);
+	e_nl(em);
+};
+
+// ============================================================================
+// Primitive Type Lookup
+// ============================================================================
+
+// Emit primitive type from token kind (for synthetic type nodes)
+fn c_prim_from_ival(em: *emitter, ival: i64) bool = {
+	if (ival == TK_U8: i64) { c_u8(em); return true; };
+	if (ival == TK_U16: i64) { c_u16(em); return true; };
+	if (ival == TK_U32: i64) { c_u32(em); return true; };
+	if (ival == TK_U64: i64) { c_u64(em); return true; };
+	if (ival == TK_I8: i64) { c_i8(em); return true; };
+	if (ival == TK_I16: i64) { c_i16(em); return true; };
+	if (ival == TK_I32: i64) { c_i32(em); return true; };
+	if (ival == TK_I64: i64) { c_i64(em); return true; };
+	if (ival == TK_SIZE: i64) { c_size_t(em); return true; };
+	if (ival == TK_UINTPTR: i64) { c_uintptr(em); return true; };
+	if (ival == TK_PRIM_INT: i64) { c_intptr(em); return true; };
+	if (ival == TK_PRIM_UINT: i64) { c_uintptr(em); return true; };
+	if (ival == TK_PRIM_BOOL: i64) { c_bool(em); return true; };
+	if (ival == TK_F32: i64) { c_f32(em); return true; };
+	if (ival == TK_F64: i64) { c_f64(em); return true; };
+	if (ival == TK_STR: i64) { c_str(em); return true; };
+	if (ival == TK_VOID: i64) { c_void(em); return true; };
+	return false;
+};
+
+fn c_prim_from_bref(em: *emitter, r: bref, src: *[*]u8) bool = {
+	let n = r.length;
+	if (n == 2) {
+		if (bref_match(r, "i8", src)) { c_i8(em); return true; };
+		if (bref_match(r, "u8", src)) { c_u8(em); return true; };
+		return false;
+	};
+	if (n == 3) {
+		if (bref_match(r, "i16", src)) { c_i16(em); return true; };
+		if (bref_match(r, "i32", src)) { c_i32(em); return true; };
+		if (bref_match(r, "i64", src)) { c_i64(em); return true; };
+		if (bref_match(r, "u16", src)) { c_u16(em); return true; };
+		if (bref_match(r, "u32", src)) { c_u32(em); return true; };
+		if (bref_match(r, "u64", src)) { c_u64(em); return true; };
+		if (bref_match(r, "f32", src)) { c_f32(em); return true; };
+		if (bref_match(r, "f64", src)) { c_f64(em); return true; };
+		if (bref_match(r, "int", src)) { c_intptr(em); return true; };
+		if (bref_match(r, "str", src)) { c_str(em); return true; };
+		return false;
+	};
+	if (n == 4) {
+		if (bref_match(r, "uint", src)) { c_uintptr(em); return true; };
+		if (bref_match(r, "size", src)) { c_size_t(em); return true; };
+		if (bref_match(r, "bool", src)) { c_bool(em); return true; };
+		if (bref_match(r, "void", src)) { c_void(em); return true; };
+		return false;
+	};
+	if (n == 6) {
+		if (bref_match(r, "intptr", src)) { c_intptr(em); return true; };
+		if (bref_match(r, "opaque", src)) { c_void(em); return true; };
+		return false;
+	};
+	if (n == 7) {
+		if (bref_match(r, "uintptr", src)) { c_uintptr(em); return true; };
+		return false;
+	};
+	return false;
+};
+
+// ============================================================================
+// C String Emission Helpers
+// ============================================================================
+
+fn hex_digit(v: u8) u8 = {
+	if (v < 10) { return '0' + v; };
+	return 'a' + v - 10;
+};
+
+fn c_hex_byte(em: *emitter, b: u8) void = {
+	e_raw(em, "\\x");
+	e_raw_c(em, hex_digit(b >> 4));
+	e_raw_c(em, hex_digit(b & 0xf));
+};
+
+fn parse_hex(src: *[*]u8, pos: size, count: size) u32 = {
+	let val: u32 = 0;
+	for (let i = 0z; i < count; i += 1) {
+		let c = src[pos + i];
+		val <<= 4;
+		if (c >= '0' && c <= '9') { val |= (c - '0'): u32; }
+		else if (c >= 'a' && c <= 'f') { val |= (c - 'a' + 10): u32; }
+		else if (c >= 'A' && c <= 'F') { val |= (c - 'A' + 10): u32; };
+	};
+	return val;
+};
+
+fn parse_oct(src: *[*]u8, pos: size, count: size) u32 = {
+	let val: u32 = 0;
+	for (let i = 0z; i < count; i += 1) {
+		let c = src[pos + i];
+		val <<= 3;
+		if (c >= '0' && c <= '7') { val |= (c - '0'): u32; };
+	};
+	return val;
+};
+
+fn utf8_len(cp: u32) size = {
+	if (cp < 0x80) { return 1; };
+	if (cp < 0x800) { return 2; };
+	if (cp < 0x10000) { return 3; };
+	return 4;
+};
+
+fn c_emit_utf8(em: *emitter, cp: u32) void = {
+	if (cp < 0x80) {
+		e_raw(em, "\\x");
+		c_hex_fixed(em, cp, 2);
+		return;
+	};
+	if (cp < 0x800) {
+		let b1_2 = (0xC0 | (cp >> 6)): u8;
+		let b2_2 = (0x80 | (cp & 0x3F)): u8;
+		e_raw(em, "\\x"); c_hex_fixed(em, b1_2, 2);
+		e_raw(em, "\\x"); c_hex_fixed(em, b2_2, 2);
+		return;
+	};
+	if (cp < 0x10000) {
+		let b1_3 = (0xE0 | (cp >> 12)): u8;
+		let b2_3 = (0x80 | ((cp >> 6) & 0x3F)): u8;
+		let b3_3 = (0x80 | (cp & 0x3F)): u8;
+		e_raw(em, "\\x"); c_hex_fixed(em, b1_3, 2);
+		e_raw(em, "\\x"); c_hex_fixed(em, b2_3, 2);
+		e_raw(em, "\\x"); c_hex_fixed(em, b3_3, 2);
+		return;
+	};
+	let b1_4 = (0xF0 | (cp >> 18)): u8;
+	let b2_4 = (0x80 | ((cp >> 12) & 0x3F)): u8;
+	let b3_4 = (0x80 | ((cp >> 6) & 0x3F)): u8;
+	let b4_4 = (0x80 | (cp & 0x3F)): u8;
+	e_raw(em, "\\x"); c_hex_fixed(em, b1_4, 2);
+	e_raw(em, "\\x"); c_hex_fixed(em, b2_4, 2);
+	e_raw(em, "\\x"); c_hex_fixed(em, b3_4, 2);
+	e_raw(em, "\\x"); c_hex_fixed(em, b4_4, 2);
+};
+
+fn is_hex_digit(c: u8) bool = {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+};
+
+fn c_hex_fixed(em: *emitter, v: u32, digits: size) void = {
+	for (let i = 0z; i < digits; i += 1) {
+		let shift = (digits - i - 1) * 4;
+		let nib = ((v >> (shift: u32)) & 0xf): u8;
+		e_raw_c(em, hex_digit(nib));
+	};
+};
+
+// Emit string content with proper C escaping and multi-line handling
+// r is bref including quotes, returns actual byte length
+fn c_str_content(em: *emitter, r: bref, src: *[*]u8) size = {
+	let slen = 0z;
+	let i = 1z; // Skip opening quote
+	let end = r.length - 1; // Skip closing quote
+	e_raw_c(em, '"');
+	for (i < end) {
+		let c = src[r.pos + i];
+		if (c == '\\' && i + 1 < end) {
+			let next = src[r.pos + i + 1];
+			if (next == 'o' && i + 6 <= end) {
+				let cp_o4 = parse_oct(src, r.pos + i + 2, 4);
+				c_emit_utf8(em, cp_o4);
+				slen += utf8_len(cp_o4);
+				i += 6;
+				if (i < end && is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+				continue;
+			};
+			if (next == 'O' && i + 10 <= end) {
+				let cp_O8 = parse_oct(src, r.pos + i + 2, 8);
+				c_emit_utf8(em, cp_O8);
+				slen += utf8_len(cp_O8);
+				i += 10;
+				if (i < end && is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+				continue;
+			};
+			e_raw_c(em, '\\');
+			e_raw_c(em, next);
+			if (next == 'x' && i + 4 <= end) {
+				e_raw_c(em, src[r.pos + i + 2]);
+				e_raw_c(em, src[r.pos + i + 3]);
+				i += 4;
+				slen += 1;
+				// Split string if next char is hex digit (C's \x is greedy)
+				if (i < end && is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+			} else if (next == 'u' && i + 6 <= end) {
+				for (let j = 0z; j < 4; j += 1) { e_raw_c(em, src[r.pos + i + 2 + j]); };
+				slen += utf8_len(parse_hex(src, r.pos + i + 2, 4));
+				i += 6;
+				// Split string if next char is hex digit
+				if (i < end && is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+			} else if (next == 'U' && i + 10 <= end) {
+				for (let j = 0z; j < 8; j += 1) { e_raw_c(em, src[r.pos + i + 2 + j]); };
+				slen += utf8_len(parse_hex(src, r.pos + i + 2, 8));
+				i += 10;
+				// Split string if next char is hex digit
+				if (i < end && is_hex_digit(src[r.pos + i])) {
+					e_raw(em, "\"\"");
+				};
+			} else {
+				i += 2;
+				slen += 1;
+			};
+		} else if (c == '\n') {
+			e_raw(em, "\\n\"\n\"");
+			i += 1;
+			slen += 1;
+		} else if (c == '\t') {
+			e_raw(em, "\\t");
+			i += 1;
+			slen += 1;
+		} else if (c == '\r') {
+			e_raw(em, "\\r");
+			i += 1;
+			slen += 1;
+		} else {
+			e_raw_c(em, c);
+			i += 1;
+			slen += 1;
+		};
+	};
+	e_raw_c(em, '"');
+	return slen;
+};
+
+// Emit raw string with selective escaping
+fn c_rawstr(em: *emitter, r: bref, src: *[*]u8) size = {
+	let i = 1z; // Skip opening backtick
+	let end = r.length - 1; // Skip closing backtick
+	e_raw_c(em, '"');
+	for (i < end) {
+		let c = src[r.pos + i];
+		if (c == '\\') { e_raw(em, "\\\\"); }
+		else if (c == '"') { e_raw(em, "\\\""); }
+		else if (c >= 32 && c <= 126) { e_raw_c(em, c); }
+		else {
+			c_hex_byte(em, c);
+			// Split string if next char is hex digit (C's \x is greedy)
+			if (i + 1 < end && is_hex_digit(src[r.pos + i + 1])) {
+				e_raw(em, "\"\"");
+			};
+		};
+		i += 1;
+	};
+	e_raw_c(em, '"');
+	return end - 1; // Raw byte count
+};
+
+// ============================================================================
+// Bounds Checking Emission
+// ============================================================================
+
+// Emit opening of bounds check statement
+fn c_bounds_check_open(em: *emitter) void = {
+	emit_s(em, "((void)((size_t)(");
+};
+
+// Emit middle of bounds check (between idx and bound)
+fn c_bounds_check_mid(em: *emitter) void = {
+	emit_s(em, ")>=(size_t)(");
+};
+
+// Emit closing of bounds check with abort call
+fn c_bounds_check_close(em: *emitter, line: i64, col: i64) void = {
+	emit_s(em, ")?(rt_abort_fixed(&__hare_file,");
+	e_i(em, line);
+	e_c(em, ',');
+	e_i(em, col);
+	emit_s(em, ",0),(void)0):(void)0))");
+};
+
+// ============================================================================
+// Pika -> GNU C11 mapping helpers
+// ============================================================================
+
+fn pika_to_c_binop(tk: u16) u8 = {
+	if (tk == TK_PLUS) { return C_ADD; };
+	if (tk == TK_MINUS) { return C_SUB; };
+	if (tk == TK_STAR) { return C_MUL; };
+	if (tk == TK_SLASH) { return C_DIV; };
+	if (tk == TK_PERCENT) { return C_MOD; };
+	if (tk == TK_AMP) { return C_AND; };
+	if (tk == TK_PIPE) { return C_OR; };
+	if (tk == TK_CARET) { return C_XOR; };
+	if (tk == TK_SHL) { return C_SHL; };
+	if (tk == TK_SHR) { return C_SHR; };
+	if (tk == TK_EQ_EQ) { return C_EQ; };
+	if (tk == TK_NE) { return C_NE; };
+	if (tk == TK_LT) { return C_LT; };
+	if (tk == TK_GT) { return C_GT; };
+	if (tk == TK_LE) { return C_LE; };
+	if (tk == TK_GE) { return C_GE; };
+	if (tk == TK_AND) { return C_LAND; };
+	if (tk == TK_OR) { return C_LOR; };
+	if (tk == TK_LXOR) { return C_NE; };
+	return 0;
+};
+
+fn pika_to_c_unop(tk: u16) u8 = {
+	if (tk == TK_MINUS) { return C_NEG; };
+	if (tk == TK_BANG) { return C_NOT; };
+	if (tk == TK_TILDE) { return C_BNOT; };
+	if (tk == TK_AMP) { return C_ADDR; };
+	if (tk == TK_STAR) { return C_DEREF; };
+	return 0;
+};
+
+fn pika_to_c_asgn(tk: u16) u8 = {
+	if (tk == TK_EQ) { return C_ASGN; };
+	if (tk == TK_PLUS_EQ) { return C_ASGN_ADD; };
+	if (tk == TK_MINUS_EQ) { return C_ASGN_SUB; };
+	if (tk == TK_STAR_EQ) { return C_ASGN_MUL; };
+	if (tk == TK_SLASH_EQ) { return C_ASGN_DIV; };
+	if (tk == TK_PERCENT_EQ) { return C_ASGN_MOD; };
+	if (tk == TK_AMP_EQ) { return C_ASGN_AND; };
+	if (tk == TK_PIPE_EQ) { return C_ASGN_OR; };
+	if (tk == TK_CARET_EQ) { return C_ASGN_XOR; };
+	if (tk == TK_SHL_EQ) { return C_ASGN_SHL; };
+	if (tk == TK_SHR_EQ) { return C_ASGN_SHR; };
+	return C_ASGN;
+};
+
+fn bref_str(g: *codegen, r: bref) str = {
+	return bref_to_str(r, g.t.src);
+};
+
+fn g_type_wrapped(g: *codegen, n: *tnode, k: u16) bool = {
+	if (k == N_T_PTR) { g_type_ptr(g, n); return true; };
+	if (k == N_T_SLICE) { g_type_slice(g, n); return true; };
+	if (k == N_T_UARR) { g_type_elem_ptr(g, n); return true; };
+	if (k == N_T_ARR) { g_type_arr(g, n); return true; };
+	return false;
+};
+
+fn g_type_named(g: *codegen, n: *tnode, k: u16) bool = {
+	if (k == N_T_PRIM) { g_type_prim(g, n); return true; };
+	if (k == N_T_ALIAS) {
+		if (bref_match(n.ref, "opaque", g.t.src)) {
+			c_void(&g.em);
+		} else {
+			e_bref(&g.em, n.ref);
+		};
+		return true;
+	};
+	if (k == N_T_ERR) {
+		emit_s(&g.em, "intptr_t");
+		return true;
+	};
+	if (k == N_T_QUAL) {
+		let mod_ref = bref_empty();
+		let member_ref = bref_empty();
+		if (!tqual_parts(g, n, &mod_ref, &member_ref)) { return false; };
+		emit_path_mangled(g, mod_ref);
+		e_c(&g.em, '_');
+		e_bref(&g.em, member_ref);
+		return true;
+	};
+	if (k == N_T_TAGGED) {
+		ef1(&g.em, "__tagged_%", i_to_s(g.tagged_count));
+		return true;
+	};
+	return false;
+};
+
+fn g_type(g: *codegen, n: *tnode) void = {
+	let k = n.kind;
+	if (g_type_wrapped(g, n, k)) { return; };
+	if (g_type_named(g, n, k)) { return; };
+};
+
+fn g_type_prim(g: *codegen, n: *tnode) void = {
+	if (c_prim_from_bref(&g.em, n.ref, g.t.src)) { return; };
+	if (c_prim_from_ival(&g.em, n.ival)) { return; };
+	e_bref(&g.em, n.ref);
+};
+
+fn g_type_ptr(g: *codegen, n: *tnode) void = {
+	match (t_first(n)) {
+	case let inner: *tnode =>
+		if (inner.kind == N_T_UARR) {
+			match (t_first(inner)) {
+			case let elem: *tnode => g_type(g, elem);
+			case null => void;
+			};
+			c_ptr(&g.em);
+			return;
+		};
+		g_type(g, inner);
+	case null => void;
+	};
+	c_ptr(&g.em);
+};
+
+fn g_type_elem_ptr(g: *codegen, n: *tnode) void = {
+	match (t_first(n)) {
+	case let elem: *tnode => g_type(g, elem);
+	case null => void;
+	};
+	c_ptr(&g.em);
+};
+
+fn g_type_slice_from_elem(g: *codegen, elem_node: *tnode) void = {
+	emit_s(&g.em, "hare_slice_");
+
+	if (elem_node.kind == N_T_PRIM) {
+		g_type_prim(g, elem_node);  // Reuse existing type mapping
+	} else if (elem_node.kind == N_T_PTR) {
+		match (t_first(elem_node)) {
+		case let inner: *tnode => g_type(g, inner);
+		case null => void;
+		};
+		emit_s(&g.em, "_ptr");
+	} else if (elem_node.kind == N_T_ALIAS) {
+		e_bref(&g.em, elem_node.ref);
+	} else {
+		g_type(g, elem_node);
+	};
+};
+
+fn g_type_slice(g: *codegen, n: *tnode) void = {
+	match (t_first(n)) {
+	case let elem: *tnode => g_type_slice_from_elem(g, elem);
+	case null => emit_s(&g.em, "void*");
+	};
+};
+
+fn g_type_arr(g: *codegen, n: *tnode) void = {
+	match (t_first(n)) {
+	case let elem: *tnode => g_type(g, elem);
+	case null => void;
+	};
+};
+
+fn g_array_dims(g: *codegen, n: *tnode) void = {
+	let elem = t_first(n);
+	if (elem == null) { return; };
+	let size_node = unwrap(elem).next;
+	if (size_node != null) {
+		let sn: *tnode = unwrap(size_node);
+		if (sn.ref.length == 0 && sn.kind == N_INT) {
+			emit_s(&g.em, "[");
+			e_i(&g.em, sn.ival);
+			e_c(&g.em, ']');
+		} else {
+			ef1(&g.em, "[%]", bref_str(g, sn.ref));
+		};
+	};
+};
+
+fn g_array_decl(g: *codegen, arr_type: *tnode, var_name: bref) void = {
+	g_type_arr(g, arr_type);
+	ef1(&g.em, " %", bref_to_str(var_name, g.t.src));
+	g_array_dims(g, arr_type);
+};
+
+fn g_ptr_array_decl(g: *codegen, ptr_type: *tnode, var_name: bref) void = {
+	let pcount: i64 = 0;
+	let current: *tnode = ptr_type;
+	for (current.kind == N_T_PTR) {
+		pcount += 1;
+		let inner = t_first(current);
+		if (inner == null) { break; };
+		current = unwrap(inner);
+	};
+	g_type_arr(g, current);
+	e_sp(&g.em);
+	e_c(&g.em, '(');
+	let i: i64 = 0;
+	for (i < pcount) { e_c(&g.em, '*'); i += 1; };
+	e_bref(&g.em, var_name);
+	e_c(&g.em, ')');
+	g_array_dims(g, current);
+};
+
+fn e_prefixed_id(g: *codegen, ref: bref) void = {
+	if (g.prefix.length > 0 && dict_has_bref(&g.exported_funcs, ref)) {
+		do_indent(&g.em);
+		sb_bref(&g.em.buf, g.prefix, g.prefix_src);
+		sb_char(&g.em.buf, '_');
+		sb_bref(&g.em.buf, ref, g.t.src);
+	} else {
+		e_bref(&g.em, ref);
+	};
+};
+
+fn g_str_part(g: *codegen, n: *tnode) size = {
+	if (n.kind == N_STR) { return c_str_content(&g.em, n.ref, g.t.src); };
+	if (n.kind == N_RAWSTR) { return c_rawstr(&g.em, n.ref, g.t.src); };
+	return 0;
+};
+
+fn g_str_as_hare(g: *codegen, n: *tnode) void = {
+	if (!node_is_str(n)) {
+		g_expr(g, n);
+		return;
+	};
+	emit_s(&g.em, "((hare_str){.data=(uint8_t*)");
+	let slen = g_str_part(g, n);
+	let c_opt = t_first(n);
+	for (c_opt != null) {
+		let c = unwrap(c_opt);
+		slen += g_str_part(g, c);
+		c_opt = c.next;
+	};
+	emit_s(&g.em, ",.len=");
+	e_u(&g.em, slen);
+	emit_s(&g.em, "})");
+};
+
+fn g_assert(g: *codegen, n: *tnode) void = {
+	let cond: *tnode = t_first_nn(n);
+	let msg = cond.next;
+	let lc = pos_to_line_col(n.ref.pos, g.t.src, g.t.src_len);
+	match (msg) {
+	case let m: *tnode =>
+		emit_s(&g.em, "do { if (!(");
+		g_expr(g, cond);
+		emit_s(&g.em, ")) rt_abort(&__hare_file,");
+		e_i(&g.em, lc.line: i64);
+		e_c(&g.em, ',');
+		e_i(&g.em, lc.col: i64);
+		e_c(&g.em, ',');
+		g_str_as_hare(g, m);
+		emit_s(&g.em, "); } while(0)");
+	case null =>
+		emit_s(&g.em, "do { if (!(");
+		g_expr(g, cond);
+		emit_s(&g.em, ")) rt_abort_fixed(&__hare_file,");
+		e_i(&g.em, lc.line: i64);
+		e_c(&g.em, ',');
+		e_i(&g.em, lc.col: i64);
+		emit_s(&g.em, ",6); } while(0)");
+	};
+};
+
+fn g_abort(g: *codegen, n: *tnode) void = {
+	let msg = t_first(n);
+	let lc = pos_to_line_col(n.ref.pos, g.t.src, g.t.src_len);
+	emit_s(&g.em, "rt_abort(&__hare_file,");
+	e_i(&g.em, lc.line: i64);
+	e_c(&g.em, ',');
+	e_i(&g.em, lc.col: i64);
+	e_c(&g.em, ',');
+	match (msg) {
+	case let m: *tnode => g_str_as_hare(g, m);
+	case null => emit_s(&g.em, "(hare_str){.data=(uint8_t*)\"abort\",.len=5}");
+	};
+	e_c(&g.em, ')');
+};
+
+fn g_len(g: *codegen, n: *tnode) void = {
+	let expr: *tnode = t_first_nn(n);
+
+	match (get_expr_type(g, expr)) {
+	case let ty: *tnode =>
+		let resolved = resolve_alias_type(g, ty);
+		if (resolved != null) {
+			let rty: *tnode = unwrap(resolved);
+			if (rty.kind == N_T_SLICE) {
+				e_c(&g.em, '(');
+				g_expr(g, expr);
+				emit_s(&g.em, ").len");
+				return;
+			};
+			if (type_is_str(rty, g.t.src)) {
+				e_c(&g.em, '(');
+				g_expr(g, expr);
+				emit_s(&g.em, ").len");
+				return;
+			};
+		};
+	case null => void;
+	};
+
+	emit_s(&g.em, "HARE_ARRAY_LEN(");
+	g_expr(g, expr);
+	e_c(&g.em, ')');
+};
+
+fn g_size(g: *codegen, n: *tnode) void = {
+	let ty: *tnode = t_first_nn(n);
+	emit_s(&g.em, "sizeof(");
+	g_type(g, ty);
+	if (ty.kind == N_T_ARR) {
+		g_array_dims(g, ty);
+	};
+	e_c(&g.em, ')');
+};
+
+fn g_int(g: *codegen, n: *tnode) void = {
+	let src = g.t.src;
+	let r = n.ref;
+	if (r.length >= 2 && src[r.pos] == '0' && (src[r.pos + 1] == 'x' || src[r.pos + 1] == 'X')) {
+		e_hex(&g.em, n.ival: u64);
+	} else {
+		e_i(&g.em, n.ival);
+	};
+	if (r.length >= 2 && src[r.pos + r.length - 1] == 'z') {
+		c_int_suffix(&g.em, C_SUFFIX_UL);
+	} else if (r.length >= 3 && src[r.pos + r.length - 2] == '6' && src[r.pos + r.length - 1] == '4') {
+		if (src[r.pos + r.length - 3] == 'u') {
+			c_int_suffix(&g.em, C_SUFFIX_ULL);
+		} else {
+			c_int_suffix(&g.em, C_SUFFIX_LL);
+		};
+	};
+};
+
+fn is_str_expr(g: *codegen, n: *tnode) bool = {
+	match (get_expr_type(g, n)) {
+	case let ty: *tnode =>
+		let resolved = resolve_alias_type(g, ty);
+		if (resolved == null) { return false; };
+		return type_is_str(unwrap(resolved), g.t.src);
+	case null => return false;
+	};
+};
+
+fn is_comparison_op(op: u16) bool = {
+	return op == TK_EQ_EQ || op == TK_NE || op == TK_LT || op == TK_GT ||
+	       op == TK_LE || op == TK_GE;
+};
+
+fn g_bin(g: *codegen, n: *tnode) void = {
+	let left = t_first_nn(n);
+	let right = t_next_nn(left);
+	let op = n.ival: u16;
+	if ((op == TK_EQ_EQ || op == TK_NE) && (is_str_expr(g, left) || is_str_expr(g, right))) {
+		if (op == TK_EQ_EQ) {
+			emit_s(&g.em, "rt_strcmp(");
+		} else {
+			emit_s(&g.em, "(!rt_strcmp(");
+		};
+		g_expr(g, left);
+		emit_s(&g.em, ", ");
+		g_expr(g, right);
+		if (op == TK_EQ_EQ) {
+			e_c(&g.em, ')');
+		} else {
+			emit_s(&g.em, "))");
+		};
+		return;
+	};
+	let needs_parens = !is_comparison_op(op);
+	if (needs_parens) { e_c(&g.em, '('); };
+	g_expr(g, left);
+	c_binop(&g.em, pika_to_c_binop(op));
+	g_expr(g, right);
+	if (needs_parens) { e_c(&g.em, ')'); };
+};
+
+fn g_un(g: *codegen, n: *tnode) void = {
+	let inner: *tnode = t_first_nn(n);
+	let op = n.ival: u16;
+	if (op == TK_STAR) {
+		match (get_expr_type(g, inner)) {
+		case let ty: *tnode =>
+			if (ty.kind == N_T_PTR && (ty.flags & F_NULLABLE) != 0) {
+				let narrowed = inner.kind == N_ID && !bref_is_empty(g.nullable_narrowed) &&
+					bref_eq(inner.ref, g.nullable_narrowed, g.t.src);
+				if (!narrowed) {
+					err_bref(n.ref, g.t.src, g.t.src_len,
+						"cannot dereference nullable pointer (use match to narrow type)");
+				};
+			};
+		case null => void;
+		};
+	};
+	if (op == TK_AMP && inner.kind == N_IDX) {
+		let arr = t_first_nn(inner);
+		let idx = t_next_nn(arr);
+		match (get_array_size(g, arr)) {
+		case let sz: *tnode =>
+			let lc = pos_to_line_col(idx.ref.pos, g.t.src, g.t.src_len);
+			emit_s(&g.em, "(((void)((size_t)(");
+			g_expr(g, idx);
+			emit_s(&g.em, ")>=(size_t)(");
+			e_bref(&g.em, sz.ref);
+			emit_s(&g.em, ")?(rt_abort_fixed(&__hare_file,");
+			e_i(&g.em, lc.line: i64);
+			e_c(&g.em, ',');
+			e_i(&g.em, lc.col: i64);
+			emit_s(&g.em, ",0),(void)0):(void)0)), (");
+		case null => emit_s(&g.em, "((");
+		};
+		g_expr(g, arr);
+		emit_s(&g.em, ") + (");
+		g_expr(g, idx);
+		emit_s(&g.em, "))");
+		return;
+	};
+	e_c(&g.em, '(');
+	c_unop(&g.em, pika_to_c_unop(op));
+	e_c(&g.em, '(');
+	g_expr(g, inner);
+	emit_s(&g.em, "))");
+};
+
+fn g_call_builtin(g: *codegen, func: *tnode) bool = {
+	let strings_toutf8 = qual_id_matches_alias(g, func, "strings", "toutf8");
+	let strings_from = qual_id_matches_alias(g, func, "strings", "fromutf8_unsafe");
+	if (!strings_toutf8 && !strings_from) { return false; };
+	if (!g.use_strings) {
+		err_bref(func.ref, g.t.src, g.t.src_len, "must 'use strings;' to use strings module");
+	};
+	let str_arg = t_next_nn(func);
+	if (strings_toutf8) {
+		emit_s(&g.em, "strings_toutf8(");
+	} else {
+		emit_s(&g.em, "strings_fromutf8_unsafe(");
+	};
+	g_expr(g, str_arg);
+	e_c(&g.em, ')');
+	return true;
+};
+
+fn g_emit_custom_slice_defs(g: *codegen) void = {
+	for (let i = 0z; i < slice_elem_len; i += 1) {
+		let elem: *tnode = slice_elem_list[i]: *tnode;
+		emit_s(&g.em, "HARE_DEFINE_SLICE(");
+		g_type(g, elem);
+		emit_s(&g.em, ", ");
+		g_type_slice_from_elem(g, elem);
+		emit_s(&g.em, ");\n");
+	};
+};

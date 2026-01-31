@@ -1,0 +1,248 @@
+// main.ha - Pika transpiler entry point
+// Pipeline: stdin -> pklex -> pkparse -> pkgen -> pkgen_gnuc11/pkgen_js -> stdout
+
+use rt;
+
+// Placeholder values for struct initialization
+let placeholder_byte: u8 = 0;
+let placeholder_node: tnode = tnode {
+	kind = 0, flags = 0, ref = bref { pos = 0, length = 0 },
+	parent = null, first_child = null, last_child = null,
+	prev = null, next = null, ival = 0
+};
+let placeholder_tree: tree = tree {
+	src = (&placeholder_byte): *[*]u8,
+	src_len = 0,
+	root = &placeholder_node,
+};
+let placeholder_dict_entry: dict_entry = dict_entry {
+	key_hash = 0,
+	key = bref { pos = 0, length = 0 },
+	value = 0,
+	occupied = false
+};
+
+// ============================================================================
+// Input - Read into static source buffer
+// ============================================================================
+
+fn read_stdin() size = {
+	let total = 0z;
+	for (total < SRCBUF_SIZE) {
+		let remaining = SRCBUF_SIZE - total;
+		if (remaining > 65536) {
+			remaining = 65536;
+		};
+		let n = rt::read(0, (&srcbuf[total]): *opaque, remaining);
+		if (n <= 0) {
+			break;
+		};
+		total += n: size;
+	};
+	return total;
+};
+
+// Parse optional directive lines at start:
+// -N <prefix>\n
+// -T <c|js|glsl|sycl>\n
+// -S <vertex|fragment|vert|frag>\n
+// Returns: position after directives (0 if none)
+fn parse_directives(
+	src: *[*]u8,
+	src_len: size,
+	prefix_out: *bref,
+	js_out: *bool,
+	glsl_out: *bool,
+	glsl_frag_out: *bool,
+	sycl_out: *bool
+) size = {
+	let pos = 0z;
+	for (true) {
+		if (pos + 3 > src_len) { break; };
+		if (src[pos] != '-': u8 || src[pos + 2] != ' ': u8) { break; };
+		let opt = src[pos + 1];
+		if (opt != 'N': u8 && opt != 'T': u8 && opt != 'S': u8) { break; };
+		let start = pos + 3;
+		let end = start;
+		for (end < src_len && src[end] != '\n': u8) {
+			end += 1;
+		};
+		let arg = bref_new(start, end - start);
+		if (opt == 'N': u8) {
+			prefix_out.pos = start;
+			prefix_out.length = end - start;
+		} else if (opt == 'T': u8) {
+			if (bref_match(arg, "js", src)) {
+				*js_out = true;
+				*glsl_out = false;
+				*sycl_out = false;
+			} else if (bref_match(arg, "c", src)) {
+				*js_out = false;
+				*glsl_out = false;
+				*sycl_out = false;
+			} else if (bref_match(arg, "glsl", src)) {
+				*js_out = false;
+				*glsl_out = true;
+				*sycl_out = false;
+			} else if (bref_match(arg, "sycl", src)) {
+				*js_out = false;
+				*glsl_out = false;
+				*sycl_out = true;
+			} else {
+				err_bref(arg, src, src_len,
+					"unknown target (use -T c, -T js, -T glsl, or -T sycl)");
+			};
+		} else if (opt == 'S': u8) {
+			if (bref_match(arg, "vertex", src) ||
+				bref_match(arg, "vert", src)) {
+				*glsl_frag_out = false;
+			} else if (bref_match(arg, "fragment", src) ||
+				bref_match(arg, "frag", src)) {
+				*glsl_frag_out = true;
+			} else {
+				err_bref(arg, src, src_len,
+					"unknown stage (use -S vertex or -S fragment)");
+			};
+		};
+		if (end < src_len && src[end] == '\n': u8) {
+			pos = end + 1;
+		} else {
+			pos = end;
+			break;
+		};
+	};
+	return pos;
+};
+
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+
+export fn main() void = {
+	// 1. Read stdin into static buffer
+	let total_len = read_stdin();
+	let src = (&srcbuf[0]): *[*]u8;
+
+	// 2. Parse optional "-N prefix" and "-T target" directives
+	let prefix = bref { pos = 0, length = 0 };
+	let use_js: bool = false;
+	let use_glsl: bool = false;
+	let use_sycl: bool = false;
+	let glsl_frag: bool = false;
+	let skip = parse_directives(src, total_len, &prefix, &use_js,
+		&use_glsl, &glsl_frag, &use_sycl);
+	let src_start = (&srcbuf[skip]): *[*]u8;
+	let src_len = total_len - skip;
+
+	// 3. Initialize tree with source (after prefix)
+	let t: tree = tree {
+		src = (&placeholder_byte): *[*]u8,
+		src_len = 0,
+		root = &placeholder_node,
+	};
+	tree_init(&t, src_start, src_len);
+
+	// 4. Lexer pass: bytes -> tokens
+	lex(&t);
+
+	// 5. Parser pass: tokens -> AST
+	parse(&t);
+
+	// 6. Codegen pass: AST -> output
+	let g: codegen = codegen {
+		em = emitter {
+			buf = strbuf { data = (&placeholder_byte): *[*]u8, length = 0, cap = 0 },
+			indent = 0,
+			at_line_start = true,
+			src = (&placeholder_byte): *[*]u8,
+			src_len = 0,
+		},
+		t = &placeholder_tree,
+		types = dict {
+			entries = (&placeholder_dict_entry): *[*]dict_entry,
+			count = 0,
+			cap = 0,
+			src = (&placeholder_byte): *[*]u8,
+		},
+		vars = dict {
+			entries = (&placeholder_dict_entry): *[*]dict_entry,
+			count = 0,
+			cap = 0,
+			src = (&placeholder_byte): *[*]u8,
+		},
+		funcs = dict {
+			entries = (&placeholder_dict_entry): *[*]dict_entry,
+			count = 0,
+			cap = 0,
+			src = (&placeholder_byte): *[*]u8,
+		},
+		exported_funcs = dict {
+			entries = (&placeholder_dict_entry): *[*]dict_entry,
+			count = 0,
+			cap = 0,
+			src = (&placeholder_byte): *[*]u8,
+		},
+		exported_types = dict {
+			entries = (&placeholder_dict_entry): *[*]dict_entry,
+			count = 0,
+			cap = 0,
+			src = (&placeholder_byte): *[*]u8,
+		},
+		globals = dict {
+			entries = (&placeholder_dict_entry): *[*]dict_entry,
+			count = 0,
+			cap = 0,
+			src = (&placeholder_byte): *[*]u8,
+		},
+		symbols = dict {
+			entries = (&placeholder_dict_entry): *[*]dict_entry,
+			count = 0,
+			cap = 0,
+			src = (&placeholder_byte): *[*]u8,
+		},
+		static_vars = dict {
+			entries = (&placeholder_dict_entry): *[*]dict_entry,
+			count = 0,
+			cap = 0,
+			src = (&placeholder_byte): *[*]u8,
+		},
+		aliases = dict {
+			entries = (&placeholder_dict_entry): *[*]dict_entry,
+			count = 0,
+			cap = 0,
+			src = (&placeholder_byte): *[*]u8,
+		},
+		tagged_count = 0,
+		match_var = null,
+		match_case_idx = -1,
+		cur_fn = bref { pos = 0, length = 0 },
+		cur_ret_type = null,
+		match_expected = null,
+		match_result = null,
+		nullable_narrowed = bref { pos = 0, length = 0 },
+		in_global_init = false,
+		use_rt = false,
+		use_strings = false,
+		prefix = bref { pos = 0, length = 0 },
+		prefix_src = (&placeholder_byte): *[*]u8,
+		match_tmp = 0,
+	};
+	gen_init(&g, &t);
+	// Set prefix (points into original srcbuf, not the tree's adjusted src)
+	if (prefix.length > 0) {
+		g.prefix = prefix;
+		g.prefix_src = src;  // prefix_src points to original srcbuf
+	};
+	if (use_sycl) {
+		pkgen_generate_sycl(&g);
+	} else if (use_glsl) {
+		pkgen_generate_glsl(&g, glsl_frag);
+	} else if (use_js) {
+		pkgen_generate_js(&g);
+	} else {
+		pkgen_generate_gnuc11(&g);
+	};
+
+	// 7. Write output to stdout
+	rt::write(1, emit_get(&g.em): *opaque, emit_len(&g.em));
+};

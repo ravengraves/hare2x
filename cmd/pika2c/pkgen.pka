@@ -1,0 +1,1564 @@
+// pkgen.pka - Pika codegen shared utilities
+// --- Codegen ---
+type codegen = struct {
+	em: emitter,
+	t: *tree,
+	types: dict,
+	vars: dict,
+	funcs: dict,         // function name -> return type node
+	exported_funcs: dict, // tracks which functions are exported (for prefix)
+	exported_types: dict, // tracks which types are exported (for validation)
+	globals: dict,       // global variable names (for shadowing check)
+	symbols: dict,       // function name -> @symbol node (JS mapping)
+	static_vars: dict,   // static locals for JS backend
+	aliases: dict,       // alias -> full_module_path (namespace aliasing)
+	tagged_count: i64,
+	match_var: nullable *tnode,
+	match_case_idx: i64,
+	cur_fn: bref,
+	cur_ret_type: nullable *tnode, // current function's return type for checking
+	match_expected: nullable *tnode, // expected type for match expressions in context
+	match_result: nullable *tnode, // current match expression result type (C codegen)
+	nullable_narrowed: bref,
+	in_global_init: bool,
+	use_rt: bool,
+	use_strings: bool,
+	prefix: bref,        // module prefix for exported functions (from -p arg)
+	prefix_src: *[*]u8,  // source buffer for prefix (may differ from t.src)
+	match_tmp: i64,      // counter for match temp variables
+};
+
+type call_arg_info = struct {
+	arg: nullable *tnode,
+	param: nullable *tnode,
+	is_default: bool,
+};
+
+fn bref_eq_concat_qual(key: bref, mod: bref, member: bref, src: *[*]u8) bool = {
+	let mlen: size = mod.length;
+	let nlen: size = member.length;
+	if (key.length != mlen + 1 + nlen) { return false; };
+	for (let i = 0z; i < mlen; i += 1) {
+		if (src[key.pos + i] != src[mod.pos + i]) { return false; };
+	};
+	if (src[key.pos + mlen] != '_') { return false; };
+	for (let i = 0z; i < nlen; i += 1) {
+		if (src[key.pos + mlen + 1 + i] != src[member.pos + i]) {
+			return false;
+		};
+	};
+	return true;
+};
+
+fn dict_get_qual_bref(d: *dict, mod: bref, member: bref) u64 = {
+	for (let i = 0z; i < d.cap; i += 1) {
+		let entry = &d.entries[i];
+		if (!entry.occupied) { continue; };
+		if (bref_eq_concat_qual(entry.key, mod, member, d.src)) {
+			return entry.value;
+		};
+	};
+	return 0;
+};
+
+fn bref_pack(r: bref) u64 = {
+	let base: u64 = 4294967296;
+	return (r.pos: u64) * base + (r.length: u64);
+};
+
+fn bref_unpack(v: u64) bref = {
+	let base: u64 = 4294967296;
+	let pos = (v / base): u64;
+	let rem = (v - pos * base): u64;
+	return bref_new(pos: size, rem: size);
+};
+
+fn register_use_alias_only(g: *codegen, n: *tnode) void = {
+	// n.ref = full path, first_child.ref = alias
+	let alias_node: *tnode = t_first_nn(n);
+	dict_set_bref(&g.aliases, alias_node.ref, bref_pack(n.ref));
+};
+
+fn register_use_alias(g: *codegen, n: *tnode) void = {
+	register_use_alias_only(g, n);
+	if (bref_match(n.ref, "rt", g.t.src)) { g.use_rt = true; };
+	if (bref_match(n.ref, "strings", g.t.src)) { g.use_strings = true; };
+};
+
+fn alias_expand_module(g: *codegen, mod: bref) bref = {
+	let packed = dict_get_bref(&g.aliases, mod);
+	if (packed != 0) {
+		return bref_unpack(packed);
+	};
+	return mod;
+};
+
+// Emit module path with :: replaced by _
+fn emit_path_mangled(g: *codegen, path: bref) void = {
+	let i = 0z;
+	for (i < path.length) {
+		let c = g.t.src[path.pos + i];
+		if (c == ':' && i + 1 < path.length && g.t.src[path.pos + i + 1] == ':') {
+			e_c(&g.em, '_');
+			i += 2;
+		} else {
+			e_c(&g.em, c);
+			i += 1;
+		};
+	};
+};
+
+// Extract alias-expanded module and member from a qualified identifier.
+fn qual_id_parts(g: *codegen, n: *tnode, mod_out: *bref, member_out: *bref) bool = {
+	if (n.kind != N_QUAL_ID) { return false; };
+	let member_opt = t_first(n);
+	if (member_opt == null) { return false; };
+	*mod_out = alias_expand_module(g, n.ref);
+	*member_out = unwrap(member_opt).ref;
+	return true;
+};
+
+// Extract alias-expanded module and member from a qualified type.
+fn tqual_parts(g: *codegen, n: *tnode, mod_out: *bref, member_out: *bref) bool = {
+	if (n.kind != N_T_QUAL) { return false; };
+	let member_opt = t_first(n);
+	if (member_opt == null) { return false; };
+	*mod_out = alias_expand_module(g, n.ref);
+	*member_out = unwrap(member_opt).ref;
+	return true;
+};
+
+fn qual_id_matches_alias(g: *codegen, n: *tnode, module: str, member: str) bool = {
+	if (n.kind != N_QUAL_ID) { return false; };
+	let mod_ref = alias_expand_module(g, n.ref);
+	if (!bref_match(mod_ref, module, g.t.src)) { return false; };
+	let member_node = t_first(n);
+	if (member_node == null) { return false; };
+	return bref_match(unwrap(member_node).ref, member, g.t.src);
+};
+
+fn gen_init(g: *codegen, t: *tree) void = {
+	emit_init(&g.em, t.src, t.src_len);
+	g.t = t;
+	dict_init_types(&g.types, t.src);
+	dict_init_vars(&g.vars, t.src);
+	dict_init_funcs(&g.funcs, t.src);
+	dict_init_exported_funcs(&g.exported_funcs, t.src);
+	dict_init_exported_types(&g.exported_types, t.src);
+	dict_init_globals(&g.globals, t.src);
+	dict_init_symbols(&g.symbols, t.src);
+	dict_init_static_vars(&g.static_vars, t.src);
+	dict_init_aliases(&g.aliases, t.src);
+	g.tagged_count = 0;
+	g.match_var = null;
+	g.match_case_idx = -1;
+	g.cur_fn = bref_empty();
+	g.cur_ret_type = null;
+	g.match_expected = null;
+	g.match_result = null;
+	g.nullable_narrowed = bref_empty();
+	g.in_global_init = false;
+	g.use_rt = false;
+	g.use_strings = false;
+	g.prefix = bref_empty();
+	g.match_tmp = 0;
+	g.prefix_src = t.src;  // default to tree source, main.pka will override if prefix present
+};
+
+fn vars_clear(g: *codegen) void = {
+	dict_clear(&g.vars);
+	for (let i = 0z; i < g.globals.cap; i += 1) {
+		if (g.globals.entries[i].occupied) {
+			dict_set_bref(&g.vars, g.globals.entries[i].key, g.globals.entries[i].value);
+		};
+	};
+};
+
+fn vars_register(g: *codegen, key: bref, val: u64) void = {
+	if (dict_has_bref(&g.vars, key)) {
+		err_bref(key, g.t.src, g.t.src_len,
+			"variable shadowing is not allowed in pika (rename the variable)");
+	};
+	dict_set_bref(&g.vars, key, val);
+};
+
+// Target-specific mapping helpers live in gen_gnuc11.pka and gen_js.pka.
+
+// --- Codegen: Expressions ---
+fn type_is_ptr_uarr(ty: *tnode) bool = {
+	if (ty.kind != N_T_PTR) { return false; };
+	let inner = t_first(ty);
+	if (inner == null) { return false; };
+	return unwrap(inner).kind == N_T_UARR;
+};
+
+// Check if type is simple pointer: *T (not *[*]T)
+fn is_simple_ptr(ty: *tnode) bool = {
+	if (ty.kind != N_T_PTR) { return false; };
+	let inner = t_first(ty);
+	if (inner == null) { return false; };
+	return unwrap(inner).kind != N_T_UARR;
+};
+
+// Check if expression is a void literal (possibly wrapped in casts).
+fn expr_is_void_literal(n: *tnode, src: *[*]u8) bool = {
+	let cur: *tnode = n;
+	for (cur.kind == N_CAST) {
+		match (t_first(cur)) {
+		case let inner: *tnode => cur = inner;
+		case null => return false;
+		};
+	};
+	return cur.kind == N_T_PRIM && bref_match(cur.ref, "void", src);
+};
+
+fn type_contains_nonnullable_ptr(g: *codegen, ty: *tnode) bool = {
+	let stack: [64]uintptr = [0...];
+	let top: size = 0;
+	stack[top] = ty: uintptr;
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let cur_ty: *tnode = stack[top]: *tnode;
+		let resolved_opt = resolve_alias_type(g, cur_ty);
+		if (resolved_opt != null) { cur_ty = unwrap(resolved_opt); };
+
+		if (cur_ty.kind == N_T_PTR) {
+			if ((cur_ty.flags & F_NULLABLE) == 0) { return true; };
+			continue;
+		};
+
+		if (cur_ty.kind == N_T_STRUCT) {
+			let field_opt = t_first(cur_ty);
+			for (field_opt != null) {
+				let field_node: *tnode = unwrap(field_opt);
+				let field_ty_opt = t_first(field_node);
+				if (field_ty_opt != null) {
+					if (top >= 64) {
+						abort("type too complex (non-nullable ptr check overflow)");
+					};
+					stack[top] = unwrap(field_ty_opt): uintptr;
+					top += 1;
+				};
+				field_opt = field_node.next;
+			};
+			continue;
+		};
+
+		if (cur_ty.kind == N_T_ARR || cur_ty.kind == N_T_UARR || cur_ty.kind == N_T_SLICE) {
+			let elem_opt = t_first(cur_ty);
+			if (elem_opt != null) {
+				if (top >= 64) {
+					abort("type too complex (non-nullable ptr check overflow)");
+				};
+				stack[top] = unwrap(elem_opt): uintptr;
+				top += 1;
+			};
+			continue;
+		};
+
+		if (cur_ty.kind == N_T_TAGGED) {
+			let variant_opt = t_first(cur_ty);
+			for (variant_opt != null) {
+				if (top >= 64) {
+					abort("type too complex (non-nullable ptr check overflow)");
+				};
+				stack[top] = unwrap(variant_opt): uintptr;
+				top += 1;
+				variant_opt = unwrap(variant_opt).next;
+			};
+			continue;
+		};
+	};
+
+	return false;
+};
+
+fn struct_lit_find_field(lit: *tnode, field_ref: bref, src: *[*]u8) nullable *tnode = {
+	let field_opt = t_first(lit);
+	for (field_opt != null) {
+		let field_node: *tnode = unwrap(field_opt);
+		if (bref_eq(field_node.ref, field_ref, src)) { return field_node; };
+		field_opt = field_node.next;
+	};
+	return null;
+};
+
+fn check_struct_lit_nonnullable_ptr_fields(g: *codegen, lit: *tnode) void = {
+	let type_ptr = dict_get_bref(&g.types, lit.ref);
+	if (type_ptr == 0) { return; };
+	let struct_ty_opt = resolve_alias_type(g, type_ptr: uintptr: *tnode);
+	if (struct_ty_opt == null) { return; };
+	let struct_ty: *tnode = unwrap(struct_ty_opt);
+	if (struct_ty.kind != N_T_STRUCT) { return; };
+	if ((lit.flags & F_VARIADIC) != 0) {
+		if (type_contains_nonnullable_ptr(g, struct_ty)) {
+			err_bref(lit.ref, g.t.src, g.t.src_len,
+				"struct literal fill cannot initialize non-nullable pointers");
+		};
+		return;
+	};
+
+	let def_field_opt = t_first(struct_ty);
+	for (def_field_opt != null) {
+		let def_field: *tnode = unwrap(def_field_opt);
+		if (bref_match(def_field.ref, "_", g.t.src)) {
+			def_field_opt = def_field.next;
+			continue;
+		};
+		let def_field_ty_opt = t_first(def_field);
+		if (def_field_ty_opt != null) {
+			let def_field_ty: *tnode = unwrap(def_field_ty_opt);
+			if (type_contains_nonnullable_ptr(g, def_field_ty)) {
+				let lit_field_opt = struct_lit_find_field(lit, def_field.ref, g.t.src);
+				if (lit_field_opt == null) {
+					err_bref(lit.ref, g.t.src, g.t.src_len,
+						"struct literal leaves non-nullable pointer field uninitialized");
+				} else {
+					let lit_field: *tnode = unwrap(lit_field_opt);
+					let lit_val_opt = t_first(lit_field);
+					if (lit_val_opt != null) {
+						let lit_val: *tnode = unwrap(lit_val_opt);
+						if (expr_is_all_zeros(lit_val)) {
+							err_bref(lit_val.ref, g.t.src, g.t.src_len,
+								"cannot zero-initialize non-nullable pointer field");
+						};
+					};
+				};
+			};
+		};
+		def_field_opt = def_field.next;
+	};
+};
+
+fn check_arr_lit_nonnullable_struct_zero(g: *codegen, arr_ty: *tnode, arr_lit: *tnode) void = {
+	let elem_ty_opt = t_first(arr_ty);
+	if (elem_ty_opt == null) { return; };
+	let elem_ty: *tnode = unwrap(elem_ty_opt);
+	let elem_resolved_opt = resolve_alias_type(g, elem_ty);
+	if (elem_resolved_opt == null) { return; };
+	let elem_resolved: *tnode = unwrap(elem_resolved_opt);
+	if (elem_resolved.kind != N_T_STRUCT) { return; };
+	if (!type_contains_nonnullable_ptr(g, elem_resolved)) { return; };
+
+	let elem_lit_opt = t_first(arr_lit);
+	for (elem_lit_opt != null) {
+		let elem_lit: *tnode = unwrap(elem_lit_opt);
+		if (expr_is_all_zeros(elem_lit)) {
+			err_bref(elem_lit.ref, g.t.src, g.t.src_len,
+				"cannot zero-initialize non-nullable pointer field");
+		};
+		elem_lit_opt = elem_lit.next;
+	};
+};
+
+fn find_variant_idx(g: *codegen, tagged: *tnode, src_ty: *tnode) i64 = {
+	let variant: nullable *tnode = t_first(tagged);
+	let idx: i64 = 0;
+	for (variant != null) {
+		let v: *tnode = unwrap(variant);
+		if (v.kind == src_ty.kind) {
+			if (v.kind == N_T_ALIAS) {
+				if (bref_eq(v.ref, src_ty.ref, g.t.src)) { return idx; };
+			} else if (v.kind == N_T_PRIM) {
+				if (prim_types_match(v, src_ty, g.t.src)) { return idx; };
+			} else {
+				return idx;
+			};
+		};
+		variant = v.next;
+		idx += 1;
+	};
+	return -1;
+};
+
+fn prim_ref_matches_tok(r: bref, tok: u16, src: *[*]u8) bool = {
+	if (tok == TK_U8: u16) { return bref_match(r, "u8", src); };
+	if (tok == TK_U16: u16) { return bref_match(r, "u16", src); };
+	if (tok == TK_U32: u16) { return bref_match(r, "u32", src); };
+	if (tok == TK_U64: u16) { return bref_match(r, "u64", src); };
+	if (tok == TK_I8: u16) { return bref_match(r, "i8", src); };
+	if (tok == TK_I16: u16) { return bref_match(r, "i16", src); };
+	if (tok == TK_I32: u16) { return bref_match(r, "i32", src); };
+	if (tok == TK_I64: u16) { return bref_match(r, "i64", src); };
+	if (tok == TK_F32: u16) { return bref_match(r, "f32", src); };
+	if (tok == TK_F64: u16) { return bref_match(r, "f64", src); };
+	if (tok == TK_STR: u16) { return bref_match(r, "str", src); };
+	if (tok == TK_VOID: u16) { return bref_match(r, "void", src); };
+	if (tok == TK_PRIM_BOOL: u16) { return bref_match(r, "bool", src); };
+	if (tok == TK_SIZE: u16) { return bref_match(r, "size", src); };
+	if (tok == TK_UINTPTR: u16) { return bref_match(r, "uintptr", src); };
+	if (tok == TK_PRIM_INT: u16) {
+		return bref_match(r, "int", src) || bref_match(r, "intptr", src);
+	};
+	if (tok == TK_PRIM_UINT: u16) {
+		return bref_match(r, "uint", src) || bref_match(r, "uintptr", src);
+	};
+	return false;
+};
+
+fn prim_types_match(a: *tnode, b: *tnode, src: *[*]u8) bool = {
+	if (a.ref.length != 0 && b.ref.length != 0) {
+		return bref_eq(a.ref, b.ref, src);
+	};
+	if (a.ref.length != 0 && b.ival != 0) {
+		return prim_ref_matches_tok(a.ref, b.ival: u16, src);
+	};
+	if (b.ref.length != 0 && a.ival != 0) {
+		return prim_ref_matches_tok(b.ref, a.ival: u16, src);
+	};
+	if (a.ival != 0 && b.ival != 0) { return a.ival == b.ival; };
+	return false;
+};
+
+fn type_eq(g: *codegen, a: *tnode, b: *tnode) bool = {
+	let stack_a: [512]uintptr = [0...];
+	let stack_b: [512]uintptr = [0...];
+	let seen_a: [512]uintptr = [0...];
+	let seen_b: [512]uintptr = [0...];
+	let seen_top: size = 0;
+	let top: size = 0;
+
+	stack_a[top] = a: uintptr;
+	stack_b[top] = b: uintptr;
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let ta: *tnode = stack_a[top]: *tnode;
+		let tb: *tnode = stack_b[top]: *tnode;
+
+		match (resolve_alias_type(g, ta)) {
+		case let resolved: *tnode => ta = resolved;
+		case null => void;
+		};
+		match (resolve_alias_type(g, tb)) {
+		case let resolved: *tnode => tb = resolved;
+		case null => void;
+		};
+
+		if (ta == tb) { continue; };
+		let seen = false;
+		let si = 0z;
+		for (si < seen_top) {
+			if (seen_a[si] == ta: uintptr && seen_b[si] == tb: uintptr) {
+				seen = true;
+				break;
+			};
+			si += 1;
+		};
+		if (seen) { continue; };
+
+		if (ta.kind != tb.kind) { return false; };
+		if (ta.kind == N_T_PRIM) {
+			if (!prim_types_match(ta, tb, g.t.src)) { return false; };
+			continue;
+		};
+		if (ta.kind == N_INT) {
+			if (ta.ival != tb.ival) { return false; };
+			continue;
+		};
+		if (ta.flags != tb.flags) { return false; };
+		if (ta.ival != tb.ival) { return false; };
+		if (!bref_eq(ta.ref, tb.ref, g.t.src)) { return false; };
+
+		if (seen_top >= 512) {
+			abort("type too complex (type eq overflow)");
+		};
+		seen_a[seen_top] = ta: uintptr;
+		seen_b[seen_top] = tb: uintptr;
+		seen_top += 1;
+
+		let ca = t_first(ta);
+		let cb = t_first(tb);
+		for (ca != null && cb != null) {
+			if (top >= 512) {
+				abort("type too complex (type eq overflow)");
+			};
+			stack_a[top] = unwrap(ca): uintptr;
+			stack_b[top] = unwrap(cb): uintptr;
+			top += 1;
+			ca = unwrap(ca).next;
+			cb = unwrap(cb).next;
+		};
+		if (ca != null || cb != null) { return false; };
+	};
+
+	return true;
+};
+
+fn node_ref_first(root: *tnode) bref = {
+	let stack: [64]uintptr = [0...];
+	let top: size = 0;
+	stack[top] = root: uintptr;
+	top += 1;
+	for (top > 0) {
+		top -= 1;
+		let node: *tnode = stack[top]: *tnode;
+		if (!bref_is_empty(node.ref)) { return node.ref; };
+		let child = t_first(node);
+		for (child != null) {
+			if (top >= 64) {
+				abort("node ref search too complex");
+			};
+			stack[top] = unwrap(child): uintptr;
+			top += 1;
+			child = unwrap(child).next;
+		};
+	};
+	return bref_empty();
+};
+
+
+fn resolve_alias_type(g: *codegen, ty: *tnode) nullable *tnode = {
+	let t: *tnode = ty;
+	let depth = 0;
+	for (depth < 10 && t.kind == N_T_ALIAS) {
+		let type_def = dict_get_bref(&g.types, t.ref);
+		if (type_def == 0) { return null; };
+		t = type_def: uintptr: *tnode;
+		depth += 1;
+	};
+	return t;
+};
+
+type type_eval = struct {
+	handled: bool,
+	ty: nullable *tnode,
+};
+
+fn type_prim_dummy(t: *tree, tok: u16) *tnode = {
+	let ty = t_new(t, N_T_PRIM);
+	ty.ref = bref_empty();
+	ty.ival = tok: i64;
+	return ty;
+};
+
+// Deep clone a type node without recursion (copies children and flags)
+fn type_clone(t: *tree, src: *tnode) *tnode = {
+	let root = t_new(t, src.kind);
+	root.flags = src.flags;
+	root.ref = src.ref;
+	root.ival = src.ival;
+
+	let src_stack: [64]uintptr = [0...];
+	let dst_stack: [64]uintptr = [0...];
+	let top: size = 0;
+
+	src_stack[top] = src: uintptr;
+	dst_stack[top] = root: uintptr;
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let s: *tnode = src_stack[top]: *tnode;
+		let d: *tnode = dst_stack[top]: *tnode;
+		let child = t_first(s);
+		for (child != null) {
+			let sc: *tnode = unwrap(child);
+			let dc: *tnode = t_new(t, sc.kind);
+			dc.flags = sc.flags;
+			dc.ref = sc.ref;
+			dc.ival = sc.ival;
+			t_append(d, dc);
+			if (top >= 64) {
+				abort("type too complex (clone stack overflow)");
+			};
+			src_stack[top] = sc: uintptr;
+			dst_stack[top] = dc: uintptr;
+			top += 1;
+			child = sc.next;
+		};
+	};
+
+	return root;
+};
+
+fn get_type_push(state: u16, node: uintptr, field_ref: bref) void = {
+	if (get_type_frame_top >= GET_TYPE_STACK_SIZE) {
+		abort("type too complex (type eval stack overflow)");
+	};
+	get_type_frames[get_type_frame_top] = get_type_frame {
+		state = state,
+		node = node,
+		field_ref = field_ref
+	};
+	get_type_frame_top += 1;
+};
+
+fn get_type_push_eval(n: *tnode) void = {
+	get_type_push(GTS_EVAL, n: uintptr, bref_empty());
+};
+
+fn get_type_push_state(state: u16) void = {
+	get_type_push(state, 0, bref_empty());
+};
+
+fn get_type_push_field(ref: bref) void = {
+	get_type_push(GTS_FIELD, 0, ref);
+};
+
+fn get_expr_type_call(g: *codegen, expr: *tnode) nullable *tnode = {
+	let func = t_first(expr);
+	if (func == null) { return null; };
+	let call_fn: *tnode = unwrap(func);
+	if (call_fn.kind == N_ID) {
+		let ret_ty = dict_get_bref(&g.funcs, call_fn.ref);
+		if (ret_ty != 0) {
+			return ret_ty: uintptr: *tnode;
+		};
+		return null;
+	};
+	if (qual_id_matches_alias(g, call_fn, "strings", "toutf8")) {
+		let toutf8_slice_ty = t_new(g.t, N_T_SLICE);
+		let u8_ty = type_prim_dummy(g.t, TK_U8);
+		t_append(toutf8_slice_ty, u8_ty);
+		return toutf8_slice_ty;
+	};
+	if (qual_id_matches_alias(g, call_fn, "strings", "fromutf8_unsafe")) {
+		return type_prim_dummy(g.t, TK_STR);
+	};
+	if (call_fn.kind == N_QUAL_ID) {
+		let mod_ref = alias_expand_module(g, call_fn.ref);
+		if (!bref_match(mod_ref, "gl", g.t.src)) { return null; };
+		let member = t_first(call_fn);
+		if (member != null) {
+			let ret = dict_get_qual_bref(&g.funcs, mod_ref, unwrap(member).ref);
+			if (ret != 0) { return ret: uintptr: *tnode; };
+		};
+	};
+	return null;
+};
+
+fn get_expr_type_eval(g: *codegen, expr: *tnode, k: u16) type_eval = {
+	if (k == N_ID) {
+		let ty_ptr = dict_get_bref(&g.vars, expr.ref);
+		let ty: nullable *tnode = null;
+		if (ty_ptr != 0) {
+			ty = ty_ptr: uintptr: *tnode;
+			return type_eval { handled = true, ty = ty };
+		};
+		let type_def = dict_get_bref(&g.types, expr.ref);
+		if (type_def != 0) {
+			match (resolve_alias_type(g, type_def: uintptr: *tnode)) {
+			case let resolved: *tnode =>
+				if (resolved.kind == N_T_ERR) {
+					let alias_err = t_new_ref(g.t, N_T_ALIAS, expr.ref);
+					return type_eval { handled = true, ty = alias_err };
+				};
+			case null => void;
+			};
+		};
+		return type_eval { handled = true, ty = ty };
+	};
+	if (k == N_CAST) {
+		let cast_e: *tnode = t_first_nn(expr);
+		return type_eval { handled = true, ty = cast_e.next };
+	};
+	if (is_str_kind(k)) {
+		return type_eval { handled = true, ty = type_prim_dummy(g.t, TK_STR) };
+	};
+	if (k == N_CALL) {
+		return type_eval { handled = true, ty = get_expr_type_call(g, expr) };
+	};
+	if (k == N_MATCH) {
+		return type_eval { handled = true, ty = get_match_type(g, expr, g.match_expected) };
+	};
+	if (k == N_ARR_LIT) {
+		let first = t_first(expr);
+		if (first == null) {
+			return type_eval { handled = true, ty = null };
+		};
+		get_type_push(GTS_ARR_LIT, expr: uintptr, bref_empty());
+		get_type_push_eval(unwrap(first));
+		return type_eval { handled = true, ty = null };
+	};
+	if (k == N_STRUCT_LIT) {
+		let alias_struct = t_new_ref(g.t, N_T_ALIAS, expr.ref);
+		return type_eval { handled = true, ty = alias_struct };
+	};
+	return type_eval { handled = false, ty = null };
+};
+
+fn get_expr_type_push(expr: *tnode, k: u16) bool = {
+	if (k == N_UN && expr.ival == TK_STAR: i64) {
+		let deref_inner: nullable *tnode = t_first(expr);
+		if (deref_inner == null) { return false; };
+		get_type_push_state(GTS_DEREF);
+		get_type_push_eval(unwrap(deref_inner));
+		return true;
+	};
+	if (k == N_UN && expr.ival == TK_AMP: i64) {
+		// Address-of: &expr -> *T where expr: T
+		let addr_inner: nullable *tnode = t_first(expr);
+		if (addr_inner == null) { return false; };
+		get_type_push_state(GTS_ADDR);
+		get_type_push_eval(unwrap(addr_inner));
+		return true;
+	};
+	if (k == N_IDX) {
+		// Indexing: arr[i] -> element type of arr
+		let arr_base: nullable *tnode = t_first(expr);
+		if (arr_base == null) { return false; };
+		get_type_push_state(GTS_INDEX);
+		get_type_push_eval(unwrap(arr_base));
+		return true;
+	};
+	if (k == N_FLD) {
+		let base: nullable *tnode = t_first(expr);
+		if (base == null) { return false; };
+		get_type_push_field(expr.ref);
+		get_type_push_eval(unwrap(base));
+		return true;
+	};
+	if (k == N_SLICE) {
+		let arr = t_first(expr);
+		if (arr == null) { return false; };
+		get_type_push_state(GTS_SLICE);
+		get_type_push_eval(unwrap(arr));
+		return true;
+	};
+	return false;
+};
+
+// Iterative version of get_expr_type using explicit stack (no recursion)
+fn get_expr_type(g: *codegen, n: *tnode) nullable *tnode = {
+	// Save stack state
+	let saved_top = get_type_frame_top;
+
+	// Push initial evaluation frame
+	get_type_push_eval(n);
+
+	let result: nullable *tnode = null;
+	for (get_type_frame_top > saved_top) {
+		get_type_frame_top -= 1;
+		let f = get_type_frames[get_type_frame_top];
+
+		if (f.state == GTS_EVAL) {
+			let expr: *tnode = f.node: *tnode;
+			let k = expr.kind;
+			let eval = get_expr_type_eval(g, expr, k);
+			if (eval.handled) {
+				result = eval.ty;
+			} else if (!get_expr_type_push(expr, k)) {
+				result = null;
+			};
+		} else if (f.state == GTS_DEREF) {
+			// Dereference the result type
+			if (result != null) {
+				let it: *tnode = unwrap(result);
+				if (it.kind == N_T_PTR) {
+					result = t_first(it);
+				} else {
+					result = null;
+				};
+			};
+		} else if (f.state == GTS_FIELD) {
+			// Look up field in result type
+			if (result == null) {
+				void; // result stays null
+			} else {
+				let base_opt = type_strip_ptr(unwrap(result));
+				if (base_opt == null) {
+					result = null;
+				} else {
+					let resolved = resolve_alias_type(g, unwrap(base_opt));
+					if (resolved == null) {
+						result = null;
+					} else {
+						let bt: *tnode = unwrap(resolved);
+						// Look up field
+						if (bt.kind == N_T_STRUCT) {
+							let field: nullable *tnode = t_first(bt);
+							let found = false;
+							for (field != null) {
+								let fld: *tnode = unwrap(field);
+								if (bref_eq(fld.ref, f.field_ref, g.t.src)) {
+									result = t_first(fld);
+									found = true;
+									break;
+								};
+								field = fld.next;
+							};
+							if (!found) { result = null; };
+						} else {
+							result = null;
+						};
+					};
+				};
+			};
+		} else if (f.state == GTS_SLICE) {
+			// Create slice type from array element type
+			if (result != null) {
+				let at: *tnode = unwrap(result);
+				if (at.kind == N_T_ARR || at.kind == N_T_UARR) {
+					// Array slicing: result is slice of element type
+					let arr_slice_ty = t_new(g.t, N_T_SLICE);
+					let elem = t_first(at);
+					if (elem != null) {
+						// Shallow copy element for the slice type
+						let arr_e: *tnode = unwrap(elem);
+						let arr_elem_copy = t_new_ref(g.t, arr_e.kind, arr_e.ref);
+						arr_elem_copy.flags = arr_e.flags;
+						t_append(arr_slice_ty, arr_elem_copy);
+					};
+					result = arr_slice_ty;
+				} else if (at.kind == N_T_SLICE) {
+					// Slice slicing: result is same slice type
+					result = at;
+				} else if (at.kind == N_T_PTR) {
+					// Check for pointer to unbounded array (*[*]T)
+					let uarr_inner = t_first(at);
+					if (uarr_inner != null && unwrap(uarr_inner).kind == N_T_UARR) {
+						let uarr: *tnode = unwrap(uarr_inner);
+						let uarr_elem = t_first(uarr);
+						if (uarr_elem != null) {
+							let uarr_slice_ty = t_new(g.t, N_T_SLICE);
+							let uarr_e: *tnode = unwrap(uarr_elem);
+							let uarr_elem_copy = t_new_ref(g.t, uarr_e.kind, uarr_e.ref);
+							uarr_elem_copy.flags = uarr_e.flags;
+							t_append(uarr_slice_ty, uarr_elem_copy);
+							result = uarr_slice_ty;
+						} else {
+							result = null;
+						};
+					} else {
+						result = null;
+					};
+				} else {
+					result = null;
+				};
+			};
+		} else if (f.state == GTS_ARR_LIT) {
+			if (result != null) {
+				let lit: *tnode = f.node: *tnode;
+				let arr_ty = t_new(g.t, N_T_ARR);
+				let elem_copy = type_clone(g.t, unwrap(result));
+				t_append(arr_ty, elem_copy);
+				let arr_count: i64 = 0;
+				let lit_child = t_first(lit);
+				for (lit_child != null) {
+					arr_count += 1;
+					lit_child = unwrap(lit_child).next;
+				};
+				let size_node = t_new_int(g.t, N_INT, arr_count);
+				t_append(arr_ty, size_node);
+				result = arr_ty;
+			} else {
+				result = null;
+			};
+		} else if (f.state == GTS_ADDR) {
+			// Address-of: wrap result in pointer type
+			if (result != null) {
+				let ptr_ty = t_new(g.t, N_T_PTR);
+				let inner_copy = type_clone(g.t, unwrap(result));
+				t_append(ptr_ty, inner_copy);
+				result = ptr_ty;
+			};
+		} else if (f.state == GTS_INDEX) {
+			// Array/slice indexing: get element type
+			if (result != null) {
+				let idx_base_ty: *tnode = unwrap(result);
+				if (idx_base_ty.kind == N_T_ARR || idx_base_ty.kind == N_T_UARR || idx_base_ty.kind == N_T_SLICE) {
+					result = t_first(idx_base_ty);  // Element type
+				} else if (idx_base_ty.kind == N_T_PTR) {
+					// Pointer indexing - if pointer to array, return element type
+					let ptr_inner = t_first(idx_base_ty);
+					if (ptr_inner != null) {
+						let inner_ty: *tnode = unwrap(ptr_inner);
+						if (inner_ty.kind == N_T_ARR || inner_ty.kind == N_T_UARR || inner_ty.kind == N_T_SLICE) {
+							result = t_first(inner_ty);
+						} else {
+							result = ptr_inner;
+						};
+					} else {
+						result = null;
+					};
+				} else {
+					result = null;
+				};
+			};
+		};
+	};
+
+	return result;
+};
+
+fn check_yield_never(g: *codegen, expr: *tnode) void = {
+	if (expr.kind != N_ID) { return; };
+	if (!bref_match(expr.ref, "never", g.t.src)) { return; };
+	if (dict_has_bref(&g.vars, expr.ref)) { return; };
+	if (dict_has_bref(&g.globals, expr.ref)) { return; };
+	if (dict_has_bref(&g.funcs, expr.ref)) { return; };
+	err_bref(expr.ref, g.t.src, g.t.src_len,
+		"yield never is not supported; use abort()");
+};
+
+type match_yield_state = struct {
+	expected: nullable *tnode,
+	require_explicit: bool,
+	saw_untyped: bool,
+	untyped_ref: bref,
+};
+
+fn exhaustive_expected(g: *codegen, val: *tnode, require_enum: bool) size = {
+	match (resolve_exhaustive_type(g, val)) {
+	case let ty: *tnode =>
+		if (require_enum && ty.kind != N_T_ENUM) { return 0; };
+		return count_expected_cases(ty);
+	case null => return 0;
+	};
+};
+
+fn match_is_exhaustive(g: *codegen, n: *tnode) bool = {
+	if (case_has_default(n)) { return true; };
+	let val = t_first_nn(n);
+	let expected = exhaustive_expected(g, val, false);
+	return expected > 0 && case_total_cases(n) >= expected;
+};
+
+fn switch_is_exhaustive(g: *codegen, n: *tnode) bool = {
+	if (case_has_default(n)) { return true; };
+	let val = t_first_nn(n);
+	let expected = exhaustive_expected(g, val, true);
+	return expected > 0 && case_value_total(n) >= expected;
+};
+
+def TFS_EVAL: u16 = 0;
+def TFS_BLOCK_NEXT: u16 = 1;
+def TFS_BLOCK_AFTER: u16 = 2;
+def TFS_IF_AFTER_THEN: u16 = 3;
+def TFS_IF_AFTER_ELSE: u16 = 4;
+def TFS_CASE_NEXT: u16 = 5;
+def TFS_CASE_AFTER: u16 = 6;
+
+type term_frame = struct {
+	state: u16,
+	node: *tnode,
+	cur: nullable *tnode,
+	can_fallthrough: bool,
+	then_term: bool,
+	case_node: nullable *tnode,
+	all_term: bool,
+	exhaustive: bool,
+};
+
+fn stmt_always_terminates(g: *codegen, root: *tnode) bool = {
+	let frames: [256]term_frame = [term_frame {
+		state = 0,
+		node = root,
+		cur = null,
+		can_fallthrough = false,
+		then_term = false,
+		case_node = null,
+		all_term = false,
+		exhaustive = false,
+	}...];
+	let top: size = 0;
+	let last_result = false;
+
+	frames[top] = term_frame {
+		state = TFS_EVAL,
+		node = root,
+		cur = null,
+		can_fallthrough = true,
+		then_term = false,
+		case_node = null,
+		all_term = true,
+		exhaustive = false
+	};
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let f = frames[top];
+		if (f.state == TFS_EVAL) {
+			let n: *tnode = f.node;
+			let k = n.kind;
+		if (k == N_YIELD || k == N_ABORT || k == N_RET || k == N_BREAK || k == N_CONTINUE) {
+			last_result = true;
+			continue;
+		};
+		if (k == N_EXPR_STMT) {
+			let expr: *tnode = t_first_nn(n);
+			frames[top] = term_frame {
+				state = TFS_EVAL,
+				node = expr,
+				cur = null,
+				can_fallthrough = true,
+				then_term = false,
+				case_node = null,
+				all_term = true,
+				exhaustive = false
+			};
+			top += 1;
+			continue;
+		};
+			if (k == N_BLOCK) {
+				frames[top] = term_frame {
+					state = TFS_BLOCK_NEXT,
+					node = n,
+					cur = t_first(n),
+					can_fallthrough = true,
+					then_term = false,
+					case_node = null,
+					all_term = true,
+					exhaustive = false
+				};
+				top += 1;
+				continue;
+			};
+			if (k == N_IF) {
+				let cond: *tnode = t_first_nn(n);
+				let then_block: *tnode = t_next_nn(cond);
+				frames[top] = term_frame {
+					state = TFS_IF_AFTER_THEN,
+					node = n,
+					cur = then_block.next,
+					can_fallthrough = true,
+					then_term = false,
+					case_node = null,
+					all_term = true,
+					exhaustive = false
+				};
+				top += 1;
+				frames[top] = term_frame {
+					state = TFS_EVAL,
+					node = then_block,
+					cur = null,
+					can_fallthrough = true,
+					then_term = false,
+					case_node = null,
+					all_term = true,
+					exhaustive = false
+				};
+				top += 1;
+				continue;
+			};
+			if (k == N_MATCH || k == N_SWITCH) {
+				let exhaustive = false;
+				if (k == N_MATCH) { exhaustive = match_is_exhaustive(g, n); }
+				else { exhaustive = switch_is_exhaustive(g, n); };
+				frames[top] = term_frame {
+					state = TFS_CASE_NEXT,
+					node = n,
+					cur = null,
+					can_fallthrough = true,
+					then_term = false,
+					case_node = case_list_first(n),
+					all_term = true,
+					exhaustive = exhaustive
+				};
+				top += 1;
+				continue;
+			};
+			last_result = false;
+			continue;
+		};
+		if (f.state == TFS_BLOCK_NEXT) {
+			if (!f.can_fallthrough || f.cur == null) {
+				last_result = !f.can_fallthrough;
+				continue;
+			};
+			let stmt: *tnode = unwrap(f.cur);
+			frames[top] = term_frame {
+				state = TFS_BLOCK_AFTER,
+				node = f.node,
+				cur = stmt.next,
+				can_fallthrough = f.can_fallthrough,
+				then_term = false,
+				case_node = null,
+				all_term = true,
+				exhaustive = false
+			};
+			top += 1;
+			frames[top] = term_frame {
+				state = TFS_EVAL,
+				node = stmt,
+				cur = null,
+				can_fallthrough = true,
+				then_term = false,
+				case_node = null,
+				all_term = true,
+				exhaustive = false
+			};
+			top += 1;
+			continue;
+		};
+		if (f.state == TFS_BLOCK_AFTER) {
+			let can_fallthrough = f.can_fallthrough;
+			if (last_result) { can_fallthrough = false; };
+			frames[top] = term_frame {
+				state = TFS_BLOCK_NEXT,
+				node = f.node,
+				cur = f.cur,
+				can_fallthrough = can_fallthrough,
+				then_term = false,
+				case_node = null,
+				all_term = true,
+				exhaustive = false
+			};
+			top += 1;
+			continue;
+		};
+		if (f.state == TFS_IF_AFTER_THEN) {
+			let then_term = last_result;
+			if (f.cur == null) {
+				last_result = false;
+				continue;
+			};
+			frames[top] = term_frame {
+				state = TFS_IF_AFTER_ELSE,
+				node = f.node,
+				cur = null,
+				can_fallthrough = true,
+				then_term = then_term,
+				case_node = null,
+				all_term = true,
+				exhaustive = false
+			};
+			top += 1;
+			frames[top] = term_frame {
+				state = TFS_EVAL,
+				node = unwrap(f.cur),
+				cur = null,
+				can_fallthrough = true,
+				then_term = false,
+				case_node = null,
+				all_term = true,
+				exhaustive = false
+			};
+			top += 1;
+			continue;
+		};
+		if (f.state == TFS_IF_AFTER_ELSE) {
+			last_result = f.then_term && last_result;
+			continue;
+		};
+		if (f.state == TFS_CASE_NEXT) {
+			if (!f.exhaustive) {
+				last_result = false;
+				continue;
+			};
+			if (f.case_node == null) {
+				last_result = f.all_term;
+				continue;
+			};
+			let cn: *tnode = unwrap(f.case_node);
+			let body = case_body_node(cn);
+			frames[top] = term_frame {
+				state = TFS_CASE_AFTER,
+				node = f.node,
+				cur = null,
+				can_fallthrough = true,
+				then_term = false,
+				case_node = cn.next,
+				all_term = f.all_term,
+				exhaustive = f.exhaustive
+			};
+			top += 1;
+			match (body) {
+			case let b: *tnode =>
+				frames[top] = term_frame {
+					state = TFS_EVAL,
+					node = b,
+					cur = null,
+					can_fallthrough = true,
+					then_term = false,
+					case_node = null,
+					all_term = true,
+					exhaustive = false
+				};
+				top += 1;
+			case null =>
+				last_result = false;
+			};
+			continue;
+		};
+		if (f.state == TFS_CASE_AFTER) {
+			let all_term = f.all_term;
+			if (!last_result) { all_term = false; };
+			frames[top] = term_frame {
+				state = TFS_CASE_NEXT,
+				node = f.node,
+				cur = null,
+				can_fallthrough = true,
+				then_term = false,
+				case_node = f.case_node,
+				all_term = all_term,
+				exhaustive = f.exhaustive
+			};
+			top += 1;
+			continue;
+		};
+	};
+
+	return last_result;
+};
+
+fn case_body_all_paths_terminate(g: *codegen, cn: *tnode) bool = {
+	let body = case_body_node(cn);
+	match (body) {
+	case let b: *tnode => return stmt_always_terminates(g, b);
+	case null => return false;
+	};
+};
+
+// Get type from a match expression and verify yield types are consistent
+fn get_match_type(g: *codegen, n: *tnode, expected_in: nullable *tnode) nullable *tnode = {
+	let state = match_yield_state {
+		expected = expected_in,
+		require_explicit = expected_in == null,
+		saw_untyped = false,
+		untyped_ref = bref_empty()
+	};
+	let cn = t_first(n);  // skip val
+	if (cn != null) { cn = unwrap(cn).next; };
+	for (cn != null) {
+		let c: *tnode = unwrap(cn);
+		if (!case_body_all_paths_terminate(g, c)) {
+			let err_ref = bref_empty();
+			match (case_body_node(c)) {
+			case let body: *tnode => err_ref = node_ref_first(body);
+			case null => void;
+			};
+			if (bref_is_empty(err_ref)) { err_ref = c.ref; };
+			err_bref(err_ref, g.t.src, g.t.src_len,
+				"all paths must yield or terminate");
+		};
+		match_case_yield_type(g, c, &state);
+		cn = c.next;
+	};
+	if (state.require_explicit && state.saw_untyped) {
+		let untyped_ref = state.untyped_ref;
+		if (bref_is_empty(untyped_ref)) { untyped_ref = n.ref; };
+		err_bref(untyped_ref, g.t.src, g.t.src_len,
+			"match yield type must be explicit; use a cast or type annotation");
+	};
+	return state.expected;
+};
+
+// Scan yields in a match case, updating (and validating) the expected type
+fn match_case_yield_type(
+	g: *codegen,
+	cn: *tnode,
+	state: *match_yield_state
+) void = {
+	// If this case has a let binding, temporarily register it for type inference
+	let saved_binding_type: u64 = 0;
+	let had_binding = false;
+	let has_binding = (cn.flags & F_MUTABLE) != 0;
+	let binding_ref = bref { pos = 0, length = 0 };
+
+	if (has_binding) {
+		let binding = t_first(cn);
+		if (binding != null) {
+			let b: *tnode = unwrap(binding);
+			binding_ref = b.ref;
+			let bind_type = t_first(b);
+			if (bind_type != null) {
+				// Save old value (if any) and register the binding type
+				// Note: No shadowing check here - this is type inference only.
+				// Shadowing is checked during code generation.
+				had_binding = dict_has_bref(&g.vars, binding_ref);
+				saved_binding_type = dict_get_bref(&g.vars, binding_ref);
+				dict_set_bref(&g.vars, binding_ref, unwrap(bind_type): uintptr: u64);
+			};
+		};
+	};
+
+	let body = case_body_node(cn);
+	if (body != null) {
+		let stack: [256]uintptr = [0...];
+		let top: size = 0;
+		stack[top] = unwrap(body): uintptr;
+		top += 1;
+		for (top > 0) {
+			top -= 1;
+			let node: *tnode = stack[top]: *tnode;
+			if (node.kind == N_MATCH) { continue; };
+			if (node.kind == N_YIELD) {
+				let expr = t_first(node);
+				if (expr != null) {
+					let expr_nn: *tnode = unwrap(expr);
+					check_yield_never(g, expr_nn);
+					match (get_expr_type(g, unwrap(expr))) {
+					case let ty: *tnode =>
+						if (state.expected != null) {
+							if (!type_eq(g, unwrap(state.expected), ty)) {
+								let type_err_ref = node_ref_first(unwrap(expr));
+								if (bref_is_empty(type_err_ref)) { type_err_ref = node.ref; };
+								if (bref_is_empty(type_err_ref)) { type_err_ref = cn.ref; };
+								err_bref(type_err_ref, g.t.src, g.t.src_len,
+									"match yields different types; use a cast or type annotation");
+							};
+						} else {
+							state.expected = ty;
+						};
+					case null =>
+						if (!state.saw_untyped && state.require_explicit) {
+							let untyped_err_ref = node_ref_first(expr_nn);
+							if (bref_is_empty(untyped_err_ref)) { untyped_err_ref = node.ref; };
+							if (bref_is_empty(untyped_err_ref)) { untyped_err_ref = cn.ref; };
+							state.untyped_ref = untyped_err_ref;
+						};
+						state.saw_untyped = true;
+					};
+				};
+			};
+			let child = t_first(node);
+			for (child != null) {
+				let c: *tnode = unwrap(child);
+				if (top >= 256) {
+					abort("match case too complex (yield scan overflow)");
+				};
+				stack[top] = c: uintptr;
+				top += 1;
+				child = c.next;
+			};
+		};
+	};
+
+	// Restore vars dict (remove temporary binding or restore old value)
+	if (has_binding && !bref_is_empty(binding_ref)) {
+		if (had_binding) {
+			dict_set_bref(&g.vars, binding_ref, saved_binding_type);
+		} else {
+			dict_remove_bref(&g.vars, binding_ref);
+		};
+		// Note: bindings are removed when they did not exist before this case
+	};
+
+	return;
+};
+
+fn get_array_size(g: *codegen, arr: *tnode) nullable *tnode = {
+	let t: *tnode = match (get_expr_type(g, arr)) {
+	case let ty: *tnode => yield ty;
+	case null => return null;
+	};
+	if (t.kind == N_T_ARR) {
+		if ((t.flags & F_INFERRED) != 0) { return null; };
+		return arr_size_node(t);
+	};
+	if (t.kind == N_T_PTR) {
+		match (t_first(t)) {
+		case let inner: *tnode =>
+			if (inner.kind == N_T_ARR) {
+				if ((inner.flags & F_INFERRED) != 0) { return null; };
+				return arr_size_node(inner);
+			};
+		case null => void;
+		};
+	};
+	return null;
+};
+
+fn resolve_exhaustive_type(g: *codegen, val: *tnode) nullable *tnode = {
+	if (val.kind != N_ID) { return null; };
+	let ty_ptr = dict_get_bref(&g.vars, val.ref);
+	if (ty_ptr == 0) { return null; };
+	let vty: *tnode = ty_ptr: uintptr: *tnode;
+	let resolved = resolve_alias_type(g, vty);
+	if (resolved == null) { return null; };
+	let rty: *tnode = unwrap(resolved);
+	if (rty.kind == N_T_ENUM || rty.kind == N_T_TAGGED) { return rty; };
+	return null;
+};
+
+fn count_expected_cases(ty: *tnode) size = {
+	if (ty.kind == N_T_ENUM) {
+		let mem_count = 0z;
+		let m0 = t_first(ty);
+		for (m0 != null) {
+			let mm: *tnode = unwrap(m0);
+			if (mm.kind == N_ENUM_MEM) { mem_count += 1; };
+			m0 = mm.next;
+		};
+		return mem_count;
+	};
+	if (ty.kind == N_T_TAGGED) {
+		return t_child_count(ty);
+	};
+	return 0;
+};
+
+fn validate_switch_type(g: *codegen, val: *tnode) void = {
+	if (val.kind != N_ID) { return; };
+	let ty_ptr = dict_get_bref(&g.vars, val.ref);
+	if (ty_ptr == 0) { return; };
+	let vty: *tnode = ty_ptr: uintptr: *tnode;
+	let resolved = resolve_alias_type(g, vty);
+	if (resolved == null) { return; };
+	let rty: *tnode = unwrap(resolved);
+	if (rty.kind == N_T_TAGGED) {
+		err_bref(val.ref, g.t.src, g.t.src_len, "cannot switch on tagged union; use match");
+	};
+	if (rty.kind == N_T_SLICE) {
+		err_bref(val.ref, g.t.src, g.t.src_len, "cannot switch on slices; use if-else");
+	};
+	if (type_is_str(rty, g.t.src)) {
+		err_bref(val.ref, g.t.src, g.t.src_len, "cannot switch on strings; use if-else for string comparison");
+	};
+};
+
+fn check_switch_exhaustiveness(g: *codegen, val: *tnode, case_count: size, has_default: bool) void = {
+	if (has_default) { return; };
+	let expected = exhaustive_expected(g, val, true);
+	if (expected > 0 && case_count < expected) {
+		err_bref(val.ref, g.t.src, g.t.src_len, "switch not exhaustive: missing cases");
+	};
+};
+
+fn check_match_exhaustiveness(g: *codegen, val: *tnode, case_count: size, has_default: bool) void = {
+	if (has_default) { return; };
+	let expected = exhaustive_expected(g, val, false);
+	if (expected > 0 && case_count < expected) {
+		err_bref(val.ref, g.t.src, g.t.src_len, "match not exhaustive: missing cases");
+	};
+};
+
+fn g_skip_symbol(n: *tnode) nullable *tnode = {
+	match (t_first(n)) {
+	case let child: *tnode =>
+		if (child.kind == N_SYMBOL_NAME) {
+			return child.next;
+		};
+		return child;
+	case null => return null;
+	};
+};
+
+fn param_default(p: *tnode) nullable *tnode = {
+	let ty_opt = t_first(p);
+	if (ty_opt == null) { return null; };
+	return unwrap(ty_opt).next;
+};
+
+fn call_arg_next(
+	g: *codegen,
+	callee_ref: bref,
+	param_opt: *nullable *tnode,
+	arg_opt: *nullable *tnode
+) call_arg_info = {
+	let info = call_arg_info { arg = null, param = null, is_default = false };
+	if (*arg_opt != null) {
+		let arg: *tnode = unwrap(*arg_opt);
+		info.arg = arg;
+		*arg_opt = arg.next;
+		if (*param_opt != null && unwrap(*param_opt).kind == N_PARAM) {
+			let param_node: *tnode = unwrap(*param_opt);
+			info.param = param_node;
+			*param_opt = param_node.next;
+		};
+		return info;
+	};
+	if (*param_opt != null && unwrap(*param_opt).kind == N_PARAM) {
+		let default_param: *tnode = unwrap(*param_opt);
+		info.param = default_param;
+		*param_opt = default_param.next;
+		match (param_default(default_param)) {
+		case let def_val: *tnode =>
+			info.arg = def_val;
+			info.is_default = true;
+		case null =>
+			err_bref(callee_ref, g.t.src, g.t.src_len, "missing argument with no default");
+		};
+		return info;
+	};
+	return info;
+};
+
+fn is_pika_main(g: *codegen, n: *tnode) bool = {
+	if ((n.flags & F_EXPORTED) == 0) { return false; };
+	if (!bref_match(n.ref, "main", g.t.src)) { return false; };
+	let ret_type = g_skip_to_ret(n);
+	if (ret_type == null) { return false; };
+	let rt: *tnode = unwrap(ret_type);
+	let resolved = resolve_alias_type(g, rt);
+	if (resolved == null) { return false; };
+	if (!type_is_void(unwrap(resolved), g.t.src)) { return false; };
+	let first = t_first(n);
+	if (first == null) { return false; };
+	let f: *tnode = unwrap(first);
+	if ((n.flags & F_SYMBOL) != 0) {
+		if (f.next == null) { return false; };
+		f = unwrap(f.next);
+	};
+	return f.kind == N_T_PRIM;
+};
+
+fn check_type_visibility(g: *codegen, ty: *tnode) bref = {
+	let stack: [32]uintptr = [0...];
+	let top: size = 0;
+	let inner: nullable *tnode = null;
+	stack[top] = ty: uintptr;
+	top += 1;
+	for (top > 0) {
+		top -= 1;
+		let t: *tnode = stack[top]: *tnode;
+		if (t.kind == N_T_ALIAS) {
+			if (!dict_has_bref(&g.exported_types, t.ref)) {
+				return t.ref;
+			};
+			continue;
+		};
+		if (t.kind == N_T_QUAL) {
+			inner = t_first(t);
+			if (inner != null && top < 32) {
+				stack[top] = unwrap(inner): uintptr;
+				top += 1;
+			};
+			continue;
+		};
+		if (t.kind == N_T_PTR || t.kind == N_T_SLICE || t.kind == N_T_ARR || t.kind == N_T_UARR) {
+			inner = t_first(t);
+			if (inner != null && top < 32) {
+				stack[top] = unwrap(inner): uintptr;
+				top += 1;
+			};
+			continue;
+		};
+		if (t.kind == N_T_TAGGED) {
+			let variant = t_first(t);
+			for (variant != null && top < 32) {
+				stack[top] = unwrap(variant): uintptr;
+				top += 1;
+				variant = unwrap(variant).next;
+			};
+		};
+	};
+	return bref_empty();
+};
+
+fn check_fn_type_visibility(g: *codegen, n: *tnode) void = {
+	let bad: bref = bref_empty();
+	let param = g_skip_symbol(n);
+	for (param != null && unwrap(param).kind == N_PARAM) {
+		let p: *tnode = unwrap(param);
+		let pty: *tnode = t_first_nn(p);
+		bad = check_type_visibility(g, pty);
+		if (!bref_is_empty(bad)) {
+			err_bref(n.ref, g.t.src, g.t.src_len,
+				"exported function uses unexported type");
+		};
+		param = p.next;
+	};
+	let ret_type = g_skip_to_ret(n);
+	if (ret_type != null) {
+		bad = check_type_visibility(g, unwrap(ret_type));
+		if (!bref_is_empty(bad)) {
+			err_bref(n.ref, g.t.src, g.t.src_len,
+				"exported function uses unexported type");
+		};
+	};
+};
+
+fn g_skip_to_ret(n: *tnode) nullable *tnode = {
+	let child = g_skip_symbol(n);
+	for (child != null && unwrap(child).kind == N_PARAM) {
+		child = unwrap(child).next;
+	};
+	return child;
+};

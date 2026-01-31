@@ -1,0 +1,233 @@
+// tree.ha - Tree structure with static node pool (no malloc)
+
+// ============================================================================
+// Tree Node Structure
+// ============================================================================
+
+type tnode = struct {
+	kind: u16,
+	flags: u16,
+	ref: bref,
+	parent: nullable *tnode,
+	first_child: nullable *tnode,
+	last_child: nullable *tnode,
+	prev: nullable *tnode,
+	next: nullable *tnode,
+	ival: i64,
+};
+
+// Static node pool (size must match NODE_POOL_SIZE)
+let nodes: [524288]tnode = [tnode {
+	kind = 0, flags = 0, ref = bref { pos = 0, length = 0 },
+	parent = null, first_child = null, last_child = null,
+	prev = null, next = null, ival = 0
+}...];
+
+// ============================================================================
+// Tree Container
+// ============================================================================
+
+type tree = struct {
+	src: *[*]u8,
+	src_len: size,
+	root: *tnode,
+};
+
+fn tree_init(t: *tree, src: *[*]u8, src_len: size) void = {
+	t.src = src;
+	t.src_len = src_len;
+	node_idx = 0;
+	t.root = t_new(t, 0);
+};
+
+// ============================================================================
+// Node Construction - Uses static pool
+// ============================================================================
+
+fn t_new(t: *tree, kind: u16) *tnode = {
+	if (t.src_len == 0 && false) { abort(); }; // use param, never executes
+	if (node_idx >= NODE_POOL_SIZE) {
+		abort("node pool exhausted");
+	};
+	let n: *tnode = &nodes[node_idx];
+	node_idx += 1;
+	n.kind = kind;
+	n.flags = 0;
+	n.ref = bref_empty();
+	n.parent = null;
+	n.first_child = null;
+	n.last_child = null;
+	n.prev = null;
+	n.next = null;
+	n.ival = 0;
+	return n;
+};
+
+fn t_new_ref(t: *tree, kind: u16, r: bref) *tnode = {
+	let n: *tnode = t_new(t, kind);
+	n.ref = r;
+	return n;
+};
+
+fn t_new_int(t: *tree, kind: u16, val: i64) *tnode = {
+	let n: *tnode = t_new(t, kind);
+	n.ival = val;
+	return n;
+};
+
+fn t_new_ref_int(t: *tree, kind: u16, r: bref, val: i64) *tnode = {
+	let n: *tnode = t_new(t, kind);
+	n.ref = r;
+	n.ival = val;
+	return n;
+};
+
+// ============================================================================
+// Tree Operations
+// ============================================================================
+
+fn t_append(parent: *tnode, child: *tnode) void = {
+	if (child.parent != null) {
+		t_remove(child);
+	};
+	child.parent = parent;
+	child.prev = parent.last_child;
+	child.next = null;
+	match (parent.last_child) {
+	case let lc: *tnode => lc.next = child;
+	case null => parent.first_child = child;
+	};
+	parent.last_child = child;
+};
+
+fn t_remove(node: *tnode) void = {
+	match (node.parent) {
+	case null => return;
+	case let p: *tnode =>
+		match (node.prev) {
+		case let prev: *tnode => prev.next = node.next;
+		case null => p.first_child = node.next;
+		};
+		match (node.next) {
+		case let nxt: *tnode => nxt.prev = node.prev;
+		case null => p.last_child = node.prev;
+		};
+		node.parent = null;
+		node.prev = null;
+		node.next = null;
+	};
+};
+
+fn t_replace(old: *tnode, new: *tnode) void = {
+	match (old.parent) {
+	case null => return;
+	case let p: *tnode =>
+		if (new.parent != null) {
+			t_remove(new);
+		};
+		new.parent = p;
+		new.prev = old.prev;
+		new.next = old.next;
+		match (old.prev) {
+		case let prev: *tnode => prev.next = new;
+		case null => p.first_child = new;
+		};
+		match (old.next) {
+		case let nxt: *tnode => nxt.prev = new;
+		case null => p.last_child = new;
+		};
+		old.parent = null;
+		old.prev = null;
+		old.next = null;
+	};
+};
+
+// ============================================================================
+// Tree Queries
+// ============================================================================
+
+fn t_is(node: *tnode, kind: u16) bool = {
+	return node.kind == kind;
+};
+
+fn t_has_children(node: *tnode) bool = {
+	return node.first_child != null;
+};
+
+fn t_child_count(node: *tnode) size = {
+	let count = 0z;
+	let child: nullable *tnode = node.first_child;
+	for (child != null) {
+		count += 1;
+		child = unwrap(child).next;
+	};
+	return count;
+};
+
+fn t_nth_child(node: *tnode, n: size) nullable *tnode = {
+	let child: nullable *tnode = node.first_child;
+	let i = 0z;
+	for (child != null) {
+		if (i == n) {
+			return child;
+		};
+		i += 1;
+		child = unwrap(child).next;
+	};
+	return null;
+};
+
+fn t_first(node: *tnode) nullable *tnode = {
+	return node.first_child;
+};
+
+fn t_last(node: *tnode) nullable *tnode = {
+	return node.last_child;
+};
+
+fn t_next(node: *tnode) nullable *tnode = {
+	return node.next;
+};
+
+fn t_prev(node: *tnode) nullable *tnode = {
+	return node.prev;
+};
+
+// Unwrap nullable pointer (aborts if null)
+fn unwrap(n: nullable *tnode) *tnode = {
+	return match (n) {
+	case let ptr: *tnode => yield ptr;
+	case null =>
+		abort("unwrap: unexpected null");
+	};
+};
+
+// Get non-null first child (aborts if null)
+fn t_first_nn(node: *tnode) *tnode = {
+	return match (node.first_child) {
+	case let ptr: *tnode => yield ptr;
+	case null =>
+		abort("t_first_nn: unexpected null child");
+	};
+};
+
+// Get non-null next sibling (aborts if null)
+fn t_next_nn(node: *tnode) *tnode = {
+	return match (node.next) {
+	case let ptr: *tnode => yield ptr;
+	case null =>
+		abort("t_next_nn: unexpected null sibling");
+	};
+};
+
+fn t_find_child(node: *tnode, kind: u16) nullable *tnode = {
+	let child: nullable *tnode = node.first_child;
+	for (child != null) {
+		let c = unwrap(child);
+		if (c.kind == kind) {
+			return child;
+		};
+		child = c.next;
+	};
+	return null;
+};

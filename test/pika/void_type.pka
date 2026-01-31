@@ -1,0 +1,12 @@
+// Pika: !void error type and tagged union.
+
+type err1 = !void;
+type mytype = (u32 | err1);
+
+export fn main() void = {
+	let v: mytype = err1;
+	match (v) {
+	case u32 => void;
+	case err1 => void;
+	};
+};

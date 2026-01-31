@@ -1,0 +1,11 @@
+// ERROR: match not exhaustive: missing cases
+type result = (i32 | bool);
+type my_result = result;
+
+fn test() void = {
+	let r: my_result = 0: my_result;
+	match (r) {
+	case i32 => void;
+	// missing bool variant
+	};
+};

@@ -1,0 +1,17 @@
+// Match with default case - should compile successfully (no exhaustiveness error)
+type number = (i32 | f32);
+
+export fn test_match_with_default() void = {
+	let n: number = 0: number;
+	match (n) {
+	// ERROR on next line: Empty blocks not allowed in Hare
+	// Expected: "/tmp/match_with_default.ha:7:21: syntax error: cannot have empty block"
+	// Fix: Use void instead of {}: case i32 => void;
+	case i32 => {};
+	case => {};  // default case, no exhaustiveness error
+	};
+};
+
+export fn _main() void = {
+	test_match_with_default();
+};

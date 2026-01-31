@@ -1,0 +1,36 @@
+// literals.pka - Numeric literal stress tests
+
+export fn main() void = {
+	let dec_i: int = 0i;
+	let dec_u: uint = 0u;
+	let dec_z: size = 0z;
+
+	let i8v: i8 = 1i8;
+	let i16v: i16 = 2i16;
+	let i32v: i32 = 3i32;
+	let i64v: i64 = 4i64;
+
+	let u8v: u8 = 5u8;
+	let u16v: u16 = 6u16;
+	let u32v: u32 = 7u32;
+	let u64v: u64 = 8u64;
+
+	let hex_i32: i32 = 0x00i32;
+	let hex_u32: u32 = 0xFFu32;
+	let oct_u16: u16 = 0o77u16;
+	let bin_i16: i16 = 0b1010i16;
+
+	let f0: f32 = 0.0f32;
+	let f1: f64 = 0.0f64;
+	let f2: f32 = 10e-4f32;
+	let f3: f64 = -10.0E+64f64;
+	let f4: f32 = 10f32;
+
+	assert(dec_i == 0);
+	assert(dec_u == 0u);
+	assert(dec_z == 0z);
+	assert(hex_i32 == 0);
+	assert(oct_u16 == 63u16);
+	assert(bin_i16 == 10i16);
+	assert(f0 == 0.0f32);
+};

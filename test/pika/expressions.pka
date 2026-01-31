@@ -1,0 +1,86 @@
+// expressions.ha - Expression tests
+
+// Arithmetic
+export fn arithmetic(a: i32, b: i32) i32 = {
+	let sum = a + b;
+	let diff = a - b;
+	let prod = a * b;
+	let quot = a / b;
+	let rem = a % b;
+	return sum + diff + prod + quot + rem;
+};
+
+// Comparison
+export fn compare(a: i32, b: i32) bool = {
+	let eq = a == b;
+	let ne = a != b;
+	let lt = a < b;
+	let gt = a > b;
+	let le = a <= b;
+	let ge = a >= b;
+	return eq || ne || lt || gt || le || ge;
+};
+
+// Logical operators
+export fn logical(a: bool, b: bool) bool = {
+	let and_r = a && b;
+	let or_r = a || b;
+	let not_r = !a;
+	return and_r || or_r || not_r;
+};
+
+// Bitwise operators
+export fn bitwise(a: u32, b: u32) u32 = {
+	let and_r = a & b;
+	let or_r = a | b;
+	let xor_r = a ^ b;
+	let not_r = ~a;
+	let shl = a << 2;
+	let shr = a >> 2;
+	return and_r | or_r | xor_r | not_r | shl | shr;
+};
+
+// Type casts
+export fn casts() void = {
+	let i: i32 = 42;
+	let u: u32 = i: u32;
+	let f: f32 = i: f32;
+	let b: bool = i != 0;
+	let s: size = i: size;
+};
+
+// Unary operators
+export fn unary(x: i32, p: *i32) void = {
+	let neg = -x;
+	let addr = &x;
+	let deref = *p;
+	let bitnot: u32 = ~(x: u32);
+	let lognot = !true;
+};
+
+// Compound assignment
+export fn compound(x: i32) i32 = {
+	let a = x;
+	a += 1;
+	a -= 1;
+	a *= 2;
+	a /= 2;
+	a %= 10;
+	a &= 0xff;
+	a |= 0x100;
+	a ^= 0x55;
+	a <<= 1;
+	a >>= 1;
+	return a;
+};
+
+export fn main() void = {
+	let a = arithmetic(10, 3);
+	let c = compare(5, 10);
+	let l = logical(true, false);
+	let b = bitwise(0xf0f0, 0x0f0f);
+	casts();
+	let val: i32 = 42;
+	unary(val, &val);
+	let x = compound(100);
+};

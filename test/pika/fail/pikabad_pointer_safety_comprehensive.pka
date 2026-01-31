@@ -1,0 +1,131 @@
+// pointer_safety_comprehensive.pka - Comprehensive pointer safety test
+// Tests nullable pointer narrowing, field access, and data structures
+
+use rt;
+use strings;
+
+type coords = struct {
+    x: i32,
+    y: i32,
+};
+
+type node = struct {
+    value: i32,
+    next: nullable *node,
+};
+
+// Test 1: Basic nullable narrowing via match
+fn test_basic_nullable() void = {
+    let x: i32 = 42;
+    let p: nullable *i32 = &x;
+
+    // Correct: use match to narrow
+    let val: i32 = match (p) {
+    case let ptr: *i32 =>
+        yield *ptr;
+    case null =>
+        yield 0;
+    };
+
+    assert(val == 42, "basic nullable test failed");
+};
+
+// Test 2: Field access through nullable pointer
+fn test_nullable_field_access() void = {
+    let c: coords = coords { x = 10, y = 20 };
+    let p: nullable *coords = &c;
+
+    // Correct: match then access
+    let x_val: i32 = match (p) {
+    case let ptr: *coords =>
+        yield ptr.x;
+    case null =>
+        yield -1;
+    };
+
+    assert(x_val == 10, "nullable field access test failed");
+};
+
+// Test 3: Nullable in data structures (linked list)
+fn test_nullable_in_struct() void = {
+    let n2: node = node { value = 20, next = null };
+    let n1: node = node { value = 10, next = &n2 };
+
+    // Traverse safely
+    let sum = n1.value;
+    match (n1.next) {
+    case let ptr: *node =>
+        sum += ptr.value;
+    case null =>
+        // ERROR on next line: Empty blocks not allowed in Hare
+        // Expected: "/tmp/psc.ha:60:9: syntax error: cannot have empty block"
+        // Fix: Use void instead of {}: case null => void;
+        {};
+    };
+
+    assert(sum == 30, "nullable in struct test failed");
+};
+
+// Test 4: Null case handling
+fn test_null_handling() void = {
+    let p: nullable *i32 = null;
+
+    let result: i32 = match (p) {
+    case *i32 =>
+        yield 1;
+    case null =>
+        yield 0;
+    };
+
+    assert(result == 0, "null handling test failed");
+};
+
+// Test 5: Nullable pointer chains
+fn test_nullable_chain() void = {
+    let n3: node = node { value = 30, next = null };
+    let n2: node = node { value = 20, next = &n3 };
+    let n1: node = node { value = 10, next = &n2 };
+
+    // Access through chain
+    let third_val: i32 = match (n1.next) {
+    case let ptr2: *node =>
+        yield match (ptr2.next) {
+        case let ptr3: *node =>
+            yield ptr3.value;
+        case null =>
+            yield -1;
+        };
+    case null =>
+        yield -1;
+    };
+
+    assert(third_val == 30, "nullable chain test failed");
+};
+
+// Test 6: Nullable with simple pointers (array indexing via nullable ptr to array is a known limitation)
+fn test_nullable_simple_ptr() void = {
+    let x: i32 = 100;
+    let p: nullable *i32 = &x;
+
+    let val: i32 = match (p) {
+    case let ptr: *i32 =>
+        yield *ptr;
+    case null =>
+        yield -1;
+    };
+
+    assert(val == 100, "nullable simple ptr test failed");
+};
+
+// Main test runner
+export fn _main() void = {
+    test_basic_nullable();
+    test_nullable_field_access();
+    test_nullable_in_struct();
+    test_null_handling();
+    test_nullable_chain();
+    test_nullable_simple_ptr();
+
+    let msg = strings::toutf8("All pointer safety tests passed!\n");
+    rt::write(1, msg.data: *void, 34);
+};

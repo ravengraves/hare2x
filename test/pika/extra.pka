@@ -1,0 +1,84 @@
+// extra.ha - Additional Pika feature coverage
+use rt;
+
+type color2 = enum {
+	RED,
+	GREEN,
+	BLUE,
+};
+
+fn test_prim_types() void = {
+	let a: int = -1;
+	let b: uint = 2;
+	let c: uintptr = 0;
+	let d: i8 = -8;
+	let e: i16 = -16;
+	let f: u16 = 16;
+	let g: u64 = 1u64;
+	let h: size = 10z;
+	let i64v: i64 = 1234;
+	let bin = 0b1010;
+	let oct = 0o12;
+	let suf_i32 = 42i32;
+	let suf_u8 = 10u8;
+	const local: i32 = 7;
+
+	assert(bin == 10);
+	assert(oct == 10);
+	assert(suf_i32 == 42);
+	assert(suf_u8 == 10);
+	assert(h == 10);
+	assert(i64v == 1234);
+	assert(local == 7);
+
+	let mix = a + (b: int);
+	let mix2 = (d: i32) + (e: i32) + (f: i32);
+	let mix3 = g + 1u64;
+	let mix4 = c + 1;
+	assert(mix < 5);
+	assert(mix2 == -8);
+	assert(mix3 == 2u64);
+	assert(mix4 == 1);
+};
+
+fn test_logical_xor() void = {
+	assert(true ^^ false);
+	assert(!(true ^^ true));
+	assert(!(false ^^ false));
+	assert(false ^^ true);
+};
+
+fn test_control() void = {
+	let sum: i32 = 0;
+	let i: i32 = 0;
+	for (true) {
+		if (i == 5) {
+			break;
+		};
+		if ((i & 1) != 0) {
+			i += 1;
+			continue;
+		};
+		sum += i;
+		i += 1;
+	};
+	assert(sum == 6);
+};
+
+fn test_enum_array_fill() void = {
+	let c = color2::GREEN;
+	assert(c == 1);
+
+	let arr: [5]i32 = [1, 2, 0...];
+	assert(arr[0] == 1);
+	assert(arr[1] == 2);
+	assert(arr[2] == 0);
+	assert(arr[4] == 0);
+};
+
+export fn main() void = {
+	test_prim_types();
+	test_logical_xor();
+	test_control();
+	test_enum_array_fill();
+};

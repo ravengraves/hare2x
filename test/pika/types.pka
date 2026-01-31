@@ -1,0 +1,70 @@
+// types.ha - Type system tests
+
+// Struct type
+export type point = struct {
+	x: i32,
+	y: i32,
+};
+
+// Nested struct
+type rect = struct {
+	origin: point,
+	width: i32,
+	height: i32,
+};
+
+// Enum type
+export type color = enum u8 {
+	RED = 0,
+	GREEN = 1,
+	BLUE = 2,
+};
+
+// Packed struct (harec unsupported)
+// @packed type packed_point = struct {
+// 	x: u8,
+// 	y: u16,
+// };
+type packed_point = struct {
+	x: u8,
+	y: u16,
+};
+
+
+// Tagged union
+type result = (i32 | bool);
+
+// Pointer types
+type ptr_i32 = *i32;
+type nullable_ptr = nullable *i32;
+
+// Array types
+type arr10 = [10]i32;
+
+// Slice types
+type slice_i32 = []i32;
+
+// Function using structs
+export fn make_point(x: i32, y: i32) point = {
+	return point { x = x, y = y };
+};
+
+// Function using enum
+export fn get_red() color = {
+	return color::RED;
+};
+
+// Function with pointers
+export fn increment(p: *i32) void = {
+	*p = *p + 1;
+};
+
+export fn main() void = {
+	let p = make_point(10, 20);
+	let c = get_red();
+	let val: i32 = 42;
+	increment(&val);
+	let pp = packed_point { x = 1, y = 2 };
+	assert(pp.x == 1);
+	assert(pp.y == 2);
+};

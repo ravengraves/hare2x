@@ -1,0 +1,34 @@
+// runtime.ha - Test using runtime module
+use rt;
+
+// Memory copy test
+export fn memcpy_test() void = {
+	let src: [16]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+	let dst: [16]u8 = [0...];
+
+	rt::memcpy(&dst: *opaque, &src: *opaque, 16);
+};
+
+// String output test - commented out, requires strings module
+// export fn string_output_test() void = {
+// 	let msg: str = "Hello from string output!\n";
+// 	rt::write(1, strings::toutf8(msg): *[*]u8, len(msg));
+// };
+
+// Memory set test
+export fn memset_test() void = {
+	let buf: [32]u8 = [0...];
+	rt::memset(&buf: *opaque, 0xff, 32);
+};
+
+// Write test
+export fn write_test() void = {
+	let msg: [6]u8 = ['H', 'e', 'l', 'l', 'o', '\n'];
+	rt::write(1, &msg: *opaque, 6);
+};
+
+export fn main() void = {
+	memcpy_test();
+	memset_test();
+	// write_test();  // uncomment to see output
+};

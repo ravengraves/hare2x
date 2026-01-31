@@ -1,0 +1,6 @@
+// ERROR: reserved keyword 'offset' cannot be used as an identifier
+
+type bad = struct {
+	offset: size,
+};
+

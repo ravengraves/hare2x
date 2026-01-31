@@ -1,0 +1,8 @@
+// ERROR: cannot switch on strings; use if-else for string comparison
+fn test() void = {
+	let s: str = "hello";
+	switch (s) {
+	case "hello" => void;
+	case => void;
+	};
+};

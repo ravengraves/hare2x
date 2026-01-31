@@ -1,0 +1,4 @@
+// runtime_abort.ha - abort builtin should terminate
+export fn _main() void = {
+	abort("expected abort");
+};

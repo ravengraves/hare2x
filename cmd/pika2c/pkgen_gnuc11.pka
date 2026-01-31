@@ -1,0 +1,2169 @@
+// pkgen_gnuc11.pka - Pika GNU C11 generation (AST -> C11)
+
+let slice_elem_list: [64]uintptr = [0...];
+let slice_elem_len: size = 0;
+
+fn bref_eq_concat(key: bref, mod: bref, member: bref, src: *[*]u8) bool = {
+	let mlen: size = mod.length;
+	let nlen: size = member.length;
+	if (key.length != mlen + 1 + nlen) { return false; };
+	for (let i = 0z; i < mlen; i += 1) {
+		if (src[key.pos + i] != src[mod.pos + i]) { return false; };
+	};
+	if (src[key.pos + mlen] != '_') { return false; };
+	for (let i = 0z; i < nlen; i += 1) {
+		if (src[key.pos + mlen + 1 + i] != src[member.pos + i]) {
+			return false;
+		};
+	};
+	return true;
+};
+
+fn bref_eq_concat_mangled(key: bref, mod: bref, member: bref, src: *[*]u8) bool = {
+	let mlen: size = mod.length;
+	let nlen: size = member.length;
+	let ki = 0z;
+	let mi = 0z;
+	for (mi < mlen) {
+		if (ki >= key.length) { return false; };
+		let c = src[mod.pos + mi];
+		if (c == ':' && mi + 1 < mlen && src[mod.pos + mi + 1] == ':') {
+			if (src[key.pos + ki] != '_') { return false; };
+			mi += 2;
+			ki += 1;
+			continue;
+		};
+		if (src[key.pos + ki] != c) { return false; };
+		mi += 1;
+		ki += 1;
+	};
+	if (ki >= key.length || src[key.pos + ki] != '_') { return false; };
+	ki += 1;
+	if (key.length - ki != nlen) { return false; };
+	for (let i = 0z; i < nlen; i += 1) {
+		if (src[key.pos + ki + i] != src[member.pos + i]) { return false; };
+	};
+	return true;
+};
+
+fn g_find_qual_fn(g: *codegen, q: *tnode) nullable *tnode = {
+	let mod_ref = bref_empty();
+	let member_ref = bref_empty();
+	if (!qual_id_parts(g, q, &mod_ref, &member_ref)) { return null; };
+	let d = &g.globals;
+	for (let i = 0z; i < d.cap; i += 1) {
+		let entry = &d.entries[i];
+		if (!entry.occupied) { continue; };
+		if (!bref_eq_concat_mangled(entry.key, mod_ref, member_ref, d.src)) { continue; };
+		if (entry.value == 0) { return null; };
+		let node: *tnode = entry.value: uintptr: *tnode;
+		if (node.kind == N_FN) { return node; };
+		return null;
+	};
+	return null;
+};
+
+fn g_emit_symbol_name(g: *codegen, n: *tnode) bool = {
+	if ((n.flags & F_SYMBOL) == 0) { return false; };
+	let sym: *tnode = t_first_nn(n);
+	let r: bref = sym.ref;
+	if (r.length <= 2) { return true; };
+	let inner = bref { pos = r.pos + 1, length = r.length - 2 };
+	e_bref(&g.em, inner);
+	return true;
+};
+
+fn g_char_val(r: bref, src: *[*]u8) u32 = {
+	if (r.length < 2) { return 0; };
+	let i = 1z;
+	let end = r.length - 1;
+	let c = src[r.pos + i];
+	if (c == '\\' && i + 1 < end) {
+		let next = src[r.pos + i + 1];
+		if (next == 'n') { return '\n': u32; };
+		if (next == 'r') { return '\r': u32; };
+		if (next == 't') { return '\t': u32; };
+		if (next == '0') { return 0; };
+		if (next == '\\') { return '\\': u32; };
+		if (next == '\'') { return '\'': u32; };
+		if (next == 'x' && i + 3 < end) { return parse_hex(src, r.pos + i + 2, 2); };
+		if (next == 'o' && i + 5 < end) { return parse_oct(src, r.pos + i + 2, 4); };
+		if (next == 'O' && i + 9 < end) { return parse_oct(src, r.pos + i + 2, 8); };
+		if (next == 'u' && i + 5 < end) { return parse_hex(src, r.pos + i + 2, 4); };
+		if (next == 'U' && i + 9 < end) { return parse_hex(src, r.pos + i + 2, 8); };
+		return next: u32;
+	};
+	return c: u32;
+};
+
+fn g_expr_simple(g: *codegen, n: *tnode, k: u16) bool = {
+	if (node_is_lit(n)) {
+		if (k == N_INT) { g_int(g, n); return true; };
+		if (k == N_CHAR) { e_u(&g.em, g_char_val(n.ref, g.t.src): u64); return true; };
+		if (k == N_FLOAT) { e_bref_no_underscore(&g.em, n.ref); return true; };
+		if (k == N_BOOL) {
+			if (n.ival != 0) { e_c(&g.em, '1'); } else { e_c(&g.em, '0'); };
+			return true;
+		};
+		e_bref(&g.em, n.ref);
+		return true;
+	};
+	if (k == N_ID) {
+		if (!dict_has_bref(&g.vars, n.ref) && !dict_has_bref(&g.globals, n.ref) &&
+			!dict_has_bref(&g.funcs, n.ref)) {
+			let type_def = dict_get_bref(&g.types, n.ref);
+			if (type_def != 0) {
+				match (resolve_alias_type(g, type_def: uintptr: *tnode)) {
+				case let resolved: *tnode =>
+					if (resolved.kind == N_T_ERR) {
+						ef1_b(&g.em, "((%)0)", n.ref);
+						return true;
+					};
+				case null => void;
+				};
+			};
+		};
+		let fn_ptr = dict_get_bref(&g.globals, n.ref);
+		if (fn_ptr != 0) {
+			let fn_def: *tnode = fn_ptr: uintptr: *tnode;
+			if (fn_def.kind == N_FN && g_emit_symbol_name(g, fn_def)) {
+				return true;
+			};
+		};
+		e_prefixed_id(g, n.ref);
+		return true;
+	};
+	if (is_str_kind(k)) { g_str_as_hare(g, n); return true; };
+	if (k == N_NULL) { c_null(&g.em); return true; };
+	if (k == N_QUAL_ID) {
+		let qual_fn = g_find_qual_fn(g, n);
+		match (qual_fn) {
+		case let f: *tnode =>
+			if (g_emit_symbol_name(g, f)) { return true; };
+		case null => void;
+		};
+		let mod_ref = bref_empty();
+		let member_ref = bref_empty();
+		if (!qual_id_parts(g, n, &mod_ref, &member_ref)) { return true; };
+		emit_path_mangled(g, mod_ref);
+		e_c(&g.em, '_');
+		e_bref(&g.em, member_ref);
+		return true;
+	};
+	if (k == N_T_PRIM) { g_type_prim(g, n); return true; };
+	return false;
+};
+
+fn g_expr_complex(g: *codegen, n: *tnode, k: u16) bool = {
+	if (k == N_BIN) { g_bin(g, n); return true; };
+	if (k == N_UN) { g_un(g, n); return true; };
+	if (k == N_CALL) { g_call(g, n); return true; };
+	if (k == N_CAST) { g_cast(g, n); return true; };
+	if (k == N_IDX) { g_idx(g, n); return true; };
+	if (k == N_SLICE) { g_slice(g, n); return true; };
+	if (k == N_FLD) { g_fld(g, n); return true; };
+	if (k == N_ARR_LIT) { g_arr_lit(g, n); return true; };
+	if (k == N_STRUCT_LIT) { g_struct_lit(g, n); return true; };
+	if (k == N_LEN) { g_len(g, n); return true; };
+	if (k == N_SIZE) { g_size(g, n); return true; };
+	if (k == N_ASSERT) { g_assert(g, n); return true; };
+	if (k == N_ABORT) { g_abort(g, n); return true; };
+	if (k == N_MATCH) { g_match_expr(g, n); return true; };
+	return false;
+};
+
+fn g_expr(g: *codegen, n: *tnode) void = {
+	let k = n.kind;
+	if (g_expr_simple(g, n, k)) { return; };
+	if (g_expr_complex(g, n, k)) { return; };
+};
+
+fn g_expr_expected(g: *codegen, n: *tnode, expected: nullable *tnode) void = {
+	let prev = g.match_expected;
+	if (expected != null) { g.match_expected = expected; };
+	g_expr(g, n);
+	g.match_expected = prev;
+};
+
+fn expected_from_target(g: *codegen, target: *tnode) nullable *tnode = {
+	if (target.kind == N_ID) {
+		let ty_ptr = dict_get_bref(&g.vars, target.ref);
+		if (ty_ptr != 0) { return ty_ptr: uintptr: *tnode; };
+	};
+	return get_expr_type(g, target);
+};
+
+fn g_emit_tagged_init(g: *codegen, target_ty: *tnode, tag_idx: i64, expr: *tnode) void = {
+	e_c(&g.em, '(');
+	g_type(g, target_ty);
+	ef2_i(&g.em, "){.tag = %, .val._% = ", tag_idx, tag_idx);
+	g_expr_expected(g, expr, target_ty);
+	e_c(&g.em, '}');
+};
+
+fn emit_tagged_wrap(g: *codegen, target_ty: *tnode, expr: *tnode) bool = {
+	let resolved = resolve_alias_type(g, target_ty);
+	if (resolved == null || unwrap(resolved).kind != N_T_TAGGED) { return false; };
+	if (expr_is_void_literal(expr, g.t.src)) {
+		err_bref(expr.ref, g.t.src, g.t.src_len,
+			"void does not match tagged union");
+	};
+	let expr_ty_opt = get_expr_type(g, expr);
+	if (expr_ty_opt == null) { return false; };
+	let expr_ty = unwrap(expr_ty_opt);
+	let expr_res = resolve_alias_type(g, expr_ty);
+	if (expr_res != null && unwrap(expr_res).kind == N_T_TAGGED) { return false; };
+	let tag_idx = find_variant_idx(g, unwrap(resolved), expr_ty);
+	if (tag_idx < 0) {
+		err_bref(expr.ref, g.t.src, g.t.src_len,
+			"type not in tagged union");
+	};
+	g_emit_tagged_init(g, target_ty, tag_idx, expr);
+	return true;
+};
+
+fn slice_elem_is_builtin(g: *codegen, elem: *tnode) bool = {
+	if (elem.kind != N_T_PRIM) { return false; };
+	if (elem.ref.length > 0) {
+		if (bref_match(elem.ref, "i8", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "i16", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "i32", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "i64", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "u8", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "u16", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "u32", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "u64", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "int", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "uint", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "size", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "f32", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "f64", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "bool", g.t.src)) { return true; };
+		if (bref_match(elem.ref, "uintptr", g.t.src)) { return true; };
+		return false;
+	};
+	if (elem.ival == TK_I8: i64) { return true; };
+	if (elem.ival == TK_I16: i64) { return true; };
+	if (elem.ival == TK_I32: i64) { return true; };
+	if (elem.ival == TK_I64: i64) { return true; };
+	if (elem.ival == TK_U8: i64) { return true; };
+	if (elem.ival == TK_U16: i64) { return true; };
+	if (elem.ival == TK_U32: i64) { return true; };
+	if (elem.ival == TK_U64: i64) { return true; };
+	if (elem.ival == TK_PRIM_INT: i64) { return true; };
+	if (elem.ival == TK_PRIM_UINT: i64) { return true; };
+	if (elem.ival == TK_SIZE: i64) { return true; };
+	if (elem.ival == TK_F32: i64) { return true; };
+	if (elem.ival == TK_F64: i64) { return true; };
+	if (elem.ival == TK_PRIM_BOOL: i64) { return true; };
+	if (elem.ival == TK_UINTPTR: i64) { return true; };
+	return false;
+};
+
+fn slice_elem_eq(g: *codegen, a: *tnode, b: *tnode) bool = {
+	let stack_a: [64]uintptr = [0...];
+	let stack_b: [64]uintptr = [0...];
+	let top: size = 0;
+	stack_a[top] = a: uintptr;
+	stack_b[top] = b: uintptr;
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let ta: *tnode = stack_a[top]: *tnode;
+		let tb: *tnode = stack_b[top]: *tnode;
+		if (ta.kind != tb.kind) { return false; };
+
+		if (ta.kind == N_T_PRIM) {
+			if (ta.ref.length > 0 || tb.ref.length > 0) {
+				if (ta.ref.length == 0 || tb.ref.length == 0) { return false; };
+				if (!bref_eq(ta.ref, tb.ref, g.t.src)) { return false; };
+			} else {
+				if (ta.ival != tb.ival) { return false; };
+			};
+			continue;
+		};
+		if (ta.kind == N_T_ALIAS) {
+			if (!bref_eq(ta.ref, tb.ref, g.t.src)) { return false; };
+			continue;
+		};
+		if (ta.kind == N_T_PTR) {
+			let ptr_a_inner = t_first(ta);
+			let ptr_b_inner = t_first(tb);
+			if (ptr_a_inner == null || ptr_b_inner == null) { return ptr_a_inner == ptr_b_inner; };
+			if (top >= 64) { abort("type too complex (slice eq overflow)"); };
+			stack_a[top] = unwrap(ptr_a_inner): uintptr;
+			stack_b[top] = unwrap(ptr_b_inner): uintptr;
+			top += 1;
+			continue;
+		};
+		if (ta.kind == N_T_QUAL) {
+			if (!bref_eq(ta.ref, tb.ref, g.t.src)) { return false; };
+			let qual_a_inner = t_first(ta);
+			let qual_b_inner = t_first(tb);
+			if (qual_a_inner == null || qual_b_inner == null) { return qual_a_inner == qual_b_inner; };
+			if (!bref_eq(unwrap(qual_a_inner).ref, unwrap(qual_b_inner).ref, g.t.src)) { return false; };
+			continue;
+		};
+
+		if (ta.ref.length > 0 || tb.ref.length > 0) {
+			if (ta.ref.length == 0 || tb.ref.length == 0) { return false; };
+			if (!bref_eq(ta.ref, tb.ref, g.t.src)) { return false; };
+		} else if (ta.ival != tb.ival) {
+			return false;
+		};
+	};
+
+	return true;
+};
+
+fn slice_elem_register(g: *codegen, elem: *tnode) void = {
+	if (slice_elem_is_builtin(g, elem)) { return; };
+	for (let i = 0z; i < slice_elem_len; i += 1) {
+		let existing: *tnode = slice_elem_list[i]: *tnode;
+		if (slice_elem_eq(g, existing, elem)) { return; };
+	};
+	if (slice_elem_len >= 64) {
+		abort("too many slice element types");
+	};
+	slice_elem_list[slice_elem_len] = elem: uintptr;
+	slice_elem_len += 1;
+};
+
+fn collect_slice_elems(g: *codegen, root: *tnode) void = {
+	let stack: [4096]uintptr = [0...];
+	let top: size = 0;
+	stack[top] = root: uintptr;
+	top += 1;
+	for (top > 0) {
+		top -= 1;
+		let node: *tnode = stack[top]: *tnode;
+		if (node.kind == N_T_SLICE) {
+			let elem_opt = t_first(node);
+			if (elem_opt != null) { slice_elem_register(g, unwrap(elem_opt)); };
+		};
+		let child = t_first(node);
+		for (child != null) {
+			if (top >= 4096) { abort("tree too deep (slice scan overflow)"); };
+			stack[top] = unwrap(child): uintptr;
+			top += 1;
+			child = unwrap(child).next;
+		};
+	};
+};
+
+fn type_contains_slice(root: *tnode) bool = {
+	let stack: [64]uintptr = [0...];
+	let top: size = 0;
+	stack[top] = root: uintptr;
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let node: *tnode = stack[top]: *tnode;
+		if (node.kind == N_T_SLICE) { return true; };
+		let child = t_first(node);
+		for (child != null) {
+			if (top >= 64) { abort("type too complex (slice check overflow)"); };
+			stack[top] = unwrap(child): uintptr;
+			top += 1;
+			child = unwrap(child).next;
+		};
+	};
+
+	return false;
+};
+
+fn g_call(g: *codegen, n: *tnode) void = {
+	let func: *tnode = t_first_nn(n);
+	let param_emit: nullable *tnode = null;
+	// Check for direct recursion (not allowed in pika)
+	if (func.kind == N_ID && !bref_is_empty(g.cur_fn) &&
+	    bref_eq(func.ref, g.cur_fn, g.t.src)) {
+		err_bref(func.ref, g.t.src, g.t.src_len, "recursion not allowed");
+	};
+	if (g_call_builtin(g, func)) { return; };
+	// Check argument types against parameter types
+	if (func.kind == N_ID) {
+		let fn_ptr = dict_get_bref(&g.globals, func.ref);
+		if (fn_ptr != 0) {
+			let fn_def: *tnode = fn_ptr: uintptr: *tnode;
+			if (fn_def.kind == N_FN) {
+				let param: nullable *tnode = g_skip_symbol(fn_def);
+				param_emit = param;
+				let arg: nullable *tnode = func.next;
+				for (param != null && arg != null) {
+					let p: *tnode = unwrap(param);
+					if (p.kind != N_PARAM) { break; };
+					let a: *tnode = unwrap(arg);
+					let param_type_opt = t_first(p);
+					if (param_type_opt == null) { break; };
+					let param_type: *tnode = unwrap(param_type_opt);
+					// Check for *T passed where *[*]T expected
+					if (type_is_ptr_uarr(param_type)) {
+						let arg_type_param = get_expr_type(g, a);
+						if (arg_type_param != null) {
+							let at: *tnode = unwrap(arg_type_param);
+							if (is_simple_ptr(at)) {
+								err_bref(a.ref, g.t.src, g.t.src_len,
+									"cannot pass *T where *[*]T expected (cast array address with &arr: *[*]T)");
+							};
+						};
+					};
+					param = p.next;
+					arg = a.next;
+				};
+			};
+		};
+	};
+	g_expr(g, func);
+	e_c(&g.em, '(');
+	let el = el_start(&g.em);
+	let arg_opt: nullable *tnode = func.next;
+	for (true) {
+		let info = call_arg_next(g, func.ref, &param_emit, &arg_opt);
+		if (info.arg == null) { break; };
+		let cur_arg: *tnode = unwrap(info.arg);
+		el_sep(&el);
+		let handled = false;
+		match (info.param) {
+		case let param_node: *tnode =>
+			if (cur_arg.kind == N_ARR_LIT) {
+				let emit_param_type_opt_arr = t_first(param_node);
+				match (emit_param_type_opt_arr) {
+				case let emit_param_type_arr: *tnode =>
+					let emit_target_ty_arr = emit_param_type_arr;
+					let emit_resolved_arr = resolve_alias_type(g, emit_param_type_arr);
+					if (emit_resolved_arr != null) { emit_target_ty_arr = unwrap(emit_resolved_arr); };
+					if (emit_target_ty_arr.kind == N_T_SLICE) {
+						g_arr_lit_slice(g, cur_arg, emit_target_ty_arr);
+						handled = true;
+					};
+				case null => void;
+				};
+			} else {
+				let emit_param_type_opt_arg = t_first(param_node);
+				match (emit_param_type_opt_arg) {
+				case let emit_param_type_arg: *tnode =>
+					let emit_target_ty_arg = emit_param_type_arg;
+					let emit_resolved_arg = resolve_alias_type(g, emit_param_type_arg);
+					if (emit_resolved_arg != null) { emit_target_ty_arg = unwrap(emit_resolved_arg); };
+					if (emit_target_ty_arg.kind == N_T_TAGGED) {
+						if (emit_tagged_wrap(g, emit_param_type_arg, cur_arg)) {
+							handled = true;
+						};
+					};
+				case null => void;
+				};
+			};
+		case null => void;
+		};
+		if (!handled) { g_expr(g, cur_arg); };
+	};
+	e_c(&g.em, ')');
+};
+
+fn g_cast(g: *codegen, n: *tnode) void = {
+	let expr: *tnode = t_first_nn(n);
+	let ty: *tnode = t_next_nn(expr);
+	// Cast to void is only allowed for void:void (a no-op)
+	// Other casts to void like p:void are invalid in Hare
+	if (ty.kind == N_T_PRIM && bref_match(ty.ref, "void", g.t.src)) {
+		let is_void_expr = expr.kind == N_T_PRIM && bref_match(expr.ref, "void", g.t.src);
+		if (!is_void_expr) {
+			err_bref(n.ref, g.t.src, g.t.src_len,
+				"cannot cast to void; use 'void;' instead");
+		};
+	};
+	if (ty.kind == N_T_PTR && expr.kind == N_INT) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"invalid cast from integer literal to pointer");
+	};
+	if (ty.kind == N_T_ALIAS) {
+		let type_def = dict_get_bref(&g.types, ty.ref);
+		if (type_def != 0) {
+			let target_ty = type_def: uintptr: *tnode;
+				if (target_ty.kind == N_T_TAGGED) {
+					let var_idx: i64 = 0;
+					match (get_expr_type(g, expr)) {
+					case let src_ty: *tnode =>
+						var_idx = find_variant_idx(g, target_ty, src_ty);
+				case null => void;
+				};
+				if (var_idx < 0) {
+					err_bref(n.ref, g.t.src, g.t.src_len,
+						"type not in tagged union");
+				};
+					if (expr_is_void_literal(expr, g.t.src)) {
+						err_bref(n.ref, g.t.src, g.t.src_len,
+							"void does not match tagged union");
+					};
+					g_emit_tagged_init(g, ty, var_idx, expr);
+					return;
+				};
+			};
+		};
+	if (g.match_case_idx >= 0 && g.match_var != null) {
+		let mv: *tnode = unwrap(g.match_var);
+		if (expr.kind == N_ID && mv.kind == N_ID) {
+				if (bref_eq(expr.ref, mv.ref, g.t.src)) {
+					g_expr_expected(g, expr, ty);
+					e_tag_val(&g.em, g.match_case_idx);
+					return;
+				};
+		};
+	};
+	if (ty.kind == N_T_PTR && (ty.flags & F_NULLABLE) == 0) {
+		match (get_expr_type(g, expr)) {
+		case let et: *tnode =>
+			if (et.kind == N_T_PTR && (et.flags & F_NULLABLE) != 0) {
+				// Allow cast if variable is narrowed via match
+				let narrowed = expr.kind == N_ID && !bref_is_empty(g.nullable_narrowed) &&
+					bref_eq(expr.ref, g.nullable_narrowed, g.t.src);
+				if (!narrowed) {
+					err_bref(n.ref, g.t.src, g.t.src_len,
+						"cannot cast nullable pointer to non-nullable (use match instead)");
+				};
+			};
+		case null => void;
+		};
+	};
+	// Reject *[*]T -> []T cast (use slicing instead)
+	if (ty.kind == N_T_SLICE) {
+		match (get_expr_type(g, expr)) {
+		case let src_ty: *tnode =>
+			let resolved = resolve_alias_type(g, src_ty);
+			if (resolved != null) { src_ty = unwrap(resolved); };
+			if (src_ty.kind == N_T_PTR) {
+				match (t_first(src_ty)) {
+				case let inner: *tnode =>
+					if (inner.kind == N_T_UARR) {
+						err_bref(n.ref, g.t.src, g.t.src_len,
+							"cannot cast *[*] to [] (use slicing instead)");
+					};
+				case null => void;
+				};
+			};
+		case null => void;
+		};
+	};
+	// Reject str -> *[*]u8 cast
+	if (expr.kind == N_STR && ty.kind == N_T_PTR) {
+		match (t_first(ty)) {
+		case let inner: *tnode =>
+			if (inner.kind == N_T_UARR) {
+				err_bref(n.ref, g.t.src, g.t.src_len,
+					"cannot cast str to *[*]u8 (use strings::toutf8() to get []u8)");
+			};
+		case null => void;
+		};
+	};
+	// Handle []T -> *[*]T cast: emit (target_type)(expr.data)
+	if (ty.kind == N_T_PTR) {
+		match (t_first(ty)) {
+		case let inner: *tnode =>
+			if (inner.kind == N_T_UARR) {
+				// Target is *[*]T, check if source is []T
+				match (get_expr_type(g, expr)) {
+				case let src_ty: *tnode =>
+					if (src_ty.kind == N_T_SLICE) {
+						// []T -> *[*]T: emit (type)(expr.data)
+						c_cast_open(&g.em);
+						g_type(g, ty);
+						c_cast_close(&g.em);
+						g_expr_expected(g, expr, ty);
+						emit_s(&g.em, ".data)");
+						return;
+					};
+				case null => void;
+				};
+			};
+		case null => void;
+		};
+	};
+	c_cast_open(&g.em);
+	g_type(g, ty);
+	c_cast_close(&g.em);
+	g_expr_expected(g, expr, ty);
+	e_c(&g.em, ')');
+};
+
+fn g_emit_slice_data_index(g: *codegen, slice_expr: *tnode, idx_expr: *tnode) void = {
+	e_c(&g.em, '(');
+	g_expr(g, slice_expr);
+	emit_s(&g.em, ").data[");
+	g_expr(g, idx_expr);
+	e_c(&g.em, ']');
+};
+
+fn g_emit_slice_bounds_check_expr(g: *codegen, slice_expr: *tnode, idx_expr: *tnode) void = {
+	emit_s(&g.em, "HARE_BOUNDS_CHECK(");
+	g_expr(g, idx_expr);
+	emit_s(&g.em, ",(");
+	g_expr(g, slice_expr);
+	emit_s(&g.em, ").len)");
+};
+
+fn g_emit_expr_paren(g: *codegen, prefix: str, expr: *tnode) void = {
+	emit_s(&g.em, prefix);
+	g_expr(g, expr);
+	e_c(&g.em, ')');
+};
+
+fn g_idx(g: *codegen, n: *tnode) void = {
+	let arr = t_first_nn(n);
+	let idx = t_next_nn(arr);
+	// Check for pointer-to-array/slice (auto-deref needed)
+	let ty_opt = get_expr_type(g, arr);
+
+	// Check if indexing a slice directly
+	match (ty_opt) {
+	case let ty: *tnode =>
+		if (ty.kind == N_T_SLICE) {
+			// Slice indexing: bounds-check against .len, access .data[idx]
+			e_c(&g.em, '(');
+			g_emit_slice_bounds_check_expr(g, arr, idx);
+			e_c(&g.em, ',');
+			g_emit_slice_data_index(g, arr, idx);
+			e_c(&g.em, ')');
+			return;
+		};
+	case null => void;
+	};
+
+	// Count pointer levels and find innermost type
+	let pcount: i64 = 0;
+	let inner_kind: u16 = 0;
+	match (ty_opt) {
+	case let ty: *tnode =>
+		let current: *tnode = ty;
+		for (current.kind == N_T_PTR) {
+			pcount += 1;
+			match (t_first(current)) {
+			case let inner: *tnode => current = inner;
+			case null => break;
+			};
+		};
+		inner_kind = current.kind;
+	case null => void;
+	};
+	if (pcount > 0 && inner_kind != N_T_ARR && inner_kind != N_T_SLICE && inner_kind != N_T_UARR) {
+		let err_ref = n.ref;
+		if (bref_is_empty(err_ref)) {
+			err_ref = arr.ref;
+		};
+		err_bref(err_ref, g.t.src, g.t.src_len,
+			"cannot index pointer to non-array type");
+	};
+	let needs_deref = pcount > 0 && (inner_kind == N_T_ARR || inner_kind == N_T_SLICE);
+	if (needs_deref) {
+		e_c(&g.em, '(');
+		let i: i64 = 0;
+		for (i < pcount) { e_c(&g.em, '*'); i += 1; };
+	};
+	g_expr(g, arr);
+	if (needs_deref) { emit_s(&g.em, ")["); } else { emit_s(&g.em, "["); };
+	g_expr(g, idx);
+	e_c(&g.em, ']');
+};
+
+// Helper: emit "-(start)" if start is not null
+fn g_minus_start(g: *codegen, start: nullable *tnode) void = {
+	match (start) {
+	case let s: *tnode =>
+		g_emit_expr_paren(g, "-(", s);
+	case null => void;
+	};
+};
+
+// Helper: emit slice/array total size (len or cap) minus start
+fn g_slice_size(g: *codegen, arr: *tnode, is_slice: bool, field: str, start: nullable *tnode) void = {
+	if (is_slice) {
+		e_c(&g.em, '('); g_expr(g, arr); emit_s(&g.em, field);
+	} else {
+		g_emit_expr_paren(g, "HARE_ARRAY_LEN(", arr);
+	};
+	g_minus_start(g, start);
+};
+
+fn g_slice(g: *codegen, n: *tnode) void = {
+	let arr = t_first_nn(n);
+	let start = arr.next;
+	let end_opt: nullable *tnode = null;
+	match (start) {
+	case let s: *tnode => end_opt = s.next;
+	case null => void;
+	};
+
+	// Get array type to determine element type
+	let arr_ty: *tnode = match (get_expr_type(g, arr)) {
+	case let ty: *tnode => yield ty;
+	case null =>
+		// Fallback: emit just array (legacy behavior)
+		g_expr(g, arr);
+		return;
+	};
+
+	// Check for pointer to unbounded array (*[*]T)
+	let is_ptr_to_uarr = false;
+	let inner_uarr: nullable *tnode = null;
+	if (arr_ty.kind == N_T_PTR) {
+		let inner = t_first(arr_ty);
+		match (inner) {
+		case let i: *tnode =>
+			if (i.kind == N_T_UARR) {
+				is_ptr_to_uarr = true;
+				inner_uarr = i;
+			};
+		case null => void;
+		};
+	};
+
+	// Determine element type
+	let elem_ty: nullable *tnode = null;
+	if (arr_ty.kind == N_T_ARR || arr_ty.kind == N_T_SLICE || arr_ty.kind == N_T_UARR) {
+		elem_ty = t_first(arr_ty);
+	} else if (is_ptr_to_uarr) {
+		// For *[*]T, get element type from inside the unbounded array
+		elem_ty = t_first(unwrap(inner_uarr));
+	} else {
+		// Not an array-like type, emit raw
+		g_expr(g, arr);
+		return;
+	};
+
+	let elem: *tnode = match (elem_ty) {
+	case let e: *tnode => yield e;
+	case null =>
+		g_expr(g, arr);
+		return;
+	};
+	if (is_ptr_to_uarr && end_opt == null) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"unbounded slice requires end index");
+	};
+
+	// Emit: (hare_slice_T){.data=..., .len=..., .cap=...}
+	e_c(&g.em, '(');
+	g_type_slice_from_elem(g, elem);
+	emit_s(&g.em, "){.data=");
+
+	// .data field
+	if (arr_ty.kind == N_T_SLICE) {
+		// Slicing a slice: (slice).data + start
+		e_c(&g.em, '(');
+		g_expr(g, arr);
+		emit_s(&g.em, ").data");
+	} else {
+		// Slicing array or *[*]T: (elem_type*)(array)
+		e_c(&g.em, '(');
+		g_type(g, elem);
+		g_emit_expr_paren(g, "*)(", arr);
+	};
+
+	match (start) {
+	case let s: *tnode =>
+		g_emit_expr_paren(g, "+(", s);
+	case null => void;
+	};
+
+	// .len field
+	let is_slice = arr_ty.kind == N_T_SLICE;
+	emit_s(&g.em, ",.len=");
+	match (end_opt) {
+	case let end: *tnode =>
+		// Explicit end: end - start
+		g_emit_expr_paren(g, "(", end);
+		g_minus_start(g, start);
+	case null =>
+		// Open end: total_len - start
+		g_slice_size(g, arr, is_slice, ").len", start);
+	};
+
+	// .cap field
+	emit_s(&g.em, ",.cap=");
+	if (is_ptr_to_uarr) {
+		// For *[*]T, cap = len = end - start
+		let end_nn: *tnode = unwrap(end_opt);
+		g_emit_expr_paren(g, "(", end_nn);
+		g_minus_start(g, start);
+	} else {
+		g_slice_size(g, arr, is_slice, ").cap", start);
+	};
+
+	e_c(&g.em, '}');
+};
+
+// Find variant index in tagged union. Returns -1 if not found.
+fn g_fld(g: *codegen, n: *tnode) void = {
+	let base: *tnode = t_first_nn(n);
+	match (get_expr_type(g, base)) {
+	case let ty: *tnode =>
+		let depth = ptr_depth(ty);
+		// Check for nullable pointer field access (auto-dereference)
+		if (ty.kind == N_T_PTR && (ty.flags & F_NULLABLE) != 0) {
+			let narrowed = base.kind == N_ID && !bref_is_empty(g.nullable_narrowed) &&
+				bref_eq(base.ref, g.nullable_narrowed, g.t.src);
+			if (!narrowed) {
+				err_bref(n.ref, g.t.src, g.t.src_len,
+					"cannot autodereference nullable pointer (use match with let binding)");
+			};
+		};
+		// Get inner type (strip pointers)
+		let inner_ty = ty;
+		for (inner_ty.kind == N_T_PTR) {
+			match (t_first(inner_ty)) {
+			case let child: *tnode => inner_ty = child;
+			case null => void;  // shouldn't happen
+			};
+		};
+		// Error on field access on primitive types (like str.data)
+		if (inner_ty.kind == N_T_PRIM) {
+			err_bref(n.ref, g.t.src, g.t.src_len,
+				"cannot access field on primitive type; use strings::toutf8() for str");
+		};
+		if (depth > 0) {
+			if (depth > 1) {
+				e_c(&g.em, '(');
+				for (let i: i64 = 1; i < depth; i += 1) { e_c(&g.em, '*'); };
+			};
+			g_expr(g, base);
+			if (depth > 1) { e_c(&g.em, ')'); };
+			e_arrow(&g.em, n.ref);
+			return;
+		};
+	case null => void;
+	};
+	g_expr(g, base);
+	e_field(&g.em, n.ref);
+};
+
+fn g_arr_lit(g: *codegen, n: *tnode) void = {
+	e_c(&g.em, '{');
+	let el = el_start(&g.em);
+	let elem_opt = t_first(n);
+	for (elem_opt != null) {
+		let elem: *tnode = unwrap(elem_opt);
+		el_sep(&el);
+		g_expr(g, elem);
+		elem_opt = elem.next;
+	};
+	e_c(&g.em, '}');
+};
+
+fn g_arr_lit_slice(g: *codegen, n: *tnode, slice_ty: *tnode) void = {
+	let elem_opt = t_first(slice_ty);
+	match (elem_opt) {
+	case let elem: *tnode =>
+		let count = arr_lit_count(n);
+		e_c(&g.em, '(');
+		g_type_slice_from_elem(g, elem);
+		emit_s(&g.em, "){.data=(");
+		g_type(g, elem);
+		emit_s(&g.em, "[])");
+		g_arr_lit(g, n);
+		emit_s(&g.em, ",.len=");
+		e_u(&g.em, count: u64);
+		emit_s(&g.em, ",.cap=");
+		e_u(&g.em, count: u64);
+		e_c(&g.em, '}');
+	case null =>
+		g_arr_lit(g, n);
+	};
+};
+
+
+fn g_arr_lit_fill(g: *codegen, n: *tnode, total: i64, explicit: size) void = {
+	e_c(&g.em, '{');
+	let el = el_start(&g.em);
+	let elem_opt = t_first(n);
+	for (elem_opt != null) {
+		let elem: *tnode = unwrap(elem_opt);
+		el_sep(&el);
+		g_expr(g, elem);
+		elem_opt = elem.next;
+	};
+	if (explicit > 0 && total > explicit: i64) {
+		let last_opt = t_last(n);
+		if (last_opt != null) {
+			let last_expr: *tnode = unwrap(last_opt);
+			for (let i: i64 = explicit: i64; i < total; i += 1) {
+				el_sep(&el);
+				g_expr(g, last_expr);
+			};
+		};
+	};
+	e_c(&g.em, '}');
+};
+
+fn g_struct_lit(g: *codegen, n: *tnode) void = {
+	check_struct_lit_nonnullable_ptr_fields(g, n);
+	if ((n.flags & F_VARIADIC) != 0) {
+		let type_ptr = dict_get_bref(&g.types, n.ref);
+		if (type_ptr == 0) {
+			err_bref(n.ref, g.t.src, g.t.src_len,
+				"unknown struct type in literal");
+		};
+		let struct_ty = type_ptr: uintptr: *tnode;
+		match (resolve_alias_type(g, struct_ty)) {
+		case let resolved: *tnode => struct_ty = resolved;
+		case null => void;
+		};
+		if (struct_ty.kind != N_T_STRUCT) {
+			err_bref(n.ref, g.t.src, g.t.src_len,
+				"struct literal requires struct type");
+		};
+			if (g.in_global_init) {
+				e_c(&g.em, '{');
+			} else {
+				ef1_b(&g.em, "(%){", n.ref);
+			};
+			let fill_el = el_start(&g.em);
+			let fill_field_opt = t_first(struct_ty);
+			for (fill_field_opt != null) {
+				let fill_field: *tnode = unwrap(fill_field_opt);
+				el_sep(&fill_el);
+				ef1_b(&g.em, ".% = ", fill_field.ref);
+				match (t_first(fill_field)) {
+				case let fill_field_ty: *tnode =>
+					g_emit_zero_for_type(g, fill_field_ty);
+				case null =>
+				emit_s(&g.em, "{0}");
+			};
+			fill_field_opt = fill_field.next;
+		};
+		e_c(&g.em, '}');
+		return;
+	};
+	// In global init context, use plain braces (not compound literals)
+		if (g.in_global_init) {
+			e_c(&g.em, '{');
+		} else {
+			ef1_b(&g.em, "(%){", n.ref);
+		};
+		let el = el_start(&g.em);
+		let field_opt = t_first(n);
+		for (field_opt != null) {
+			let field: *tnode = unwrap(field_opt);
+			el_sep(&el);
+			ef1_b(&g.em, ".% = ", field.ref);
+			g_expr(g, t_first_nn(field));
+			field_opt = field.next;
+		};
+	e_c(&g.em, '}');
+};
+
+fn g_emit_zero_for_type(g: *codegen, ty: *tnode) void = {
+	let t = ty;
+	match (resolve_alias_type(g, t)) {
+	case let resolved: *tnode => t = resolved;
+	case null => void;
+	};
+	if (type_is_str(t, g.t.src)) {
+		emit_s(&g.em, "(hare_str){0}");
+		return;
+	};
+	if (t.kind == N_T_PTR) { c_null(&g.em); return; };
+	if (t.kind == N_T_PRIM) {
+		if (t.ival == TK_PRIM_BOOL: i64 || bref_match(t.ref, "bool", g.t.src)) {
+			emit_s(&g.em, "0");
+			return;
+		};
+		if (t.ival == TK_F32: i64 || t.ival == TK_F64: i64 ||
+			bref_match(t.ref, "f32", g.t.src) ||
+			bref_match(t.ref, "f64", g.t.src)) {
+			emit_s(&g.em, "0.0");
+			return;
+		};
+		emit_s(&g.em, "0");
+		return;
+	};
+	if (t.kind == N_T_STRUCT ||
+		t.kind == N_T_ARR || t.kind == N_T_UARR ||
+		t.kind == N_T_SLICE || t.kind == N_T_TAGGED) {
+		emit_s(&g.em, "{0}");
+		return;
+	};
+	emit_s(&g.em, "0");
+};
+
+
+// --- Codegen: Statements ---
+fn g_stmt_flow(g: *codegen, n: *tnode, k: u16) bool = {
+	if (k == N_LET) { g_let(g, n); return true; };
+	if (k == N_RET) { g_ret(g, n); return true; };
+	if (k == N_IF) { g_if(g, n); return true; };
+	if (k == N_FOR) { g_for(g, n); return true; };
+	if (k == N_BLOCK) { g_block(g, n); return true; };
+	if (k == N_ASGN) { g_asgn(g, n); return true; };
+	if (k == N_SWITCH) { g_switch(g, n); return true; };
+	if (k == N_MATCH) { g_match(g, n); return true; };
+	return false;
+};
+
+fn g_stmt_simple(g: *codegen, n: *tnode, k: u16) bool = {
+	if (kind_in2(k, N_BREAK, N_CONTINUE)) {
+		if (k == N_BREAK) { c_break(&g.em); } else { c_continue(&g.em); };
+		e_stmt_end(&g.em);
+		return true;
+	};
+	if (k == N_ASSERT) {
+		let cond: nullable *tnode = t_first(n);
+		if (cond != null) { emit_bounds_checks(g, unwrap(cond)); };
+		g_assert(g, n);
+		e_stmt_end(&g.em);
+		return true;
+	};
+	if (k == N_ABORT) {
+		let msg = t_first(n);
+		if (msg != null) { emit_bounds_checks(g, unwrap(msg)); };
+		g_abort(g, n);
+		e_stmt_end(&g.em);
+		if (g.match_result != null) {
+			emit_s(&g.em, "__r = ");
+			g_emit_zero_for_type(g, unwrap(g.match_result));
+			e_stmt_end(&g.em);
+		};
+		return true;
+	};
+	if (k == N_EXPR_STMT) {
+		let stmt_expr: *tnode = t_first_nn(n);
+		emit_bounds_checks(g, stmt_expr);
+		if (stmt_expr.kind == N_T_PRIM && bref_match(stmt_expr.ref, "void", g.t.src)) {
+			emit_s(&g.em, "(void)0");
+		} else {
+			g_expr(g, stmt_expr);
+		};
+		e_stmt_end(&g.em);
+		return true;
+	};
+	if (k == N_YIELD) {
+		let yield_expr: *tnode = t_first_nn(n);
+		check_yield_never(g, yield_expr);
+		emit_bounds_checks(g, yield_expr);
+		emit_s(&g.em, "__r = ");
+		g_expr(g, yield_expr);
+		e_stmt_end(&g.em);
+		return true;
+	};
+	return false;
+};
+
+fn g_stmt(g: *codegen, n: *tnode) void = {
+	let k = n.kind;
+	if (g_stmt_flow(g, n, k)) { return; };
+	if (g_stmt_simple(g, n, k)) { return; };
+};
+
+fn g_let(g: *codegen, n: *tnode) void = {
+	let var_is_static = (n.flags & F_STATIC) != 0;
+	if (var_is_static) { emit_s(&g.em, "static "); };
+	let child = t_first(n);
+	let has_type = false;
+	let ty: nullable *tnode = null;
+	let init: nullable *tnode = null;
+	match (child) {
+	case let c: *tnode =>
+		if (is_type_kind(c.kind)) {
+			has_type = true;
+			ty = c;
+			init = c.next;
+		} else {
+			init = c;
+		};
+	case null => void;
+	};
+
+	let varr = analyze_variadic_array(ty, init, g.t.src);
+	if (varr.is_variadic && varr.size_is_literal && varr.size_literal < varr.elem_count: i64) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"array literal has more elements than size");
+	};
+	match (init) { case let i: *tnode => emit_bounds_checks(g, i); case null => void; };
+	if (!has_type && init != null && expr_is_void_literal(unwrap(init), g.t.src)) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"cannot declare variable of type void");
+	};
+	if (has_type) {
+		vars_register(g, n.ref, unwrap(ty): uintptr: u64);
+	} else if (init != null) {
+		let inferred = get_expr_type(g, unwrap(init));
+		if (inferred != null) {
+			vars_register(g, n.ref, unwrap(inferred): uintptr: u64);
+		} else {
+			vars_register(g, n.ref, 0);
+		};
+	} else {
+		vars_register(g, n.ref, 0);
+	};
+	if (has_type && init != null) {
+		let check_typ: *tnode = unwrap(ty);
+		let init_nn: *tnode = unwrap(init);
+		if (check_typ.kind == N_T_PTR && (check_typ.flags & F_NULLABLE) == 0) {
+			if (init_nn.kind == N_NULL) {
+				err_bref(init_nn.ref, g.t.src, g.t.src_len,
+					"cannot assign null to non-nullable pointer");
+			};
+			if (init_nn.kind == N_ID) {
+				let init_ty = dict_get_bref(&g.vars, init_nn.ref);
+				if (init_ty != 0) {
+					let src_typ = init_ty: uintptr: *tnode;
+					if (src_typ.kind == N_T_PTR && (src_typ.flags & F_NULLABLE) != 0) {
+						err_bref(init_nn.ref, g.t.src, g.t.src_len,
+							"cannot assign nullable pointer to non-nullable");
+					};
+				};
+			};
+		};
+		if (check_typ.kind == N_T_ARR && init_nn.kind == N_ARR_LIT) {
+			check_arr_lit_nonnullable_struct_zero(g, check_typ, init_nn);
+		};
+	};
+	if (has_type) {
+		let arr_typ: *tnode = unwrap(ty);
+		if (arr_typ.kind == N_T_ARR) {
+			if ((arr_typ.flags & F_INFERRED) != 0) {
+				let count: size = 0;
+				let init_node: *tnode = unwrap(init);
+				if (init_node.kind == N_ARR_LIT) {
+					let arr_child = t_first(init_node);
+					for (arr_child != null) {
+						count += 1;
+						arr_child = unwrap(arr_child).next;
+					};
+				} else {
+					err_bref(n.ref, g.t.src, g.t.src_len,
+						"inferred array requires array literal initializer");
+				};
+				let elem: *tnode = t_first_nn(arr_typ);
+				g_type(g, elem);
+				ef1_b_raw(&g.em, " %[", n.ref);
+				e_i(&g.em, count: i64);
+				e_c(&g.em, ']');
+			} else {
+				g_array_decl(g, arr_typ, n.ref);
+			};
+		} else if (is_ptr_to_array(arr_typ)) {
+			g_ptr_array_decl(g, arr_typ, n.ref);
+		} else {
+			g_type(g, unwrap(ty));
+			ef1_b_raw(&g.em, " %", n.ref);
+		};
+	} else {
+		c_auto(&g.em);
+		ef1_b_raw(&g.em, " %", n.ref);
+	};
+	e_assign(&g.em);
+	if (varr.is_variadic && var_is_static) {
+		if (varr.last_is_zero) {
+			emit_s(&g.em, "{0}");
+		} else if (varr.size_is_literal) {
+			g_arr_lit_fill(g, unwrap(varr.arr_lit), varr.size_literal, varr.elem_count);
+		} else {
+			err_bref(n.ref, g.t.src, g.t.src_len,
+				"variadic array literal in static init requires constant size or zero fill");
+		};
+	} else {
+		let handled = false;
+		if (has_type && init != null) {
+			let target_ty = unwrap(ty);
+			let resolved = resolve_alias_type(g, target_ty);
+			if (resolved != null) { target_ty = unwrap(resolved); };
+			if (target_ty.kind == N_T_SLICE && unwrap(init).kind == N_ARR_LIT) {
+				g_arr_lit_slice(g, unwrap(init), target_ty);
+				handled = true;
+			};
+		};
+		if (!handled && has_type) {
+			handled = emit_tagged_wrap(g, unwrap(ty), unwrap(init));
+		};
+		if (!handled) {
+			let expected: nullable *tnode = null;
+			if (has_type) { expected = ty; };
+			g_expr_expected(g, unwrap(init), expected);
+		};
+	};
+	e_stmt_end(&g.em);
+	if (varr.is_variadic && !var_is_static && varr.elem_count > 0) {
+		let fill_count: i64 = varr.elem_count: i64;
+		if (varr.size_is_literal && varr.size_literal < fill_count) {
+			err_bref(n.ref, g.t.src, g.t.src_len,
+				"array literal has more elements than size");
+		};
+		if (!(varr.size_is_literal && varr.size_literal == fill_count)) {
+				if (varr.last_is_zero) {
+					emit_s(&g.em, "if ((size_t)(");
+					g_emit_arr_size_expr(g, unwrap(varr.arr_type), fill_count);
+					ef1_i(&g.em, ") > %) ", fill_count);
+					e_block_start(&g.em);
+					ef1_b(&g.em, "rt_memset(&%", n.ref);
+					ef1_i(&g.em, "[%], 0, ((size_t)(", fill_count);
+					g_emit_arr_size_expr(g, unwrap(varr.arr_type), fill_count);
+					ef1_i(&g.em, ") - %) * sizeof(", fill_count);
+					e_bref(&g.em, n.ref);
+					emit_s(&g.em, "[0]))");
+					e_stmt_end_block_end(&g.em);
+				} else {
+					ef1_i(&g.em, "for (size_t __i = %; __i < (size_t)(", fill_count);
+					g_emit_arr_size_expr(g, unwrap(varr.arr_type), fill_count);
+					emit_s(&g.em, "); __i += 1) ");
+					e_block_start(&g.em);
+					ef2_b(&g.em, "%[__i] = %", n.ref, n.ref);
+					ef1_i(&g.em, "[%]", fill_count - 1);
+					e_stmt_end_block_end(&g.em);
+				};
+			e_nl(&g.em);
+		};
+	};
+};
+
+fn g_ret(g: *codegen, n: *tnode) void = {
+	match (t_first(n)) {
+	case let val: *tnode =>
+		match (g.cur_ret_type) {
+		case let exp_ty: *tnode =>
+			if (exp_ty.kind == N_T_PTR) {
+				match (t_first(exp_ty)) {
+				case let inner: *tnode =>
+					if (inner.kind == N_T_UARR) {
+						match (get_expr_type(g, val)) {
+						case let val_ty: *tnode =>
+							if (val_ty.kind == N_T_PTR) {
+								match (t_first(val_ty)) {
+								case let val_inner: *tnode =>
+									if (val_inner.kind != N_T_UARR) {
+										err_bref(n.ref, g.t.src, g.t.src_len,
+											"return type mismatch: *T returned where *[*]T expected");
+									};
+								case null => void;
+								};
+							};
+						case null => void;
+						};
+					};
+				case null => void;
+				};
+			};
+		case null => void;
+		};
+		emit_bounds_checks(g, val);
+		c_return(&g.em);
+		e_sp(&g.em);
+		g_expr_expected(g, val, g.cur_ret_type);
+	case null => c_return(&g.em);
+	};
+	e_stmt_end(&g.em);
+};
+
+fn g_if(g: *codegen, n: *tnode) void = {
+	let current: *tnode = n;
+	for (true) {
+		let cond: *tnode = t_first_nn(current);
+		let then_block: *tnode = t_next_nn(cond);
+		c_if_open(&g.em);
+		g_expr(g, cond);
+		c_cond_close(&g.em);
+		g_block(g, then_block);
+		match (then_block.next) {
+		case let else_part: *tnode =>
+			e_sp(&g.em);
+			c_else(&g.em);
+			e_sp(&g.em);
+			if (else_part.kind == N_IF) {
+				current = else_part;
+			} else {
+				g_block(g, else_part);
+				break;
+			};
+		case null => break;
+		};
+	};
+	e_nl(&g.em);
+};
+
+fn g_for(g: *codegen, n: *tnode) void = {
+	let while_style = (n.flags & F_NULLABLE) != 0;
+	if (while_style) {
+		c_for(&g.em);
+		emit_s(&g.em, " (; ");
+		let while_child = t_first(n);
+		if (while_child != null) {
+			g_expr(g, unwrap(while_child));
+			while_child = unwrap(while_child).next;
+		};
+		emit_s(&g.em, "; ) ");
+		if (while_child != null) { g_block(g, unwrap(while_child)); };
+		e_nl(&g.em);
+		return;
+	};
+	let parts = n.ival;
+	let has_init = (parts & 1) != 0;
+	let has_cond = (parts & 2) != 0;
+	let has_after = (parts & 4) != 0;
+	c_for_open(&g.em);
+	let child = t_first(n);
+	if (has_init && child != null) {
+		let first: *tnode = unwrap(child);
+		if (first.kind == N_LET) {
+			let ty_or_init = t_first(first);
+			let has_t = false;
+			let tvar: nullable *tnode = null;
+			let initv: *tnode = first;
+			if (ty_or_init != null) {
+				let c: *tnode = unwrap(ty_or_init);
+				if (is_type_kind(c.kind)) {
+					has_t = true;
+					tvar = c;
+					initv = t_next_nn(c);
+				} else {
+					initv = c;
+				};
+			};
+			if (has_t) {
+				g_type(g, unwrap(tvar));
+				ef1_b_raw(&g.em, " %", first.ref);
+			} else {
+				c_auto(&g.em);
+				ef1_b_raw(&g.em, " %", first.ref);
+			};
+			e_assign(&g.em);
+			g_expr(g, initv);
+		} else {
+			g_expr(g, first);
+		};
+		child = first.next;
+	};
+	emit_s(&g.em, "; ");
+	if (has_cond && child != null) {
+		g_expr(g, unwrap(child));
+		child = unwrap(child).next;
+	};
+	emit_s(&g.em, "; ");
+	if (has_after && child != null) {
+		let after_node: *tnode = unwrap(child);
+		if (after_node.kind == N_ASGN) {
+			let target: *tnode = t_first_nn(after_node);
+			let val: *tnode = t_next_nn(target);
+			g_expr(g, target);
+			c_asgn(&g.em, pika_to_c_asgn(after_node.ival: u16));
+			g_expr(g, val);
+		} else {
+			g_expr(g, after_node);
+		};
+		child = after_node.next;
+	};
+	emit_s(&g.em, ") ");
+	if (child != null && unwrap(child).kind == N_BLOCK) { g_block(g, unwrap(child)); };
+	e_nl(&g.em);
+};
+
+fn g_stmts(g: *codegen, n: *tnode) void = {
+	g_body(g, n);
+};
+
+fn g_block(g: *codegen, n: *tnode) void = {
+	e_block_start(&g.em);
+	g_stmts(g, n);
+	e_block_end(&g.em);
+};
+
+
+fn g_emit_arr_size_expr(g: *codegen, arr_typ: *tnode, fallback: i64) void = {
+	if ((arr_typ.flags & F_INFERRED) != 0) {
+		e_i(&g.em, fallback);
+		return;
+	};
+	let size_node = arr_size_node(arr_typ);
+	if (size_node == null) {
+		e_i(&g.em, fallback);
+		return;
+	};
+	let sn: *tnode = unwrap(size_node);
+	if (sn.kind == N_INT) {
+		g_int(g, sn);
+	} else if (sn.kind == TK_INT) {
+		e_bref_no_underscore(&g.em, sn.ref);
+	} else {
+		e_bref(&g.em, sn.ref);
+	};
+};
+
+fn g_bounds_check_stmt(g: *codegen, idx: *tnode, bound: *tnode) void = {
+	let lc = pos_to_line_col(idx.ref.pos, g.t.src, g.t.src_len);
+	c_bounds_check_open(&g.em);
+	g_expr(g, idx);
+	c_bounds_check_mid(&g.em);
+	if (bound.kind == N_INT) {
+		g_int(g, bound);
+	} else if (bound.kind == TK_INT) {
+		e_bref_no_underscore(&g.em, bound.ref);
+	} else {
+		e_bref(&g.em, bound.ref);
+	};
+	c_bounds_check_close(&g.em, lc.line: i64, lc.col: i64);
+	e_stmt_end(&g.em);
+};
+
+fn emit_bounds_checks(g: *codegen, n: *tnode) void = {
+	let saved_top = tree_walk_top;
+	tree_walk_push(n: uintptr);
+
+	for (!tree_walk_empty() && tree_walk_top > saved_top) {
+		let node: *tnode = tree_walk_pop(): *tnode;
+		let k = node.kind;
+
+		if (k == N_IDX) {
+			let arr = t_first_nn(node);
+			let idx = t_next_nn(arr);
+			let arr_size = get_array_size(g, arr);
+			if (arr_size != null) {
+				g_bounds_check_stmt(g, idx, unwrap(arr_size));
+			};
+			tree_walk_push(idx: uintptr);
+			tree_walk_push(arr: uintptr);
+		} else {
+			let child = t_first(node);
+			for (child != null) {
+				tree_walk_push(unwrap(child): uintptr);
+				child = unwrap(child).next;
+			};
+		};
+	};
+};
+
+fn g_slice_idx_lvalue(g: *codegen, slice_expr: *tnode, idx_expr: *tnode) void = {
+	g_emit_slice_data_index(g, slice_expr, idx_expr);
+};
+
+fn g_slice_bounds_check(g: *codegen, slice_expr: *tnode, idx_expr: *tnode) void = {
+	g_emit_slice_bounds_check_expr(g, slice_expr, idx_expr);
+	e_stmt_end(&g.em);
+};
+
+fn g_asgn(g: *codegen, n: *tnode) void = {
+	let target: *tnode = t_first_nn(n);
+	let val: *tnode = t_next_nn(target);
+	let expected = expected_from_target(g, target);
+	let tagged_target: nullable *tnode = null;
+	if (target.kind == N_ID && expected != null) {
+		let typ = unwrap(expected);
+		if (typ.kind == N_T_PTR && (typ.flags & F_NULLABLE) == 0) {
+			if (val.kind == N_NULL) {
+				err_bref(val.ref, g.t.src, g.t.src_len,
+					"cannot assign null to non-nullable pointer");
+			};
+			if (val.kind == N_ID) {
+				let val_ty = dict_get_bref(&g.vars, val.ref);
+				if (val_ty != 0) {
+					let src_typ = val_ty: uintptr: *tnode;
+					if (src_typ.kind == N_T_PTR && (src_typ.flags & F_NULLABLE) != 0) {
+						err_bref(val.ref, g.t.src, g.t.src_len,
+							"cannot assign nullable pointer to non-nullable");
+					};
+				};
+			};
+		};
+		let resolved = resolve_alias_type(g, typ);
+		if (resolved != null && unwrap(resolved).kind == N_T_TAGGED) {
+			tagged_target = typ;
+		};
+	};
+
+	if (target.kind == N_IDX) {
+		let arr = t_first_nn(target);
+		let idx = t_next_nn(arr);
+		let ty_opt = get_expr_type(g, arr);
+		match (ty_opt) {
+		case let ty: *tnode =>
+			if (ty.kind == N_T_SLICE) {
+				g_slice_bounds_check(g, arr, idx);
+				emit_bounds_checks(g, val);
+				g_slice_idx_lvalue(g, arr, idx);
+				c_asgn(&g.em, pika_to_c_asgn(n.ival: u16));
+				g_expr_expected(g, val, expected);
+				e_stmt_end(&g.em);
+				return;
+			};
+		case null => void;
+		};
+	};
+
+	emit_bounds_checks(g, target);
+	emit_bounds_checks(g, val);
+	g_expr(g, target);
+	c_asgn(&g.em, pika_to_c_asgn(n.ival: u16));
+	let handled = false;
+	match (tagged_target) {
+	case let tt: *tnode => handled = emit_tagged_wrap(g, tt, val);
+	case null => void;
+	};
+	if (!handled) { g_expr_expected(g, val, expected); };
+	e_stmt_end(&g.em);
+};
+
+fn g_body(g: *codegen, body: *tnode) void = {
+	let cur = body_cursor_from(body);
+	for (true) {
+		let stmt = body_cursor_next(&cur);
+		match (stmt) {
+		case let s: *tnode => g_stmt(g, s);
+		case null => break;
+		};
+	};
+};
+
+fn g_case_body(g: *codegen, cn: *tnode) void = {
+	match (case_body_node(cn)) {
+	case let bd: *tnode => g_body(g, bd);
+	case null => void;
+	};
+};
+
+fn g_switch(g: *codegen, n: *tnode) void = {
+	let val: *tnode = t_first_nn(n);
+	let case_total = case_value_total(n);
+	let has_default = case_has_default(n);
+	validate_switch_type(g, val);
+	check_switch_exhaustiveness(g, val, case_total, has_default);
+	c_switch_open(&g.em);
+	g_expr(g, val);
+	c_cond_close(&g.em);
+	e_block_start(&g.em);
+	let case_node: nullable *tnode = case_list_first(n);
+	for (case_node != null) {
+		let cn: *tnode = unwrap(case_node);
+		if (case_is_default(cn)) {
+			c_default(&g.em);
+			e_colon_nl(&g.em);
+		} else {
+			let body_start = case_body_start(cn);
+			let child = t_first(cn);
+			for (child != null && child != body_start) {
+				let ch: *tnode = unwrap(child);
+				c_case(&g.em);
+				e_sp(&g.em);
+				g_expr(g, ch);
+				e_colon_nl(&g.em);
+				child = ch.next;
+			};
+		};
+		e_indent(&g.em);
+		g_case_body(g, cn);
+		c_break(&g.em);
+		e_stmt_end_dedent(&g.em);
+		case_node = cn.next;
+	};
+	e_block_end(&g.em);
+	e_nl(&g.em);
+};
+
+fn g_match_expr(g: *codegen, n: *tnode) void = {
+	emit_s(&g.em, "({ ");
+	let prev_match = g.match_result;
+	let match_ty: nullable *tnode = null;
+	match (get_expr_type(g, n)) {
+	case let ty: *tnode =>
+		match_ty = ty;
+		g_type(g, ty);
+	case null =>
+		emit_s(&g.em, "int");  // fallback
+		match_ty = type_prim_dummy(g.t, TK_PRIM_INT);
+	};
+	emit_s(&g.em, " __r; ");
+	g.match_result = match_ty;
+	g_match(g, n);
+	g.match_result = prev_match;
+	emit_s(&g.em, "__r; })");
+};
+
+fn g_match(g: *codegen, n: *tnode) void = {
+	let val: *tnode = t_first_nn(n);
+	let resolved: nullable *tnode = null;
+	match (get_expr_type(g, val)) {
+	case let ty: *tnode =>
+		resolved = resolve_alias_type(g, ty);
+	case null => void;
+	};
+	if (resolved != null) {
+		let r: *tnode = unwrap(resolved);
+		if (r.kind == N_T_PTR && (r.flags & F_NULLABLE) != 0) {
+			g_match_nullable(g, n, val);
+			return;
+		};
+	};
+	if (resolved == null && (n.flags & F_NULLABLE) != 0) {
+		g_match_nullable(g, n, val);
+		return;
+	};
+	let tagged: nullable *tnode = null;
+	if (resolved != null && unwrap(resolved).kind == N_T_TAGGED) { tagged = resolved; };
+	let use_tagged = tagged != null;
+	let case_total = case_total_cases(n);
+	let has_default = case_has_default(n);
+	check_match_exhaustiveness(g, val, case_total, has_default);
+	c_switch(&g.em);
+	emit_s(&g.em, " ((");
+	g_expr(g, val);
+	emit_s(&g.em, ").tag) ");
+	e_block_start(&g.em);
+	g.match_var = val;
+	let case_node: nullable *tnode = case_list_first(n);
+	let case_idx = 0;
+	for (case_node != null) {
+		let cn: *tnode = unwrap(case_node);
+		if (case_is_default(cn)) {
+			c_default(&g.em);
+			e_colon_nl(&g.em);
+			e_indent(&g.em);
+			g_case_body(g, cn);
+			c_break(&g.em);
+			e_stmt_end_dedent(&g.em);
+		} else {
+			let case_type = t_first(cn);
+			let binding: nullable *tnode = null;
+			if (case_has_binding(cn) && case_type != null) {
+				binding = case_type;
+				case_type = t_first(unwrap(case_type));
+			};
+			let tag_idx = case_idx: i64;
+			if (use_tagged && case_type != null) {
+				let ct = unwrap(case_type);
+				if (ct.kind == N_NULL) {
+					err_bref(ct.ref, g.t.src, g.t.src_len,
+						"null does not match tagged unions");
+				};
+				tag_idx = find_variant_idx(g, unwrap(tagged), ct);
+				if (tag_idx < 0) {
+					err_bref(ct.ref, g.t.src, g.t.src_len,
+						"match case type not in tagged union");
+					tag_idx = case_idx: i64;
+				};
+			};
+			c_case(&g.em);
+			e_sp(&g.em);
+			e_i(&g.em, tag_idx);
+			e_colon_nl(&g.em);
+			e_indent(&g.em);
+			g.match_case_idx = tag_idx;
+			if (use_tagged && binding != null && case_type != null) {
+				let bind = unwrap(binding);
+				let bind_type: *tnode = unwrap(case_type);
+				if (dict_has_bref(&g.globals, bind.ref)) {
+					err_bref(bind.ref, g.t.src, g.t.src_len,
+						"match binding shadows global/function name");
+				};
+				g_type(g, bind_type);
+				ef1_b_raw(&g.em, " % = ", bind.ref);
+				g_expr(g, val);
+				e_tag_val(&g.em, tag_idx);
+				e_stmt_end(&g.em);
+				let saved = dict_get_bref(&g.vars, bind.ref);
+				dict_set_bref(&g.vars, bind.ref, bind_type: uintptr: u64);
+				g_case_body(g, cn);
+				dict_set_bref(&g.vars, bind.ref, saved);
+			} else {
+				g_case_body(g, cn);
+			};
+			g.match_case_idx = -1;
+			c_break(&g.em);
+			e_stmt_end_dedent(&g.em);
+		};
+		case_node = cn.next;
+		case_idx += 1;
+	};
+	g.match_var = null;
+	if (!has_default) {
+		c_default(&g.em);
+		emit_s(&g.em, ": __builtin_unreachable();\n");
+	};
+	e_block_end(&g.em);
+	e_nl(&g.em);
+};
+
+fn g_match_nullable(g: *codegen, n: *tnode, val: *tnode) void = {
+	let cn: nullable *tnode = case_list_first(n);
+	let first = true;
+
+	let use_temp = val.kind != N_ID;
+	let temp_idx = g.match_tmp;
+	if (use_temp) {
+		ef1_i(&g.em, "{ __auto_type __m% = (", temp_idx);
+		g_expr(g, val);
+		emit_s(&g.em, "); ");
+		g.match_tmp += 1;
+	};
+
+	for (cn != null) {
+		let case_n: *tnode = unwrap(cn);
+		let first_child = t_first(case_n);
+		let has_binding = case_has_binding(case_n);
+		let is_default = case_is_default(case_n);
+		let is_null = node_is_kind(first_child, N_NULL);
+
+		if (first) {
+			if (is_default) {
+				void; // Default case with no prior cases - just emit body
+			} else {
+				c_if_open(&g.em);
+				if (use_temp) {
+					ef1_i(&g.em, "__m%", temp_idx);
+				} else {
+					g_expr(g, val);
+				};
+				if (is_null) { emit_s(&g.em, " == NULL"); } else { emit_s(&g.em, " != NULL"); };
+				c_cond_close(&g.em);
+			};
+			first = false;
+		} else {
+			e_sp(&g.em);
+			c_else(&g.em);
+			e_sp(&g.em);
+		};
+
+		let saved_narrowed = g.nullable_narrowed;
+
+		e_block_start(&g.em);
+
+		if (has_binding && first_child != null) {
+			let binding: *tnode = unwrap(first_child);
+			if (dict_has_bref(&g.globals, binding.ref)) {
+				err_bref(binding.ref, g.t.src, g.t.src_len,
+					"match binding shadows global/function name");
+			};
+			let bind_type: *tnode = t_first_nn(binding);
+				g_type(g, bind_type);
+				ef1_b_raw(&g.em, " % = ", binding.ref);
+				if (use_temp) {
+					ef1_i(&g.em, "__m%", temp_idx);
+				} else {
+					g_expr(g, val);
+				};
+			e_stmt_end(&g.em);
+			dict_set_bref(&g.vars, binding.ref, bind_type: uintptr: u64);
+			g.nullable_narrowed = binding.ref;
+		};
+
+		g_case_body(g, case_n);
+
+		e_block_end(&g.em);
+
+		g.nullable_narrowed = saved_narrowed;
+
+		cn = case_n.next;
+	};
+	if (use_temp) {
+		emit_s(&g.em, " }");
+	};
+	e_nl(&g.em);
+};
+
+// --- Codegen: Declarations ---
+fn g_decl_core(g: *codegen, n: *tnode, k: u16) bool = {
+	if (k == N_TYPEDEF) { g_typedef(g, n); return true; };
+	if (k == N_DEF) { g_def(g, n); return true; };
+	if (k == N_GLOBAL) { g_global(g, n); return true; };
+	if (k == N_USE) { g_use(g, n); return true; };
+	return false;
+};
+
+fn g_decl(g: *codegen, n: *tnode) void = {
+	let k = n.kind;
+	if (k == N_FN) { g_fn(g, n); return; };
+	if (g_decl_core(g, n, k)) { return; };
+};
+
+fn g_fn_name(g: *codegen, n: *tnode) void = {
+	if ((n.flags & F_SYMBOL) != 0) {
+		let sym: *tnode = t_first_nn(n);
+		let r: bref = sym.ref;
+		if (r.length > 2) {
+			let inner = bref { pos = r.pos + 1, length = r.length - 2 };
+			e_bref(&g.em, inner);
+		};
+	} else if (is_pika_main(g, n)) {
+		emit_s(&g.em, "_main");
+	} else {
+		e_prefixed_id(g, n.ref);
+	};
+};
+
+fn g_param_list(g: *codegen, n: *tnode) void = {
+	e_c(&g.em, '(');
+	let el = el_start(&g.em);
+	let param = g_skip_symbol(n);
+	for (param != null && unwrap(param).kind == N_PARAM) {
+		el_sep(&el);
+		g_type(g, t_first_nn(unwrap(param)));
+		ef1_b_raw(&g.em, " %", unwrap(param).ref);
+		param = unwrap(param).next;
+	};
+	if (el.first) { c_void(&g.em); };
+	e_c(&g.em, ')');
+};
+
+fn g_fn(g: *codegen, n: *tnode) void = {
+	if ((n.flags & F_EXTERN) != 0) { return; };
+	g.cur_fn = n.ref;
+	vars_clear(g);
+	let param = g_skip_symbol(n);
+	for (param != null && unwrap(param).kind == N_PARAM) {
+		let p: *tnode = unwrap(param);
+		let ptype: *tnode = t_first_nn(p);
+		vars_register(g, p.ref, ptype: uintptr: u64);
+		param = p.next;
+	};
+	let ret_type: *tnode = unwrap(g_skip_to_ret(n));
+	g.cur_ret_type = ret_type;  // Track for return type checking
+	let body: *tnode = t_next_nn(ret_type);
+
+	let exported = (n.flags & F_EXPORTED) != 0;
+	if (!exported) {
+		emit_s(&g.em, "static ");
+	};
+
+	g_type(g, ret_type);
+	e_sp(&g.em);
+	g_fn_name(g, n);
+	g_param_list(g, n);
+	e_sp(&g.em);
+	g_block(g, body);
+	e_nl(&g.em);
+	e_nl(&g.em);
+};
+
+fn g_typedef(g: *codegen, n: *tnode) void = {
+	let ty: *tnode = t_first_nn(n);
+	dict_set_bref(&g.types, n.ref, ty: uintptr: u64);
+	if (ty.kind == N_T_UNION) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"Pika does not allow union types; use tagged unions (T | U) with match, or use pointer casts for reinterpretation");
+	};
+	if ((n.flags & F_EXPORTED) != 0) {
+		dict_set_bref(&g.exported_types, n.ref, 1);
+		if (ty.kind == N_T_TAGGED) {
+			let bad = check_type_visibility(g, ty);
+			if (!bref_is_empty(bad)) {
+				err_bref(n.ref, g.t.src, g.t.src_len,
+					"exported type depends on unexported type");
+			};
+		};
+	};
+	if (ty.kind == N_T_STRUCT) {
+		c_struct(&g.em);
+		if ((ty.flags & F_PACKED) != 0) {
+			emit_s(&g.em, " __attribute__((packed))");
+		};
+		ef1_b_raw(&g.em, " % ", n.ref);
+		e_block_start(&g.em);
+		let field = t_first(ty);
+		for (field != null) {
+			let field_node: *tnode = unwrap(field);
+			let field_ty: *tnode = t_first_nn(field_node);
+			if (field_ty.kind == N_T_ARR) {
+				g_array_decl(g, field_ty, field_node.ref);
+			} else {
+				g_type(g, field_ty);
+				ef1_b_raw(&g.em, " %", field_node.ref);
+			};
+			e_stmt_end(&g.em);
+			field = field_node.next;
+		};
+		e_block_end(&g.em);
+		e_stmt_end(&g.em);
+		e_nl(&g.em);
+		return;
+	};
+	c_typedef(&g.em);
+	e_sp(&g.em);
+	if (ty.kind == N_T_ENUM) {
+		c_enum(&g.em);
+		e_sp_block_start(&g.em);
+		let member = t_first(ty);
+		if (member != null && unwrap(member).kind != N_ENUM_MEM) {
+			member = unwrap(member).next;
+		};
+			for (member != null) {
+				ef2_b(&g.em, "%_%", n.ref, unwrap(member).ref);
+				if (unwrap(member).ival != 0 || t_prev(unwrap(member)) == null) {
+					ef1_i(&g.em, " = %", unwrap(member).ival);
+				};
+				e_c(&g.em, ',');
+				e_nl(&g.em);
+				member = unwrap(member).next;
+			};
+		e_block_end(&g.em);
+	} else if (ty.kind == N_T_TAGGED) {
+		c_struct(&g.em);
+		e_sp_block_start(&g.em);
+		emit_s(&g.em, "uint16_t tag");
+		e_stmt_end(&g.em);
+		c_union(&g.em);
+		e_sp_block_start(&g.em);
+		let variant = t_first(ty);
+		let idx: i64 = 0;
+		for (variant != null) {
+			let v: *tnode = unwrap(variant);
+			g_type(g, v);
+			e_variant_name(&g.em, idx);
+			e_stmt_end(&g.em);
+			variant = v.next;
+			idx += 1;
+		};
+		e_block_end(&g.em);
+		emit_s(&g.em, " val");
+		e_stmt_end_block_end(&g.em);
+	} else {
+		g_type(g, ty);
+	};
+	ef1_b_raw(&g.em, " %", n.ref);
+	e_stmt_end(&g.em);
+	e_nl(&g.em);
+};
+
+fn g_def(g: *codegen, n: *tnode) void = {
+	if (dict_has_bref(&g.globals, n.ref)) {
+		err_bref(n.ref, g.t.src, g.t.src_len, "duplicate define name (pika does not allow shadowing global names)");
+	};
+	dict_set_bref(&g.globals, n.ref, 0);
+	c_define(&g.em);
+	ef1_b_raw(&g.em, " % ", n.ref);
+	let child: *tnode = t_first_nn(n);
+	if (is_type_kind(child.kind)) { child = t_next_nn(child); };
+	g_expr(g, child);
+	e_nl(&g.em);
+};
+
+fn g_global(g: *codegen, n: *tnode) void = {
+	let exported = (n.flags & F_EXPORTED) != 0;
+	let mutable = (n.flags & F_MUTABLE) != 0;
+	if (!exported) { emit_s(&g.em, "static "); };
+	if (!mutable) { emit_s(&g.em, "const "); };
+	let child = t_first(n);
+	let has_type = false;
+	let ty: nullable *tnode = null;
+	let init: *tnode = t_first_nn(n);
+	if (child != null) {
+		let c: *tnode = unwrap(child);
+		if (is_type_kind(c.kind)) {
+			has_type = true;
+			ty = c;
+			init = t_next_nn(c);
+		} else {
+			init = c;
+		};
+	};
+
+	let varr = analyze_variadic_array(ty, init, g.t.src);
+	if (varr.is_variadic && varr.size_is_literal && varr.size_literal < varr.elem_count: i64) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"array literal has more elements than size");
+	};
+	if (!has_type && expr_is_void_literal(init, g.t.src)) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"cannot declare variable of type void");
+	};
+	if (has_type) {
+		let typ: *tnode = unwrap(ty);
+		if (typ.kind == N_T_ARR) {
+			let elem: *tnode = t_first_nn(typ);
+			if ((typ.flags & F_INFERRED) != 0) {
+				if (init.kind != N_ARR_LIT) {
+					err_bref(n.ref, g.t.src, g.t.src_len,
+						"inferred array requires array literal initializer");
+				};
+				g_type(g, elem);
+				ef1_b_raw(&g.em, " %[", n.ref);
+				e_u(&g.em, arr_lit_count(init): u64);
+				e_c(&g.em, ']');
+			} else {
+				let size_node: *tnode = t_next_nn(elem);
+				g_type(g, elem);
+				ef2_b_raw(&g.em, " %[%]", n.ref, size_node.ref);
+			};
+		} else {
+			g_type(g, unwrap(ty));
+			ef1_b_raw(&g.em, " %", n.ref);
+		};
+	} else {
+		c_auto(&g.em);
+		ef1_b_raw(&g.em, " %", n.ref);
+	};
+	e_assign(&g.em);
+	g.in_global_init = true;
+	if (varr.is_variadic) {
+		if (varr.last_is_zero) {
+			emit_s(&g.em, "{0}");
+		} else if (varr.size_is_literal) {
+			g_arr_lit_fill(g, unwrap(varr.arr_lit), varr.size_literal, varr.elem_count);
+		} else {
+			err_bref(n.ref, g.t.src, g.t.src_len,
+				"variadic array literal in global init requires constant size or zero fill");
+		};
+	} else {
+		let handled = false;
+		if (has_type) { handled = emit_tagged_wrap(g, unwrap(ty), init); };
+		if (!handled) {
+			let expected: nullable *tnode = null;
+			if (has_type) { expected = ty; };
+			g_expr_expected(g, init, expected);
+		};
+	};
+	g.in_global_init = false;
+	e_stmt_end(&g.em);
+};
+
+fn g_use(g: *codegen, n: *tnode) void = {
+	let had_rt = g.use_rt;
+	let had_strings = g.use_strings;
+	register_use_alias(g, n);
+	if (!had_rt && g.use_rt) { c_rt_decls(&g.em); };
+	if (!had_strings && g.use_strings) { c_strings_decls(&g.em); };
+};
+
+// --- Codegen: Top Level ---
+fn g_fns(g: *codegen, unit: *tnode, decl_only: bool) void = {
+	let decl = t_first(unit);
+	for (decl != null) {
+		let d: *tnode = unwrap(decl);
+		if (d.kind == N_FN) {
+			if (decl_only) {
+				if (dict_has_bref(&g.globals, d.ref)) {
+					err_bref(d.ref, g.t.src, g.t.src_len, "duplicate function name (pika does not allow shadowing global names)");
+				};
+				dict_set_bref(&g.globals, d.ref, d: uintptr: u64);
+				let ret_type = g_skip_to_ret(d);
+				if (ret_type != null) {
+					dict_set_bref(&g.funcs, d.ref, unwrap(ret_type): uintptr: u64);
+				};
+				if ((d.flags & F_EXPORTED) != 0 && (d.flags & F_SYMBOL) == 0 && !is_pika_main(g, d)) {
+					dict_set_bref(&g.exported_funcs, d.ref, 1);
+				};
+				g_fn_decl(g, d);
+			} else { g_fn(g, d); };
+		};
+		decl = d.next;
+	};
+};
+
+fn pkgen_generate_gnuc11(g: *codegen) void = {
+	slice_elem_len = 0;
+	c_generated_by(&g.em, "pika2c");
+	c_prelude(&g.em);
+
+	let unit = t_first(g.t.root);
+	if (unit == null) { return; };
+	let uw = unwrap(unit);
+	collect_slice_elems(g, uw);
+
+	// Pre-scan use statements to register namespace aliases before typedef emission.
+	let use_scan = t_first(uw);
+	for (use_scan != null) {
+		let use_scan_node: *tnode = unwrap(use_scan);
+		if (use_scan_node.kind == N_USE) { register_use_alias_only(g, use_scan_node); };
+		use_scan = use_scan_node.next;
+	};
+
+	let struct_decl = t_first(uw);
+	for (struct_decl != null) {
+		let struct_d: *tnode = unwrap(struct_decl);
+		if (struct_d.kind == N_TYPEDEF) {
+			let struct_ty: *tnode = t_first_nn(struct_d);
+			if (struct_ty.kind == N_T_STRUCT) {
+				c_typedef(&g.em);
+				e_sp(&g.em);
+				c_struct(&g.em);
+				ef2_b_raw(&g.em, " % %", struct_d.ref, struct_d.ref);
+				e_stmt_end(&g.em);
+			};
+		};
+		struct_decl = struct_d.next;
+	};
+	e_nl(&g.em);
+
+	let early_typedef = t_first(uw);
+	for (early_typedef != null) {
+		let early_decl: *tnode = unwrap(early_typedef);
+		if (early_decl.kind == N_TYPEDEF) {
+			let early_ty: *tnode = t_first_nn(early_decl);
+			if (early_ty.kind != N_T_STRUCT &&
+			    early_ty.kind != N_T_TAGGED && !type_contains_slice(early_ty)) {
+				g_typedef(g, early_decl);
+			};
+		};
+		early_typedef = early_decl.next;
+	};
+	e_nl(&g.em);
+
+	emit_s(&g.em, "// Slice type definitions\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(int8_t, hare_slice_int8_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(int16_t, hare_slice_int16_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(int32_t, hare_slice_int32_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(int64_t, hare_slice_int64_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(uint8_t, hare_slice_uint8_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(uint16_t, hare_slice_uint16_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(uint32_t, hare_slice_uint32_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(uint64_t, hare_slice_uint64_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(intptr_t, hare_slice_intptr_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(uintptr_t, hare_slice_uintptr_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(size_t, hare_slice_size_t);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(float, hare_slice_float);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(double, hare_slice_double);\n");
+	emit_s(&g.em, "HARE_DEFINE_SLICE(_Bool, hare_slice__Bool);\n");
+	g_emit_custom_slice_defs(g);
+	e_nl(&g.em);
+
+	let use_decl = t_first(uw);
+	for (use_decl != null) {
+		let use_d: *tnode = unwrap(use_decl);
+		if (use_d.kind == N_USE) { g_use(g, use_d); };
+		use_decl = use_d.next;
+	};
+	let typedef_decl = t_first(uw);
+	for (typedef_decl != null) {
+		let late_decl: *tnode = unwrap(typedef_decl);
+		if (late_decl.kind == N_TYPEDEF) {
+			let late_ty: *tnode = t_first_nn(late_decl);
+			if (late_ty.kind == N_T_STRUCT ||
+			    late_ty.kind == N_T_TAGGED || type_contains_slice(late_ty)) {
+				g_typedef(g, late_decl);
+			};
+		} else if (late_decl.kind == N_DEF) {
+			g_decl(g, late_decl);
+		};
+		typedef_decl = late_decl.next;
+	};
+	let global_decl = t_first(uw);
+	for (global_decl != null) {
+		let global_d: *tnode = unwrap(global_decl);
+		if (global_d.kind == N_GLOBAL) {
+			if (dict_has_bref(&g.globals, global_d.ref)) {
+				err_bref(global_d.ref, g.t.src, g.t.src_len, "duplicate global variable name (pika does not allow shadowing global names)");
+			};
+			dict_set_bref(&g.globals, global_d.ref, 0);
+			g_global(g, global_d);
+		};
+		global_decl = global_d.next;
+	};
+	e_nl(&g.em);
+	g_fns(g, uw, true);
+	e_nl(&g.em);
+	g_fns(g, uw, false);
+	e_nl(&g.em);
+};
+
+fn g_fn_decl(g: *codegen, n: *tnode) void = {
+	let exported = (n.flags & F_EXPORTED) != 0;
+	let extern_fn = (n.flags & F_EXTERN) != 0;
+	if (exported && !extern_fn) {
+		check_fn_type_visibility(g, n);
+	};
+	if (!exported && !extern_fn) {
+		emit_s(&g.em, "static ");
+	};
+
+	g_type(g, unwrap(g_skip_to_ret(n)));
+	e_sp(&g.em);
+	g_fn_name(g, n);
+	g_param_list(g, n);
+	e_stmt_end(&g.em);
+};

@@ -1,0 +1,100 @@
+// Test file demonstrating new string features
+// NOTE: This test is INCOMPATIBLE with real Hare compiler
+// ERROR: Hare's str type does not expose a .data field (lines 17, 89)
+// Expected: "/tmp/sf.ha:17:19: error: Cannot select field from non-struct, non-union object"
+// Reason: This test is specifically for transpiler string handling, not Hare semantics
+
+use rt;
+
+export fn main() void = {
+	// Multi-line string with newline
+	let s1: str = "Line 1\nLine 2";
+	assert(len(s1) == 13);
+
+	// Raw string (backslash is literal)
+	let s2: str = `C:\path\to\file`;
+	assert(len(s2) == 15);
+
+	// Hex escape
+	let s3: str = "AB\x43DE";
+	assert(len(s3) == 5);
+	assert(s3.data[2] == 0x43);  // 'C'
+
+	// Unicode escapes
+	let s4: str = "\u00E9";     // é (2 UTF-8 bytes)
+	assert(len(s4) == 2);
+	let s5: str = "\U0001F600"; // 😀 (4 UTF-8 bytes)
+	assert(len(s5) == 4);
+
+	// Tab and carriage return
+	let s6: str = "A\tB\rC";
+	assert(len(s6) == 5);
+
+	// String concatenation - adjacent strings are joined
+	let s7: str = "Hello, " "World!";
+	assert(len(s7) == 13);
+
+	// Mixed regular + raw string concatenation
+	let s8: str = "Path: " `C:\Users\test` " done";
+	assert(len(s8) == 24);
+
+	// Complex concatenation with embedded raw string
+	let s9: str = "test test `" `this is raw \n\\` "` end";
+	assert(len(s9) == 32);
+
+	// Concatenation with escapes
+	let s10: str = "A\n" "B\t" "C";
+	assert(len(s10) == 5);
+
+	// Multi-line regular string
+	let s11: str = "line1
+line2
+line3
+\\n
+";
+	assert(len(s11) == 21);
+
+	// Multi-line raw string
+	let s12: str = `line1
+line2
+line3
+\n
+`;
+	assert(len(s12) == 21);
+	assert(s11 == s12);
+
+	// Regular and raw strings with same content should be equal
+	let regular: str = "a\nb\nc\n";
+	let raw: str = `a
+b
+c
+`;
+	assert(len(regular) == 6);
+	assert(len(raw) == 6);
+	assert(regular == raw);
+
+	// More complex equality test: regular escapes vs raw literals
+	let escaped: str = "line1\nline2\nline3\n";
+	let literal: str = `line1
+line2
+line3
+`;
+	assert(escaped == literal);
+
+	// Backslash test: \n in raw is literal backslash+n, not newline
+	let with_backslash: str = "test\\nend";  // literal: test\nend (9 chars)
+	let raw_backslash: str = `test\nend`;    // same: test\nend (9 chars)
+	assert(len(with_backslash) == 9);
+	assert(with_backslash == raw_backslash);
+
+	// Test escapes followed by hex digits (should split to avoid C greedy parsing)
+	let hex_before_hex: str = "\x41ABC";
+	assert(len(hex_before_hex) == 4);
+	assert(hex_before_hex.data[0] == 0x41);  // 'A'
+
+	let unicode_before_hex: str = "\u00E9ABC";
+	assert(len(unicode_before_hex) == 5);  // 2 (é) + 3 (ABC)
+
+	let big_unicode_before_hex: str = "\U0001F600ABC";
+	assert(len(big_unicode_before_hex) == 7);  // 4 (😀) + 3 (ABC)
+};

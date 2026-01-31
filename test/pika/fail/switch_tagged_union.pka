@@ -1,0 +1,10 @@
+// ERROR: cannot switch on tagged union; use match
+type number = (i32 | f32);
+
+fn test() void = {
+	let n: number = 0: number;
+	switch (n) {
+	case 0 => void;
+	case => void;
+	};
+};

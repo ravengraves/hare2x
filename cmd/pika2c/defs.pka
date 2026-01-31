@@ -1,0 +1,214 @@
+// defs.ha - Token and AST node kind constants for Pika transpiler (self-hosted)
+
+// Token Kinds (lexer output, <256)
+def TK_EOF: u16 = 0;
+def TK_IDENT: u16 = 1;
+def TK_INT: u16 = 2;
+def TK_FLOAT: u16 = 3;
+def TK_STR: u16 = 4;
+def TK_CHAR: u16 = 5;
+def TK_RAWSTR: u16 = 6;
+
+// Single-character tokens (use ASCII value)
+def TK_LPAREN: u16 = 40;
+def TK_RPAREN: u16 = 41;
+def TK_LBRACE: u16 = 123;
+def TK_RBRACE: u16 = 125;
+def TK_LBRACKET: u16 = 91;
+def TK_RBRACKET: u16 = 93;
+def TK_COMMA: u16 = 44;
+def TK_SEMI: u16 = 59;
+def TK_COLON: u16 = 58;
+def TK_DOT: u16 = 46;
+def TK_AT: u16 = 64;
+def TK_HASH: u16 = 35;
+
+// Operators
+def TK_PLUS: u16 = 10;
+def TK_MINUS: u16 = 11;
+def TK_STAR: u16 = 12;
+def TK_SLASH: u16 = 13;
+def TK_PERCENT: u16 = 14;
+def TK_AMP: u16 = 15;
+def TK_PIPE: u16 = 16;
+def TK_CARET: u16 = 17;
+def TK_TILDE: u16 = 18;
+def TK_BANG: u16 = 19;
+def TK_LT: u16 = 20;
+def TK_GT: u16 = 21;
+def TK_EQ: u16 = 22;
+def TK_QUESTION: u16 = 23;
+
+// Multi-char operators
+def TK_EQ_EQ: u16 = 30;
+def TK_NE: u16 = 31;
+def TK_LE: u16 = 32;
+def TK_GE: u16 = 33;
+def TK_AND: u16 = 34;
+def TK_OR: u16 = 35;
+def TK_LXOR: u16 = 36;
+def TK_SHL: u16 = 37;
+def TK_SHR: u16 = 38;
+def TK_ARROW: u16 = 39;
+def TK_COLONCOLON: u16 = 45;
+def TK_DOTDOT: u16 = 47;
+def TK_ELLIPSIS: u16 = 48;
+
+// Compound assignment
+def TK_PLUS_EQ: u16 = 50;
+def TK_MINUS_EQ: u16 = 51;
+def TK_STAR_EQ: u16 = 52;
+def TK_SLASH_EQ: u16 = 53;
+def TK_PERCENT_EQ: u16 = 54;
+def TK_AMP_EQ: u16 = 55;
+def TK_PIPE_EQ: u16 = 56;
+def TK_CARET_EQ: u16 = 57;
+def TK_SHL_EQ: u16 = 60;
+def TK_SHR_EQ: u16 = 61;
+
+// Keywords
+def TK_FN: u16 = 100;
+def TK_LET: u16 = 101;
+def TK_CONST: u16 = 102;
+def TK_IF: u16 = 103;
+def TK_ELSE: u16 = 104;
+def TK_FOR: u16 = 105;
+def TK_SWITCH: u16 = 106;
+def TK_MATCH: u16 = 107;
+def TK_RETURN: u16 = 108;
+def TK_BREAK: u16 = 109;
+def TK_CONTINUE: u16 = 110;
+def TK_TYPE: u16 = 111;
+def TK_DEF: u16 = 112;
+def TK_USE: u16 = 113;
+def TK_EXPORT: u16 = 114;
+def TK_STATIC: u16 = 115;
+def TK_NULLABLE: u16 = 116;
+def TK_STRUCT: u16 = 117;
+def TK_UNION: u16 = 118;
+def TK_ENUM: u16 = 119;
+def TK_CASE: u16 = 120;
+def TK_TRUE: u16 = 121;
+def TK_FALSE: u16 = 122;
+def TK_NULL: u16 = 130;
+def TK_VOID: u16 = 131;
+def TK_YIELD: u16 = 132;
+
+// Primitive type tokens (for type tracking)
+def TK_U8: u16 = 140;
+def TK_U16: u16 = 141;
+def TK_U32: u16 = 142;
+def TK_U64: u16 = 143;
+def TK_I8: u16 = 144;
+def TK_I16: u16 = 145;
+def TK_I32: u16 = 146;
+def TK_I64: u16 = 147;
+def TK_SIZE: u16 = 148;
+def TK_UINTPTR: u16 = 149;
+def TK_PRIM_INT: u16 = 150;  // Named differently to avoid conflict with TK_INT (integer literal)
+def TK_PRIM_UINT: u16 = 151;
+def TK_PRIM_BOOL: u16 = 152;
+def TK_F32: u16 = 153;
+def TK_F64: u16 = 154;
+
+// AST Node Kinds (parser output, >=256)
+// Expressions
+def N_INT: u16 = 256;
+def N_FLOAT: u16 = 257;
+def N_BOOL: u16 = 258;
+def N_NULL: u16 = 259;
+def N_ID: u16 = 260;
+def N_STR: u16 = 261;
+def N_CHAR: u16 = 262;
+def N_RAWSTR: u16 = 274;
+def N_BIN: u16 = 263;
+def N_UN: u16 = 264;
+def N_CALL: u16 = 265;
+def N_CAST: u16 = 266;
+def N_IS: u16 = 267;
+def N_IDX: u16 = 268;
+def N_SLICE: u16 = 269;
+def N_FLD: u16 = 270;
+def N_ARR_LIT: u16 = 271;
+def N_STRUCT_LIT: u16 = 272;
+def N_QUAL_ID: u16 = 273;
+
+// Statements
+def N_LET: u16 = 280;
+def N_RET: u16 = 281;
+def N_IF: u16 = 282;
+def N_FOR: u16 = 283;
+def N_BLOCK: u16 = 284;
+def N_ASGN: u16 = 285;
+def N_SWITCH: u16 = 286;
+def N_MATCH: u16 = 287;
+def N_BREAK: u16 = 288;
+def N_CONTINUE: u16 = 289;
+def N_CASE: u16 = 290;
+def N_EXPR_STMT: u16 = 291;
+def N_YIELD: u16 = 292;
+
+// Types
+def N_T_PRIM: u16 = 300;
+def N_T_PTR: u16 = 301;
+def N_T_SLICE: u16 = 302;
+def N_T_ARR: u16 = 303;
+def N_T_UARR: u16 = 304;
+def N_T_STRUCT: u16 = 305;
+def N_T_UNION: u16 = 306;
+def N_T_ENUM: u16 = 307;
+def N_T_TAGGED: u16 = 308;
+def N_T_ALIAS: u16 = 309;
+def N_T_FN: u16 = 310;
+def N_T_QUAL: u16 = 311;
+def N_T_ERR: u16 = 312;
+
+// Declarations
+def N_FN: u16 = 320;
+def N_TYPEDEF: u16 = 321;
+def N_DEF: u16 = 322;
+def N_USE: u16 = 323;
+def N_GLOBAL: u16 = 324;
+
+// Helpers
+def N_PARAM: u16 = 330;
+def N_FIELD: u16 = 331;
+def N_ENUM_MEM: u16 = 332;
+def N_FILL: u16 = 333;
+
+// Root
+def N_UNIT: u16 = 340;
+
+// Builtins
+def N_ASSERT: u16 = 350;
+def N_ABORT: u16 = 351;
+def N_LEN: u16 = 352;
+def N_SIZE: u16 = 354;
+
+// Attributes
+def N_SYMBOL_NAME: u16 = 353;
+
+// Node flags
+def F_EXPORTED: u16 = 1;
+def F_MUTABLE: u16 = 2;
+def F_NULLABLE: u16 = 4;
+def F_STATIC: u16 = 8;
+def F_VARIADIC: u16 = 16;
+def F_SYMBOL: u16 = 32;
+def F_INFERRED: u16 = 64;  // Array size inferred from initializer
+def F_EXTERN: u16 = 128;   // External function prototype (no body)
+def F_KERNEL: u16 = 256;   // SYCL kernel entry point
+def F_PACKED: u16 = 257;   // Packed struct attribute
+def F_GLSL_ATTRIBUTE: u16 = 512;
+def F_GLSL_UNIFORM: u16 = 1024;
+def F_GLSL_VARYING: u16 = 2048;
+def F_GLSL_BUILTIN: u16 = 4096;
+def F_SYCL_LOCAL: u16 = 8192;
+def F_SYCL_READ: u16 = 16384;
+def F_SYCL_WRITE: u16 = 32768;
+
+
+// Check if a node kind is a type node
+fn is_type_kind(k: u16) bool = {
+	return k >= N_T_PRIM && k <= N_T_ERR;
+};

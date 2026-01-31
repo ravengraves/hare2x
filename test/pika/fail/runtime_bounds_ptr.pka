@@ -1,0 +1,7 @@
+// RUNTIME ERROR: index out of bounds via address-of
+use rt;
+
+export fn _main() void = {
+	let arr: [3]i32 = [1, 2, 3];
+	let p = &arr[10];  // out of bounds when taking address
+};

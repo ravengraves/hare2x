@@ -1,0 +1,4 @@
+// ERROR: cannot cast nullable pointer to non-nullable (use match instead)
+fn bad(p: nullable *i32) *i32 = {
+	return p: *i32;
+};

@@ -1,0 +1,2123 @@
+// pkgen_glsl.pka - Pika GLSL ES 1.00 generation (AST -> GLSL)
+
+def GLSL_STAGE_VERTEX: i64 = 0;
+def GLSL_STAGE_FRAGMENT: i64 = 1;
+
+def GLSL_QUAL_NONE: i64 = 0;
+def GLSL_QUAL_ATTRIBUTE: i64 = 1;
+def GLSL_QUAL_UNIFORM: i64 = 2;
+def GLSL_QUAL_VARYING: i64 = 3;
+def GLSL_QUAL_BUILTIN: i64 = 4;
+
+let glsl_stage: i64 = GLSL_STAGE_VERTEX;
+
+type glsl_qual_info = struct {
+	qual: i64,
+	base: bref,
+	has_qual: bool,
+};
+
+fn glsl_set_stage(is_fragment: bool) void = {
+	if (is_fragment) { glsl_stage = GLSL_STAGE_FRAGMENT; }
+	else { glsl_stage = GLSL_STAGE_VERTEX; };
+};
+
+fn glsl_err(g: *codegen, r: bref, msg: str) void = {
+	err_bref(r, g.t.src, g.t.src_len, msg);
+};
+
+fn glsl_bref_has_prefix(r: bref, prefix: str, src: *[*]u8) bool = {
+	let plen = len(prefix);
+	if (r.length < plen) { return false; };
+	let head = bref { pos = r.pos, length = plen };
+	return bref_match(head, prefix, src);
+};
+
+fn glsl_try_qualifier(
+	r: bref,
+	src: *[*]u8,
+	prefix: str,
+	qual: i64,
+	out: *glsl_qual_info
+) bool = {
+	if (!glsl_bref_has_prefix(r, prefix, src)) { return false; };
+	out.qual = qual;
+	out.base = bref { pos = r.pos + len(prefix), length = r.length - len(prefix) };
+	out.has_qual = true;
+	return true;
+};
+
+fn glsl_parse_qualifier(r: bref, src: *[*]u8) glsl_qual_info = {
+	let info = glsl_qual_info { qual = GLSL_QUAL_NONE, base = r, has_qual = false };
+	if (glsl_try_qualifier(r, src, "attribute_", GLSL_QUAL_ATTRIBUTE, &info)) {
+		return info;
+	};
+	if (glsl_try_qualifier(r, src, "uniform_", GLSL_QUAL_UNIFORM, &info)) {
+		return info;
+	};
+	if (glsl_try_qualifier(r, src, "varying_", GLSL_QUAL_VARYING, &info)) {
+		return info;
+	};
+	if (glsl_try_qualifier(r, src, "builtin_", GLSL_QUAL_BUILTIN, &info)) {
+		return info;
+	};
+	return info;
+};
+
+fn glsl_strip_gl_type(r: bref, src: *[*]u8, out: *bref) bool = {
+	if (r.length > 4 &&
+		src[r.pos] == 'g' && src[r.pos + 1] == 'l' &&
+		src[r.pos + 2] == ':' && src[r.pos + 3] == ':') {
+		out.pos = r.pos + 4;
+		out.length = r.length - 4;
+		return true;
+	};
+	if (r.length > 3 &&
+		src[r.pos] == 'g' && src[r.pos + 1] == 'l' &&
+		src[r.pos + 2] == '_') {
+		out.pos = r.pos + 3;
+		out.length = r.length - 3;
+		return true;
+	};
+	return false;
+};
+
+fn glsl_is_vec_type(r: bref, src: *[*]u8) bool = {
+	let base = r;
+	let stripped = bref_empty();
+	if (glsl_strip_gl_type(r, src, &stripped)) { base = stripped; };
+	return bref_match(base, "vec2", src) ||
+		bref_match(base, "vec3", src) ||
+		bref_match(base, "vec4", src);
+};
+
+fn glsl_is_ivec_type(r: bref, src: *[*]u8) bool = {
+	let base = r;
+	let stripped = bref_empty();
+	if (glsl_strip_gl_type(r, src, &stripped)) { base = stripped; };
+	return bref_match(base, "ivec2", src) ||
+		bref_match(base, "ivec3", src) ||
+		bref_match(base, "ivec4", src);
+};
+
+fn glsl_is_bvec_type(r: bref, src: *[*]u8) bool = {
+	let base = r;
+	let stripped = bref_empty();
+	if (glsl_strip_gl_type(r, src, &stripped)) { base = stripped; };
+	return bref_match(base, "bvec2", src) ||
+		bref_match(base, "bvec3", src) ||
+		bref_match(base, "bvec4", src);
+};
+
+fn glsl_is_mat_type(r: bref, src: *[*]u8) bool = {
+	let base = r;
+	let stripped = bref_empty();
+	if (glsl_strip_gl_type(r, src, &stripped)) { base = stripped; };
+	return bref_match(base, "mat2", src) ||
+		bref_match(base, "mat3", src) ||
+		bref_match(base, "mat4", src);
+};
+
+fn glsl_is_sampler_type(r: bref, src: *[*]u8) bool = {
+	let base = r;
+	let stripped = bref_empty();
+	if (glsl_strip_gl_type(r, src, &stripped)) { base = stripped; };
+	return bref_match(base, "sampler2D", src) ||
+		bref_match(base, "samplerCube", src);
+};
+
+fn glsl_is_builtin_type_name(r: bref, src: *[*]u8) bool = {
+	let base = bref_empty();
+	if (!glsl_strip_gl_type(r, src, &base)) { return false; };
+	return glsl_is_vec_type(base, src) ||
+		glsl_is_ivec_type(base, src) ||
+		glsl_is_bvec_type(base, src) ||
+		glsl_is_mat_type(base, src) ||
+		glsl_is_sampler_type(base, src);
+};
+
+fn glsl_type_known(g: *codegen, r: bref) bool = {
+	if (glsl_is_builtin_type_name(r, g.t.src)) { return true; };
+	return dict_has_bref(&g.types, r);
+};
+
+fn glsl_is_qualifier_name(r: bref, src: *[*]u8) bool = {
+	let info = glsl_parse_qualifier(r, src);
+	return info.has_qual;
+};
+
+fn glsl_is_sampler_name(r: bref, src: *[*]u8) bool = {
+	return glsl_is_sampler_type(r, src);
+};
+
+fn glsl_emit_type_name(g: *codegen, r: bref) void = {
+	let gl_base = bref_empty();
+	if (glsl_strip_gl_type(r, g.t.src, &gl_base)) {
+		if (glsl_is_vec_type(gl_base, g.t.src) ||
+			glsl_is_ivec_type(gl_base, g.t.src) ||
+			glsl_is_bvec_type(gl_base, g.t.src) ||
+			glsl_is_mat_type(gl_base, g.t.src) ||
+			glsl_is_sampler_type(gl_base, g.t.src)) {
+			e_bref(&g.em, gl_base);
+			return;
+		};
+		glsl_err(g, r, "unknown gl:: type in GLSL");
+	};
+	if (bref_match(r, "f32", g.t.src)) { emit_s(&g.em, "float"); return; };
+	if (bref_match(r, "i32", g.t.src)) { emit_s(&g.em, "int"); return; };
+	if (bref_match(r, "int", g.t.src)) { emit_s(&g.em, "int"); return; };
+	if (bref_match(r, "bool", g.t.src)) { emit_s(&g.em, "bool"); return; };
+	if (bref_match(r, "void", g.t.src)) { emit_s(&g.em, "void"); return; };
+	if (bref_match(r, "f64", g.t.src)) {
+		glsl_err(g, r, "f64 is not supported in GLSL ES 1.00 (use f32)");
+	};
+	if (bref_match(r, "uint", g.t.src) || bref_match(r, "u32", g.t.src) ||
+		bref_match(r, "u64", g.t.src) ||
+		bref_match(r, "u16", g.t.src) || bref_match(r, "u8", g.t.src) ||
+		bref_match(r, "i64", g.t.src) || bref_match(r, "i16", g.t.src) ||
+		bref_match(r, "i8", g.t.src) || bref_match(r, "size", g.t.src) ||
+		bref_match(r, "uintptr", g.t.src)) {
+		glsl_err(g, r, "integer type not supported in GLSL ES 1.00");
+	};
+	if (bref_match(r, "vec2", g.t.src) || bref_match(r, "vec3", g.t.src) ||
+		bref_match(r, "vec4", g.t.src) || bref_match(r, "ivec2", g.t.src) ||
+		bref_match(r, "ivec3", g.t.src) || bref_match(r, "ivec4", g.t.src) ||
+		bref_match(r, "bvec2", g.t.src) || bref_match(r, "bvec3", g.t.src) ||
+		bref_match(r, "bvec4", g.t.src) || bref_match(r, "mat2", g.t.src) ||
+		bref_match(r, "mat3", g.t.src) || bref_match(r, "mat4", g.t.src) ||
+		bref_match(r, "sampler2D", g.t.src) ||
+		bref_match(r, "samplerCube", g.t.src)) {
+		glsl_err(g, r, "GLSL builtin types must be qualified as gl::vec2");
+	};
+	if (!glsl_type_known(g, r)) {
+		glsl_err(g, r, "unknown type in GLSL");
+	};
+	e_bref(&g.em, r);
+};
+
+fn glsl_emit_type(g: *codegen, ty: *tnode) void = {
+	if (ty.kind == N_T_PRIM) {
+		if (ty.ref.length > 0) {
+			glsl_emit_type_name(g, ty.ref);
+			return;
+		};
+		if (ty.ival == TK_F32: i64) { emit_s(&g.em, "float"); return; };
+		if (ty.ival == TK_I32: i64) { emit_s(&g.em, "int"); return; };
+		if (ty.ival == TK_PRIM_INT: i64) { emit_s(&g.em, "int"); return; };
+		if (ty.ival == TK_PRIM_UINT: i64) {
+			glsl_err(g, ty.ref, "unsigned int is not supported in GLSL ES 1.00");
+		};
+		if (ty.ival == TK_PRIM_BOOL: i64) { emit_s(&g.em, "bool"); return; };
+		if (ty.ival == TK_VOID: i64) { emit_s(&g.em, "void"); return; };
+		glsl_err(g, ty.ref, "unsupported primitive type in GLSL");
+	};
+	if (ty.kind == N_T_ALIAS) {
+		let info = glsl_parse_qualifier(ty.ref, g.t.src);
+		let base = info.base;
+		glsl_emit_type_name(g, base);
+		return;
+	};
+	if (ty.kind == N_T_QUAL) {
+		let mod_ref = bref_empty();
+		let member = bref_empty();
+		if (!tqual_parts(g, ty, &mod_ref, &member)) {
+			glsl_err(g, ty.ref, "qualified types are not supported in GLSL");
+		};
+		if (!bref_match(mod_ref, "gl", g.t.src)) {
+			glsl_err(g, ty.ref, "qualified types are not supported in GLSL");
+		};
+		if (glsl_is_vec_type(member, g.t.src) ||
+			glsl_is_ivec_type(member, g.t.src) ||
+			glsl_is_bvec_type(member, g.t.src) ||
+			glsl_is_mat_type(member, g.t.src) ||
+			glsl_is_sampler_type(member, g.t.src)) {
+			e_bref(&g.em, member);
+			return;
+		};
+		glsl_err(g, member, "unknown gl:: type in GLSL");
+		return;
+	};
+	if (ty.kind == N_T_ARR) {
+		glsl_err(g, ty.ref, "array type only allowed on variables");
+	};
+	if (ty.kind == N_T_STRUCT) {
+		glsl_err(g, ty.ref, "inline struct types are not supported in GLSL");
+	};
+	if (ty.kind == N_T_ENUM) {
+		glsl_err(g, ty.ref, "enum types are not supported in GLSL");
+	};
+	if (ty.kind == N_T_TAGGED) {
+		glsl_err(g, ty.ref, "tagged unions are not supported in GLSL");
+	};
+	if (ty.kind == N_T_PTR || ty.kind == N_T_SLICE || ty.kind == N_T_UARR ||
+		ty.kind == N_T_FN || ty.kind == N_T_ERR || ty.kind == N_T_QUAL) {
+		glsl_err(g, ty.ref, "type not supported in GLSL target");
+	};
+};
+
+fn glsl_is_const_id(g: *codegen, id: bref) bool = {
+	let v = dict_get_bref(&g.globals, id);
+	if (v == 0) { return false; };
+	let node: *tnode = v: uintptr: *tnode;
+	return node.kind == N_DEF;
+};
+
+fn glsl_const_int_value(g: *codegen, n: *tnode, out: *i64) bool = {
+	let cur = n;
+	let negate = false;
+	let hops: size = 0;
+	let inner_opt: nullable *tnode = null;
+	for (hops < 33z) {
+		hops += 1;
+		if (cur.kind == N_INT) {
+			*out = cur.ival;
+			if (negate) { *out = -(*out); };
+			return true;
+		};
+		if (cur.kind == TK_INT) {
+			let parsed = parse_int_base(cur.ref, g.t.src);
+			if (!parsed.ok) { return false; };
+			*out = parsed.val;
+			if (negate) { *out = -(*out); };
+			return true;
+		};
+		if (cur.kind == N_UN && cur.ival == TK_MINUS: i64) {
+			inner_opt = t_first(cur);
+			if (inner_opt == null) { return false; };
+			negate = !negate;
+			cur = unwrap(inner_opt);
+			continue;
+		};
+		if (cur.kind == N_CAST) {
+			inner_opt = t_first(cur);
+			if (inner_opt == null) { return false; };
+			cur = unwrap(inner_opt);
+			continue;
+		};
+		if (cur.kind == N_ID || cur.kind == TK_IDENT) {
+			let v = dict_get_bref(&g.globals, cur.ref);
+			if (v == 0) { return false; };
+			let node: *tnode = v: uintptr: *tnode;
+			if (node.kind != N_DEF) { return false; };
+			let child_opt = t_first(node);
+			if (child_opt == null) { return false; };
+			let init = unwrap(child_opt);
+			if (is_type_kind(init.kind)) {
+				if (init.next == null) { return false; };
+				init = unwrap(init.next);
+			};
+			cur = init;
+			continue;
+		};
+		return false;
+	};
+	return false;
+};
+
+fn glsl_array_size_value(g: *codegen, arr_ty: *tnode, out: *i64) bool = {
+	let size_node = arr_size_node(arr_ty);
+	if (size_node == null) { return false; };
+	return glsl_const_int_value(g, unwrap(size_node), out);
+};
+
+fn glsl_emit_array_size(g: *codegen, sn: *tnode) void = {
+	if (sn.kind == N_INT) { e_i(&g.em, sn.ival); return; };
+	if (sn.kind == TK_INT) {
+		let parsed = parse_int_base(sn.ref, g.t.src);
+		if (!parsed.ok) { glsl_err(g, sn.ref, "array size must be constant"); };
+		e_i(&g.em, parsed.val);
+		return;
+	};
+	if (sn.kind == N_ID) {
+		if (!glsl_is_const_id(g, sn.ref)) {
+			glsl_err(g, sn.ref, "array size must be constant");
+		};
+		e_bref(&g.em, sn.ref);
+		return;
+	};
+	if (sn.kind == TK_IDENT) {
+		if (!glsl_is_const_id(g, sn.ref)) {
+			glsl_err(g, sn.ref, "array size must be constant");
+		};
+		e_bref(&g.em, sn.ref);
+		return;
+	};
+	glsl_err(g, sn.ref, "array size must be constant");
+};
+
+fn glsl_emit_array_dims(g: *codegen, arr_ty: *tnode) void = {
+	let elem = t_first(arr_ty);
+	if (elem == null) { return; };
+	let size_node = unwrap(elem).next;
+	if (size_node == null) {
+		glsl_err(g, arr_ty.ref, "array size is required in GLSL");
+	};
+	let sn: *tnode = unwrap(size_node);
+	emit_s(&g.em, "[");
+	glsl_emit_array_size(g, sn);
+	emit_s(&g.em, "]");
+};
+
+fn glsl_emit_float(g: *codegen, n: *tnode) void = {
+	let r = n.ref;
+	let src = g.t.src;
+	let end = r.length;
+	if (end >= 3) {
+		let b0 = src[r.pos + end - 3];
+		let b1 = src[r.pos + end - 2];
+		let b2 = src[r.pos + end - 1];
+		if (b0 == 'f' && b1 == '3' && b2 == '2') { r.length -= 3; }
+		else if (b0 == 'f' && b1 == '6' && b2 == '4') { r.length -= 3; };
+	};
+	e_bref_no_underscore(&g.em, r);
+};
+
+fn glsl_emit_int(g: *codegen, n: *tnode) void = {
+	e_bref_no_underscore(&g.em, n.ref);
+};
+
+fn glsl_emit_bool(g: *codegen, n: *tnode) void = {
+	if (n.ival != 0) { emit_s(&g.em, "true"); }
+	else { emit_s(&g.em, "false"); };
+};
+
+fn glsl_emit_binop(g: *codegen, tk: u16) void = {
+	if (tk == TK_PLUS) { emit_s(&g.em, "+"); return; };
+	if (tk == TK_MINUS) { emit_s(&g.em, "-"); return; };
+	if (tk == TK_STAR) { emit_s(&g.em, "*"); return; };
+	if (tk == TK_SLASH) { emit_s(&g.em, "/"); return; };
+	if (tk == TK_PERCENT) { emit_s(&g.em, "%"); return; };
+	if (tk == TK_EQ_EQ) { emit_s(&g.em, "=="); return; };
+	if (tk == TK_NE) { emit_s(&g.em, "!="); return; };
+	if (tk == TK_LT) { emit_s(&g.em, "<"); return; };
+	if (tk == TK_GT) { emit_s(&g.em, ">"); return; };
+	if (tk == TK_LE) { emit_s(&g.em, "<="); return; };
+	if (tk == TK_GE) { emit_s(&g.em, ">="); return; };
+	if (tk == TK_AND) { emit_s(&g.em, "&&"); return; };
+	if (tk == TK_OR) { emit_s(&g.em, "||"); return; };
+	if (tk == TK_LXOR) { emit_s(&g.em, "^^"); return; };
+	glsl_err(g, bref_empty(), "binary operator not supported in GLSL");
+};
+
+fn glsl_emit_unop(g: *codegen, tk: u16) void = {
+	if (tk == TK_MINUS) { emit_s(&g.em, "-"); return; };
+	if (tk == TK_BANG) { emit_s(&g.em, "!"); return; };
+	if (tk == TK_PLUS) { emit_s(&g.em, "+"); return; };
+	glsl_err(g, bref_empty(), "unary operator not supported in GLSL");
+};
+
+def GIS_EVAL: u16 = 0;
+def GIS_AFTER_LEFT: u16 = 1;
+def GIS_AFTER_RIGHT: u16 = 2;
+
+type glsl_infer_frame = struct {
+	state: u16,
+	node: *tnode,
+	left_ty: nullable *tnode,
+};
+
+fn glsl_infer_id_type(g: *codegen, id: bref) nullable *tnode = {
+	let v = dict_get_bref(&g.vars, id);
+	if (v == 0) { v = dict_get_bref(&g.globals, id); };
+	if (v == 0) { return null; };
+	let node: *tnode = v: uintptr: *tnode;
+	if (is_type_kind(node.kind)) { return node; };
+	if (node.kind == N_GLOBAL || node.kind == N_DEF) {
+		let child = t_first(node);
+		if (child != null && is_type_kind(unwrap(child).kind)) {
+			return child;
+		};
+		if (node.kind == N_GLOBAL) {
+			let init = t_first_nn(node);
+			if (init.kind == N_STRUCT_LIT) {
+				return t_new_ref(g.t, N_T_ALIAS, init.ref);
+			};
+		};
+		return null;
+	};
+	if (node.kind == N_FN) {
+		let ret = dict_get_bref(&g.funcs, id);
+		if (ret != 0) { return ret: uintptr: *tnode; };
+	};
+	return null;
+};
+
+fn glsl_type_is_float(g: *codegen, ty: *tnode) bool = {
+	let t = ty;
+	if (t.kind == N_T_PRIM) {
+		if (t.ival == TK_F32: i64) { return true; };
+		if (bref_match(t.ref, "f32", g.t.src) || bref_match(t.ref, "float", g.t.src)) {
+			return true;
+		};
+	};
+	if (t.kind == N_T_ALIAS) {
+		let base = glsl_parse_qualifier(t.ref, g.t.src).base;
+		return bref_match(base, "f32", g.t.src) || bref_match(base, "float", g.t.src);
+	};
+	return false;
+};
+
+fn glsl_type_is_int(g: *codegen, ty: *tnode) bool = {
+	let t = ty;
+	if (t.kind == N_T_PRIM) {
+		if (t.ival == TK_I32: i64 || t.ival == TK_PRIM_INT: i64) { return true; };
+		if (bref_match(t.ref, "i32", g.t.src) || bref_match(t.ref, "int", g.t.src)) {
+			return true;
+		};
+	};
+	if (t.kind == N_T_ALIAS) {
+		let base = glsl_parse_qualifier(t.ref, g.t.src).base;
+		return bref_match(base, "i32", g.t.src) || bref_match(base, "int", g.t.src);
+	};
+	return false;
+};
+
+fn glsl_type_is_bool(g: *codegen, ty: *tnode) bool = {
+	let t = ty;
+	if (t.kind == N_T_PRIM) {
+		if (t.ival == TK_PRIM_BOOL: i64) { return true; };
+		if (bref_match(t.ref, "bool", g.t.src)) { return true; };
+	};
+	if (t.kind == N_T_ALIAS) {
+		let base = glsl_parse_qualifier(t.ref, g.t.src).base;
+		return bref_match(base, "bool", g.t.src);
+	};
+	return false;
+};
+
+fn glsl_type_is_non_scalar(g: *codegen, ty: *tnode) bool = {
+	if (ty.kind != N_T_ALIAS && ty.kind != N_T_QUAL) { return false; };
+	let base = glsl_base_type_ref(g, ty);
+	return glsl_is_vec_type(base, g.t.src) ||
+		glsl_is_ivec_type(base, g.t.src) ||
+		glsl_is_bvec_type(base, g.t.src) ||
+		glsl_is_mat_type(base, g.t.src);
+};
+
+fn glsl_find_type_bref(g: *codegen, name: str) bref = {
+	for (let i = 0z; i < g.types.cap; i += 1) {
+		let entry = &g.types.entries[i];
+		if (!entry.occupied) { continue; };
+		if (bref_match(entry.key, name, g.t.src)) { return entry.key; };
+	};
+	return bref_empty();
+};
+
+fn glsl_alias_from_name(g: *codegen, name: str) nullable *tnode = {
+	let found = glsl_find_type_bref(g, name);
+	if (found.length == 0) { return null; };
+	return t_new_ref(g.t, N_T_ALIAS, found);
+};
+
+fn glsl_gl_type_ref_from_member(g: *codegen, member: bref) bref = {
+	if (bref_match(member, "vec2", g.t.src)) { return glsl_find_type_bref(g, "gl_vec2"); };
+	if (bref_match(member, "vec3", g.t.src)) { return glsl_find_type_bref(g, "gl_vec3"); };
+	if (bref_match(member, "vec4", g.t.src)) { return glsl_find_type_bref(g, "gl_vec4"); };
+	if (bref_match(member, "ivec2", g.t.src)) { return glsl_find_type_bref(g, "gl_ivec2"); };
+	if (bref_match(member, "ivec3", g.t.src)) { return glsl_find_type_bref(g, "gl_ivec3"); };
+	if (bref_match(member, "ivec4", g.t.src)) { return glsl_find_type_bref(g, "gl_ivec4"); };
+	if (bref_match(member, "bvec2", g.t.src)) { return glsl_find_type_bref(g, "gl_bvec2"); };
+	if (bref_match(member, "bvec3", g.t.src)) { return glsl_find_type_bref(g, "gl_bvec3"); };
+	if (bref_match(member, "bvec4", g.t.src)) { return glsl_find_type_bref(g, "gl_bvec4"); };
+	if (bref_match(member, "mat2", g.t.src)) { return glsl_find_type_bref(g, "gl_mat2"); };
+	if (bref_match(member, "mat3", g.t.src)) { return glsl_find_type_bref(g, "gl_mat3"); };
+	if (bref_match(member, "mat4", g.t.src)) { return glsl_find_type_bref(g, "gl_mat4"); };
+	if (bref_match(member, "sampler2D", g.t.src)) {
+		return glsl_find_type_bref(g, "gl_sampler2D");
+	};
+	if (bref_match(member, "samplerCube", g.t.src)) {
+		return glsl_find_type_bref(g, "gl_samplerCube");
+	};
+	return bref_empty();
+};
+
+fn glsl_resolve_gl_type_ref(g: *codegen, r: bref) bref = {
+	let member = bref_empty();
+	if (glsl_strip_gl_type(r, g.t.src, &member)) {
+		let gl_ref = glsl_gl_type_ref_from_member(g, member);
+		if (gl_ref.length != 0) { return gl_ref; };
+	};
+	return r;
+};
+
+fn glsl_type_from_suffix(g: *codegen, suffix: bref) nullable *tnode = {
+	if (bref_match(suffix, "f", g.t.src) || bref_match(suffix, "f32", g.t.src)) {
+		return type_prim_dummy(g.t, TK_F32);
+	};
+	if (bref_match(suffix, "v2", g.t.src)) { return glsl_alias_from_name(g, "gl_vec2"); };
+	if (bref_match(suffix, "v3", g.t.src)) { return glsl_alias_from_name(g, "gl_vec3"); };
+	if (bref_match(suffix, "v4", g.t.src)) { return glsl_alias_from_name(g, "gl_vec4"); };
+	if (bref_match(suffix, "m2", g.t.src)) { return glsl_alias_from_name(g, "gl_mat2"); };
+	if (bref_match(suffix, "m3", g.t.src)) { return glsl_alias_from_name(g, "gl_mat3"); };
+	if (bref_match(suffix, "m4", g.t.src)) { return glsl_alias_from_name(g, "gl_mat4"); };
+	if (bref_match(suffix, "i2", g.t.src)) { return glsl_alias_from_name(g, "gl_ivec2"); };
+	if (bref_match(suffix, "i3", g.t.src)) { return glsl_alias_from_name(g, "gl_ivec3"); };
+	if (bref_match(suffix, "i4", g.t.src)) { return glsl_alias_from_name(g, "gl_ivec4"); };
+	if (bref_match(suffix, "b2", g.t.src)) { return glsl_alias_from_name(g, "gl_bvec2"); };
+	if (bref_match(suffix, "b3", g.t.src)) { return glsl_alias_from_name(g, "gl_bvec3"); };
+	if (bref_match(suffix, "b4", g.t.src)) { return glsl_alias_from_name(g, "gl_bvec4"); };
+	return null;
+};
+
+fn glsl_is_vec_relational_name(r: bref, src: *[*]u8) bool = {
+	return bref_match(r, "lessThan", src) ||
+		bref_match(r, "lessThanEqual", src) ||
+		bref_match(r, "greaterThan", src) ||
+		bref_match(r, "greaterThanEqual", src) ||
+		bref_match(r, "equal", src) ||
+		bref_match(r, "notEqual", src);
+};
+
+fn glsl_bvec_from_suffix(g: *codegen, suffix: bref) nullable *tnode = {
+	if (bref_match(suffix, "v2", g.t.src) ||
+		bref_match(suffix, "i2", g.t.src) ||
+		bref_match(suffix, "b2", g.t.src)) {
+		return glsl_alias_from_name(g, "gl_bvec2");
+	};
+	if (bref_match(suffix, "v3", g.t.src) ||
+		bref_match(suffix, "i3", g.t.src) ||
+		bref_match(suffix, "b3", g.t.src)) {
+		return glsl_alias_from_name(g, "gl_bvec3");
+	};
+	if (bref_match(suffix, "v4", g.t.src) ||
+		bref_match(suffix, "i4", g.t.src) ||
+		bref_match(suffix, "b4", g.t.src)) {
+		return glsl_alias_from_name(g, "gl_bvec4");
+	};
+	return null;
+};
+
+fn glsl_bvec_from_type(g: *codegen, ty: *tnode) nullable *tnode = {
+	if (ty.kind != N_T_ALIAS && ty.kind != N_T_QUAL) { return null; };
+	let base = ty.ref;
+	if (ty.kind == N_T_ALIAS) {
+		base = glsl_parse_qualifier(ty.ref, g.t.src).base;
+	} else {
+		base = t_first_nn(ty).ref;
+	};
+	let stripped = bref_empty();
+	if (glsl_strip_gl_type(base, g.t.src, &stripped)) { base = stripped; };
+	if (bref_match(base, "vec2", g.t.src) ||
+		bref_match(base, "ivec2", g.t.src) ||
+		bref_match(base, "bvec2", g.t.src)) {
+		return glsl_alias_from_name(g, "gl_bvec2");
+	};
+	if (bref_match(base, "vec3", g.t.src) ||
+		bref_match(base, "ivec3", g.t.src) ||
+		bref_match(base, "bvec3", g.t.src)) {
+		return glsl_alias_from_name(g, "gl_bvec3");
+	};
+	if (bref_match(base, "vec4", g.t.src) ||
+		bref_match(base, "ivec4", g.t.src) ||
+		bref_match(base, "bvec4", g.t.src)) {
+		return glsl_alias_from_name(g, "gl_bvec4");
+	};
+	return null;
+};
+
+fn glsl_infer_gl_call(g: *codegen, n: *tnode) nullable *tnode = {
+	let func = t_first(n);
+	if (func == null) { return null; };
+	let call_fn: *tnode = unwrap(func);
+	if (call_fn.kind != N_QUAL_ID) { return null; };
+	let mod_ref = bref_empty();
+	let name = bref_empty();
+	if (!qual_id_parts(g, call_fn, &mod_ref, &name)) { return null; };
+	if (!bref_match(mod_ref, "gl", g.t.src)) { return null; };
+	let base = bref_empty();
+	let suffix = bref_empty();
+	let has_suffix = false;
+	let base_name = name;
+	if (glsl_split_suffix(name, g.t.src, &base, &suffix) &&
+		glsl_is_builtin_suffix(suffix, g.t.src)) {
+		has_suffix = true;
+		base_name = base;
+	};
+	if (bref_match(base_name, "texture2D", g.t.src) ||
+		bref_match(base_name, "texture2D_bias", g.t.src) ||
+		bref_match(base_name, "textureCube", g.t.src)) {
+		return glsl_alias_from_name(g, "gl_vec4");
+	};
+	if (bref_match(base_name, "dot", g.t.src) ||
+		bref_match(base_name, "distance", g.t.src) ||
+		bref_match(base_name, "length", g.t.src)) {
+		return type_prim_dummy(g.t, TK_F32);
+	};
+	if (bref_match(base_name, "any", g.t.src) ||
+		bref_match(base_name, "all", g.t.src)) {
+		return type_prim_dummy(g.t, TK_PRIM_BOOL);
+	};
+	if (glsl_is_vec_relational_name(base_name, g.t.src)) {
+		if (has_suffix) {
+			let bvec_suffix_rel = glsl_bvec_from_suffix(g, suffix);
+			if (bvec_suffix_rel != null) { return bvec_suffix_rel; };
+		};
+		let rel_arg0 = call_fn.next;
+		if (rel_arg0 != null) {
+			let rel_arg_ty = glsl_infer_expr_type(g, unwrap(rel_arg0));
+			if (rel_arg_ty != null) {
+				let bvec_arg_rel = glsl_bvec_from_type(g, unwrap(rel_arg_ty));
+				if (bvec_arg_rel != null) { return bvec_arg_rel; };
+			};
+		};
+		return null;
+	};
+	if (bref_match(base_name, "not", g.t.src)) {
+		if (has_suffix) {
+			let bvec_suffix_not = glsl_bvec_from_suffix(g, suffix);
+			if (bvec_suffix_not != null) { return bvec_suffix_not; };
+		};
+		let not_arg0 = call_fn.next;
+		if (not_arg0 != null) {
+			let not_arg_ty = glsl_infer_expr_type(g, unwrap(not_arg0));
+			if (not_arg_ty != null) {
+				if (glsl_type_is_bool(g, unwrap(not_arg_ty))) {
+					return type_prim_dummy(g.t, TK_PRIM_BOOL);
+				};
+				let bvec_arg_not = glsl_bvec_from_type(g, unwrap(not_arg_ty));
+				if (bvec_arg_not != null) { return bvec_arg_not; };
+			};
+		};
+		return null;
+	};
+	if (has_suffix) {
+		let ty = glsl_type_from_suffix(g, suffix);
+		if (ty != null) { return ty; };
+	};
+	let arg = call_fn.next;
+	if (arg != null) { return glsl_infer_expr_type(g, unwrap(arg)); };
+	return null;
+};
+
+fn glsl_infer_bin_type(
+	g: *codegen,
+	op: u16,
+	left: nullable *tnode,
+	right: nullable *tnode
+) nullable *tnode = {
+	if (op == TK_EQ_EQ || op == TK_NE || op == TK_LT || op == TK_GT ||
+		op == TK_LE || op == TK_GE || op == TK_AND || op == TK_OR ||
+		op == TK_LXOR) {
+		return type_prim_dummy(g.t, TK_PRIM_BOOL);
+	};
+	if (left != null && glsl_type_is_non_scalar(g, unwrap(left))) { return left; };
+	if (right != null && glsl_type_is_non_scalar(g, unwrap(right))) { return right; };
+	if (left != null && glsl_type_is_float(g, unwrap(left))) {
+		return type_prim_dummy(g.t, TK_F32);
+	};
+	if (right != null && glsl_type_is_float(g, unwrap(right))) {
+		return type_prim_dummy(g.t, TK_F32);
+	};
+	if (left != null && glsl_type_is_int(g, unwrap(left))) {
+		return type_prim_dummy(g.t, TK_I32);
+	};
+	if (right != null && glsl_type_is_int(g, unwrap(right))) {
+		return type_prim_dummy(g.t, TK_I32);
+	};
+	if (left != null) { return left; };
+	return right;
+};
+
+fn glsl_infer_expr_type(g: *codegen, expr: *tnode) nullable *tnode = {
+	let frames: [64]glsl_infer_frame = [glsl_infer_frame {
+		state = 0,
+		node = expr,
+		left_ty = null,
+	}...];
+	let top: size = 0;
+	let result: nullable *tnode = null;
+
+	frames[top] = glsl_infer_frame { state = GIS_EVAL, node = expr, left_ty = null };
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let f = frames[top];
+		if (f.state == GIS_EVAL) {
+			let n = f.node;
+			if (n.kind == N_ID) {
+				let id_ty = glsl_infer_id_type(g, n.ref);
+				if (id_ty != null && unwrap(id_ty).kind != N_T_ARR) {
+					result = id_ty;
+					continue;
+				};
+			};
+			if (n.kind == N_FLOAT) { result = type_prim_dummy(g.t, TK_F32); continue; };
+			if (n.kind == N_INT) { result = type_prim_dummy(g.t, TK_I32); continue; };
+			if (n.kind == N_BOOL) { result = type_prim_dummy(g.t, TK_PRIM_BOOL); continue; };
+			let inferred = get_expr_type(g, n);
+			if (inferred != null && unwrap(inferred).kind != N_T_ARR) {
+				result = inferred;
+				continue;
+			};
+			if (n.kind == N_CALL) {
+				let call_ty = glsl_infer_gl_call(g, n);
+				if (call_ty != null) { result = call_ty; continue; };
+			};
+			if (n.kind == N_BIN) {
+				if (top >= 64) { abort("type too complex (infer stack overflow)"); };
+				frames[top] = glsl_infer_frame {
+					state = GIS_AFTER_LEFT,
+					node = n,
+					left_ty = null,
+				};
+				top += 1;
+				if (top >= 64) { abort("type too complex (infer stack overflow)"); };
+				frames[top] = glsl_infer_frame {
+					state = GIS_EVAL,
+					node = t_first_nn(n),
+					left_ty = null,
+				};
+				top += 1;
+				continue;
+			};
+			if (n.kind == N_UN) {
+				if (top >= 64) { abort("type too complex (infer stack overflow)"); };
+				frames[top] = glsl_infer_frame {
+					state = GIS_AFTER_RIGHT,
+					node = n,
+					left_ty = null,
+				};
+				top += 1;
+				if (top >= 64) { abort("type too complex (infer stack overflow)"); };
+				frames[top] = glsl_infer_frame {
+					state = GIS_EVAL,
+					node = t_first_nn(n),
+					left_ty = null,
+				};
+				top += 1;
+				continue;
+			};
+			result = null;
+			continue;
+		};
+		if (f.state == GIS_AFTER_LEFT) {
+			let left_ty = result;
+			let right_node = t_next_nn(t_first_nn(f.node));
+			if (top >= 64) { abort("type too complex (infer stack overflow)"); };
+			frames[top] = glsl_infer_frame {
+				state = GIS_AFTER_RIGHT,
+				node = f.node,
+				left_ty = left_ty,
+			};
+			top += 1;
+			if (top >= 64) { abort("type too complex (infer stack overflow)"); };
+			frames[top] = glsl_infer_frame {
+				state = GIS_EVAL,
+				node = right_node,
+				left_ty = null,
+			};
+			top += 1;
+			continue;
+		};
+	if (f.state == GIS_AFTER_RIGHT) {
+		let node = f.node;
+		if (node.kind == N_UN) {
+			if (node.ival == TK_BANG: i64) {
+				result = type_prim_dummy(g.t, TK_PRIM_BOOL);
+			};
+			continue;
+		};
+		result = glsl_infer_bin_type(g, node.ival: u16, f.left_ty, result);
+		continue;
+	};
+	};
+	if (result != null && unwrap(result).kind == N_T_ARR) { return null; };
+	return result;
+};
+
+fn glsl_emit_asgn_op(g: *codegen, tk: u16) void = {
+	if (tk == TK_EQ) { e_assign(&g.em); return; };
+	if (tk == TK_PLUS_EQ) { emit_s(&g.em, " += "); return; };
+	if (tk == TK_MINUS_EQ) { emit_s(&g.em, " -= "); return; };
+	if (tk == TK_STAR_EQ) { emit_s(&g.em, " *= "); return; };
+	if (tk == TK_SLASH_EQ) { emit_s(&g.em, " /= "); return; };
+	if (tk == TK_PERCENT_EQ) { emit_s(&g.em, " %= "); return; };
+	glsl_err(g, bref_empty(), "assignment operator not supported in GLSL");
+};
+
+fn glsl_split_suffix(
+	r: bref,
+	src: *[*]u8,
+	base_out: *bref,
+	suffix_out: *bref
+) bool = {
+	if (r.length == 0) { return false; };
+	let start = r.pos;
+	let end = r.pos + r.length;
+	let i = end;
+	for (i > start) {
+		i -= 1;
+		if (src[i] == '_') { break; };
+	};
+	if (i > start && i + 1 < end) {
+		base_out.pos = start;
+		base_out.length = i - start;
+		suffix_out.pos = i + 1;
+		suffix_out.length = end - (i + 1);
+		return true;
+	};
+	if (r.length < 2) { return false; };
+	let s_len: size = 0;
+	if (r.length >= 2) {
+		suffix_out.pos = end - 2;
+		suffix_out.length = 2;
+		if (glsl_is_builtin_suffix(*suffix_out, src)) {
+			s_len = 2;
+		};
+	};
+	if (s_len == 0) {
+		suffix_out.pos = end - 1;
+		suffix_out.length = 1;
+		if (glsl_is_builtin_suffix(*suffix_out, src)) {
+			s_len = 1;
+		};
+	};
+	if (s_len == 0 || r.length <= s_len) { return false; };
+	base_out.pos = start;
+	base_out.length = r.length - s_len;
+	return true;
+};
+
+fn glsl_is_builtin_suffix(r: bref, src: *[*]u8) bool = {
+	if (bref_match(r, "f", src)) { return true; };
+	if (bref_match(r, "v2", src)) { return true; };
+	if (bref_match(r, "v3", src)) { return true; };
+	if (bref_match(r, "v4", src)) { return true; };
+	if (bref_match(r, "m2", src)) { return true; };
+	if (bref_match(r, "m3", src)) { return true; };
+	if (bref_match(r, "m4", src)) { return true; };
+	if (bref_match(r, "i2", src)) { return true; };
+	if (bref_match(r, "i3", src)) { return true; };
+	if (bref_match(r, "i4", src)) { return true; };
+	if (bref_match(r, "b2", src)) { return true; };
+	if (bref_match(r, "b3", src)) { return true; };
+	if (bref_match(r, "b4", src)) { return true; };
+	if (bref_match(r, "f32", src)) { return true; };
+	if (glsl_is_vec_type(r, src)) { return true; };
+	if (glsl_is_mat_type(r, src)) { return true; };
+	if (glsl_is_ivec_type(r, src)) { return true; };
+	if (glsl_is_bvec_type(r, src)) { return true; };
+	return false;
+};
+
+fn glsl_is_gl_builtin_base_name(r: bref, src: *[*]u8) bool = {
+	if (bref_match(r, "radians", src)) { return true; };
+	if (bref_match(r, "degrees", src)) { return true; };
+	if (bref_match(r, "sin", src)) { return true; };
+	if (bref_match(r, "cos", src)) { return true; };
+	if (bref_match(r, "tan", src)) { return true; };
+	if (bref_match(r, "asin", src)) { return true; };
+	if (bref_match(r, "acos", src)) { return true; };
+	if (bref_match(r, "atan", src)) { return true; };
+	if (bref_match(r, "atan2", src)) { return true; };
+	if (bref_match(r, "pow", src)) { return true; };
+	if (bref_match(r, "exp", src)) { return true; };
+	if (bref_match(r, "log", src)) { return true; };
+	if (bref_match(r, "exp2", src)) { return true; };
+	if (bref_match(r, "log2", src)) { return true; };
+	if (bref_match(r, "sqrt", src)) { return true; };
+	if (bref_match(r, "inversesqrt", src)) { return true; };
+	if (bref_match(r, "abs", src)) { return true; };
+	if (bref_match(r, "sign", src)) { return true; };
+	if (bref_match(r, "floor", src)) { return true; };
+	if (bref_match(r, "ceil", src)) { return true; };
+	if (bref_match(r, "fract", src)) { return true; };
+	if (bref_match(r, "mod", src)) { return true; };
+	if (bref_match(r, "min", src)) { return true; };
+	if (bref_match(r, "max", src)) { return true; };
+	if (bref_match(r, "clamp", src)) { return true; };
+	if (bref_match(r, "mix", src)) { return true; };
+	if (bref_match(r, "step", src)) { return true; };
+	if (bref_match(r, "smoothstep", src)) { return true; };
+	if (bref_match(r, "length", src)) { return true; };
+	if (bref_match(r, "distance", src)) { return true; };
+	if (bref_match(r, "dot", src)) { return true; };
+	if (bref_match(r, "cross", src)) { return true; };
+	if (bref_match(r, "normalize", src)) { return true; };
+	if (bref_match(r, "faceforward", src)) { return true; };
+	if (bref_match(r, "reflect", src)) { return true; };
+	if (bref_match(r, "refract", src)) { return true; };
+	if (bref_match(r, "matrixCompMult", src)) { return true; };
+	if (bref_match(r, "lessThan", src)) { return true; };
+	if (bref_match(r, "lessThanEqual", src)) { return true; };
+	if (bref_match(r, "greaterThan", src)) { return true; };
+	if (bref_match(r, "greaterThanEqual", src)) { return true; };
+	if (bref_match(r, "equal", src)) { return true; };
+	if (bref_match(r, "notEqual", src)) { return true; };
+	if (bref_match(r, "any", src)) { return true; };
+	if (bref_match(r, "all", src)) { return true; };
+	if (bref_match(r, "not", src)) { return true; };
+	if (bref_match(r, "texture2D", src)) { return true; };
+	if (bref_match(r, "texture2D_bias", src)) { return true; };
+	if (bref_match(r, "textureCube", src)) { return true; };
+	return false;
+};
+
+fn glsl_resolve_gl_builtin_name(
+	name: bref,
+	src: *[*]u8,
+	out: *bref
+) bool = {
+	if (glsl_is_gl_builtin_base_name(name, src)) {
+		out.pos = name.pos;
+		out.length = name.length;
+		return true;
+	};
+	let base = bref_empty();
+	let suffix = bref_empty();
+	if (glsl_split_suffix(name, src, &base, &suffix)) {
+		if (glsl_is_gl_builtin_base_name(base, src) &&
+			glsl_is_builtin_suffix(suffix, src)) {
+			out.pos = base.pos;
+			out.length = base.length;
+			return true;
+		};
+	};
+	return false;
+};
+
+fn glsl_emit_gl_builtin_name(g: *codegen, member: bref) void = {
+	let emit_name = bref_empty();
+	if (!glsl_resolve_gl_builtin_name(member, g.t.src, &emit_name)) {
+		glsl_err(g, member, "unknown gl:: builtin function");
+	};
+	if (bref_match(emit_name, "atan2", g.t.src)) { emit_s(&g.em, "atan"); return; };
+	if (bref_match(emit_name, "texture2D_bias", g.t.src)) {
+		emit_s(&g.em, "texture2D");
+		return;
+	};
+	e_bref(&g.em, emit_name);
+};
+
+fn glsl_validate_struct_lit_fields(g: *codegen, lit: *tnode, struct_ty: *tnode) void = {
+	let field_opt = t_first(lit);
+	for (field_opt != null) {
+		let field: *tnode = unwrap(field_opt);
+		let struct_field_opt = t_first(struct_ty);
+		let found = false;
+		for (struct_field_opt != null) {
+			let struct_field: *tnode = unwrap(struct_field_opt);
+			if (bref_eq(struct_field.ref, field.ref, g.t.src)) {
+				found = true;
+				break;
+			};
+			struct_field_opt = struct_field.next;
+		};
+		if (!found) {
+			glsl_err(g, field.ref, "unknown field in struct literal");
+		};
+		field_opt = field.next;
+	};
+};
+
+fn glsl_emit_struct_lit(g: *codegen, n: *tnode) void = {
+	let type_ref = glsl_resolve_gl_type_ref(g, n.ref);
+	let ty_ptr = dict_get_bref(&g.types, type_ref);
+	if (ty_ptr == 0) {
+		glsl_err(g, n.ref, "unknown struct type in literal");
+	};
+	let ty = ty_ptr: uintptr: *tnode;
+	if (ty.kind == N_T_ALIAS) {
+		let resolved = resolve_alias_type(g, ty);
+		if (resolved != null) { ty = unwrap(resolved); };
+	};
+	if (ty.kind != N_T_STRUCT) {
+		glsl_err(g, n.ref, "struct literal requires struct type");
+	};
+	if ((n.flags & F_VARIADIC) != 0 && t_first(n) != null) {
+		glsl_err(g, n.ref, "struct literal fill must be the only entry");
+	};
+	glsl_validate_struct_lit_fields(g, n, ty);
+	if ((n.flags & F_VARIADIC) != 0) {
+		check_struct_lit_nonnullable_ptr_fields(g, n);
+		glsl_emit_zero_struct(g, type_ref, ty);
+		return;
+	};
+	glsl_emit_type_name(g, type_ref);
+	e_c(&g.em, '(');
+	let el = el_start(&g.em);
+	let fopt = t_first(ty);
+	for (fopt != null) {
+		let f: *tnode = unwrap(fopt);
+		let f_lit_opt = struct_lit_find_field(n, f.ref, g.t.src);
+		if (f_lit_opt == null) {
+			glsl_err(g, n.ref, "struct literal must specify all fields or use Type{...}");
+		};
+		el_sep(&el);
+		let f_lit = unwrap(f_lit_opt);
+		glsl_expr(g, t_first_nn(f_lit));
+		fopt = f.next;
+	};
+	e_c(&g.em, ')');
+};
+
+fn glsl_float_is_zero(r: bref, src: *[*]u8) bool = {
+	let end = r.length;
+	if (end >= 3) {
+		let b0 = src[r.pos + end - 3];
+		let b1 = src[r.pos + end - 2];
+		let b2 = src[r.pos + end - 1];
+		if (b0 == 'f' && b1 == '3' && b2 == '2') { end -= 3; };
+		if (b0 == 'f' && b1 == '6' && b2 == '4') { end -= 3; };
+	};
+	for (let i = 0z; i < end; i += 1) {
+		let c = src[r.pos + i];
+		if (c >= '1' && c <= '9') { return false; };
+	};
+	return true;
+};
+
+fn glsl_expr_is_zero(g: *codegen, expr: *tnode) bool = {
+	let stack: [64]uintptr = [0...];
+	let top: size = 0;
+	stack[top] = expr: uintptr;
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let cur: *tnode = stack[top]: *tnode;
+		if (cur.kind == N_INT) {
+			if (cur.ival != 0) { return false; };
+			continue;
+		};
+		if (cur.kind == N_FLOAT) {
+			if (!glsl_float_is_zero(cur.ref, g.t.src)) { return false; };
+			continue;
+		};
+		if (cur.kind == N_BOOL) {
+			if (cur.ival != 0) { return false; };
+			continue;
+		};
+		if (cur.kind == N_CAST) {
+			if (top >= 64) {
+				abort("type too complex (zero init check overflow)");
+			};
+			stack[top] = t_first_nn(cur): uintptr;
+			top += 1;
+			continue;
+		};
+		if (cur.kind == N_UN && cur.ival == TK_MINUS: i64) {
+			let inner = t_first(cur);
+			if (inner == null) { return false; };
+			if (top >= 64) {
+				abort("type too complex (zero init check overflow)");
+			};
+			stack[top] = unwrap(inner): uintptr;
+			top += 1;
+			continue;
+		};
+		if (cur.kind == N_STRUCT_LIT) {
+			if ((cur.flags & F_VARIADIC) != 0) { continue; };
+			let ty_ptr = dict_get_bref(&g.types, cur.ref);
+			if (ty_ptr == 0) { return false; };
+			let ty = ty_ptr: uintptr: *tnode;
+			match (resolve_alias_type(g, ty)) {
+			case let resolved: *tnode => ty = resolved;
+			case null => void;
+			};
+			if (ty.kind != N_T_STRUCT) { return false; };
+			let fopt = t_first(ty);
+			for (fopt != null) {
+				let f: *tnode = unwrap(fopt);
+				let f_lit_opt = struct_lit_find_field(cur, f.ref, g.t.src);
+				if (f_lit_opt == null) {
+					glsl_err(g, cur.ref, "struct literal missing field");
+				};
+				if (top >= 64) {
+					abort("type too complex (zero init check overflow)");
+				};
+				stack[top] = t_first_nn(unwrap(f_lit_opt)): uintptr;
+				top += 1;
+				fopt = f.next;
+			};
+			continue;
+		};
+		return false;
+	};
+	return true;
+};
+
+fn glsl_emit_arr_lit(g: *codegen, arr_ty: *tnode, n: *tnode) void = {
+	let elem = t_first(arr_ty);
+	if (elem == null) { glsl_err(g, n.ref, "array literal missing element type"); };
+	let size_node = unwrap(elem).next;
+	if (size_node == null) { glsl_err(g, n.ref, "array size is required in GLSL"); };
+	let sn: *tnode = unwrap(size_node);
+	let size_val: i64 = 0;
+	if (!glsl_array_size_value(g, arr_ty, &size_val)) {
+		glsl_err(g, n.ref, "array size must be constant in GLSL");
+	};
+	let elem_count = arr_lit_count(n);
+	if (elem_count: i64 > size_val) {
+		glsl_err(g, n.ref, "array literal has more elements than size");
+	};
+	let use_fill = (n.flags & F_VARIADIC) != 0;
+	if (!use_fill && elem_count: i64 < size_val) {
+		glsl_err(g, n.ref, "array literal missing elements (use ... or provide all elements)");
+	};
+	let fill_expr = t_last(n);
+	if (use_fill && fill_expr == null) {
+		glsl_err(g, n.ref, "variadic array literal requires value");
+	};
+	glsl_emit_type(g, unwrap(elem));
+	emit_s(&g.em, "[");
+	glsl_emit_array_size(g, sn);
+	emit_s(&g.em, "](");
+	let el = el_start(&g.em);
+	let item = t_first(n);
+	for (item != null) {
+		el_sep(&el);
+		glsl_expr(g, unwrap(item));
+		item = unwrap(item).next;
+	};
+	if (use_fill && elem_count: i64 < size_val) {
+		let fill_nn = unwrap(fill_expr);
+		for (let i: i64 = elem_count: i64; i < size_val; i += 1) {
+			el_sep(&el);
+			glsl_expr(g, fill_nn);
+		};
+	};
+	e_c(&g.em, ')');
+};
+
+fn glsl_emit_zero_array(g: *codegen, arr_ty: *tnode) void = {
+	let elem = t_first(arr_ty);
+	if (elem == null) { glsl_err(g, arr_ty.ref, "array missing element type"); };
+	let size_node = unwrap(elem).next;
+	if (size_node == null) { glsl_err(g, arr_ty.ref, "array size is required in GLSL"); };
+	let size_val: i64 = 0;
+	if (!arr_size_literal(arr_ty, g.t.src, &size_val)) {
+		glsl_err(g, arr_ty.ref, "array size must be constant for zero initialization");
+	};
+	glsl_emit_type(g, unwrap(elem));
+	emit_s(&g.em, "[");
+	glsl_emit_array_size(g, unwrap(size_node));
+	emit_s(&g.em, "](");
+	let el = el_start(&g.em);
+	for (let i: i64 = 0; i < size_val; i += 1) {
+		el_sep(&el);
+		glsl_emit_zero_for_type(g, unwrap(elem));
+	};
+	e_c(&g.em, ')');
+};
+
+fn glsl_emit_zero_struct(g: *codegen, type_name: bref, struct_ty: *tnode) void = {
+	glsl_emit_type_name(g, type_name);
+	e_c(&g.em, '(');
+	let el = el_start(&g.em);
+	let field_opt = t_first(struct_ty);
+	for (field_opt != null) {
+		let field: *tnode = unwrap(field_opt);
+		el_sep(&el);
+		match (t_first(field)) {
+		case let field_ty: *tnode =>
+			glsl_emit_zero_for_type(g, field_ty);
+		case null =>
+			emit_s(&g.em, "0");
+		};
+		field_opt = field.next;
+	};
+	e_c(&g.em, ')');
+};
+
+fn glsl_emit_zero_for_type(g: *codegen, ty: *tnode) void = {
+	let t = ty;
+	for (true) {
+		if (t.kind != N_T_QUAL) { break; };
+		if (!bref_match(t.ref, "gl", g.t.src)) {
+			glsl_err(g, t.ref, "qualified types are not supported in GLSL");
+		};
+		let member = t_first_nn(t);
+		let end = member.ref.pos + member.ref.length;
+		let qual_ref = bref_new(t.ref.pos, end - t.ref.pos);
+		let qual_base_ref = glsl_resolve_gl_type_ref(g, qual_ref);
+		t = t_new_ref(g.t, N_T_ALIAS, qual_base_ref);
+	};
+	if (t.kind == N_T_ALIAS) {
+		let info = glsl_parse_qualifier(t.ref, g.t.src);
+		let base = info.base;
+		let scalar_base = base;
+		let stripped = bref_empty();
+		if (glsl_strip_gl_type(base, g.t.src, &stripped)) { scalar_base = stripped; };
+		if (bref_match(scalar_base, "f32", g.t.src) ||
+			bref_match(scalar_base, "float", g.t.src)) {
+			emit_s(&g.em, "0.0");
+			return;
+		};
+		if (bref_match(scalar_base, "i32", g.t.src) ||
+			bref_match(scalar_base, "int", g.t.src)) {
+			emit_s(&g.em, "0");
+			return;
+		};
+		if (bref_match(scalar_base, "bool", g.t.src)) {
+			emit_s(&g.em, "false");
+			return;
+		};
+		let base_ref = glsl_resolve_gl_type_ref(g, base);
+		let base_ptr = dict_get_bref(&g.types, base_ref);
+		if (base_ptr != 0) {
+			let base_ty = base_ptr: uintptr: *tnode;
+			match (resolve_alias_type(g, base_ty)) {
+			case let resolved: *tnode => base_ty = resolved;
+			case null => void;
+			};
+			if (base_ty.kind == N_T_STRUCT) {
+				glsl_emit_zero_struct(g, base_ref, base_ty);
+				return;
+			};
+		};
+		glsl_err(g, t.ref, "unknown type in struct fill");
+	};
+	match (resolve_alias_type(g, t)) {
+	case let resolved: *tnode => t = resolved;
+	case null => void;
+	};
+	if (t.kind == N_T_PRIM) {
+		if (t.ival == TK_PRIM_BOOL: i64 || bref_match(t.ref, "bool", g.t.src)) {
+			emit_s(&g.em, "false");
+			return;
+		};
+		if (t.ival == TK_F32: i64 || bref_match(t.ref, "f32", g.t.src)) {
+			emit_s(&g.em, "0.0");
+			return;
+		};
+		emit_s(&g.em, "0");
+		return;
+	};
+	if (t.kind == N_T_STRUCT) {
+		if (t.ref.length == 0) {
+			glsl_err(g, t.ref, "struct type name required for zero initialization");
+		};
+		glsl_emit_zero_struct(g, t.ref, t);
+		return;
+	};
+	if (t.kind == N_T_ARR) { glsl_emit_zero_array(g, t); return; };
+	if (t.kind == N_T_PTR || t.kind == N_T_SLICE || t.kind == N_T_UARR ||
+		t.kind == N_T_TAGGED || t.kind == N_T_ENUM) {
+		glsl_err(g, t.ref, "type not supported in GLSL target");
+	};
+	emit_s(&g.em, "0");
+};
+
+fn glsl_bin(g: *codegen, n: *tnode) void = {
+	let left = t_first_nn(n);
+	let right = t_next_nn(left);
+	e_c(&g.em, '(');
+	glsl_expr(g, left);
+	e_sp(&g.em);
+	glsl_emit_binop(g, n.ival: u16);
+	e_sp(&g.em);
+	glsl_expr(g, right);
+	e_paren_close(&g.em);
+};
+
+fn glsl_un(g: *codegen, n: *tnode) void = {
+	let inner = t_first_nn(n);
+	if (n.ival == TK_STAR: i64 || n.ival == TK_AMP: i64) {
+		glsl_err(g, n.ref, "pointers are not supported in GLSL");
+	};
+	e_c(&g.em, '(');
+	glsl_emit_unop(g, n.ival: u16);
+	glsl_expr(g, inner);
+	e_paren_close(&g.em);
+};
+
+fn glsl_call(g: *codegen, n: *tnode) void = {
+	let func = t_first_nn(n);
+	let fn_node: nullable *tnode = null;
+	if (func.kind == N_ID) {
+		let fn_ptr = dict_get_bref(&g.globals, func.ref);
+		if (fn_ptr != 0) {
+			let candidate: *tnode = fn_ptr: uintptr: *tnode;
+			if (candidate.kind == N_FN) { fn_node = candidate; };
+		};
+	};
+	if (func.kind == N_QUAL_ID) {
+		let mod_ref = bref_empty();
+		let member_ref = bref_empty();
+		if (!qual_id_parts(g, func, &mod_ref, &member_ref) ||
+			!bref_match(mod_ref, "gl", g.t.src)) {
+			glsl_err(g, func.ref, "unsupported call target in GLSL");
+			return;
+		};
+		glsl_emit_gl_builtin_name(g, member_ref);
+	} else if (func.kind == N_ID) {
+		e_bref(&g.em, func.ref);
+	} else {
+		glsl_err(g, func.ref, "unsupported call target in GLSL");
+	};
+	e_c(&g.em, '(');
+	let el = el_start(&g.em);
+	let arg = func.next;
+	let param_opt: nullable *tnode = null;
+	match (fn_node) {
+	case let fn_def: *tnode => param_opt = g_skip_symbol(fn_def);
+	case null => void;
+	};
+	for (true) {
+		let info = call_arg_next(g, func.ref, &param_opt, &arg);
+		if (info.arg == null) { break; };
+		el_sep(&el);
+		glsl_expr(g, unwrap(info.arg));
+	};
+	e_c(&g.em, ')');
+};
+
+fn glsl_cast(g: *codegen, n: *tnode) void = {
+	let inner = t_first_nn(n);
+	let ty = inner.next;
+	glsl_emit_type(g, unwrap(ty));
+	e_c(&g.em, '(');
+	glsl_expr(g, inner);
+	e_paren_close(&g.em);
+};
+
+fn glsl_idx(g: *codegen, n: *tnode) void = {
+	let base = t_first_nn(n);
+	let idx = t_next_nn(base);
+	glsl_expr(g, base);
+	e_c(&g.em, '[');
+	glsl_expr(g, idx);
+	e_c(&g.em, ']');
+};
+
+fn glsl_mat_col_index(r: bref, src: *[*]u8) i64 = {
+	if (bref_match(r, "col0", src)) { return 0; };
+	if (bref_match(r, "col1", src)) { return 1; };
+	if (bref_match(r, "col2", src)) { return 2; };
+	if (bref_match(r, "col3", src)) { return 3; };
+	return -1;
+};
+
+fn glsl_fld(g: *codegen, n: *tnode) void = {
+	let base = t_first_nn(n);
+	let base_ty = glsl_infer_expr_type(g, base);
+	if (base_ty != null) {
+		let ty = unwrap(base_ty);
+		if (ty.kind == N_T_ALIAS) {
+			let base_name = glsl_parse_qualifier(ty.ref, g.t.src).base;
+			if (glsl_is_mat_type(base_name, g.t.src)) {
+				let col_idx = glsl_mat_col_index(n.ref, g.t.src);
+				if (col_idx >= 0) {
+					glsl_expr(g, base);
+					ef1_i(&g.em, "[%]", col_idx);
+					return;
+				};
+			};
+		};
+	};
+	glsl_expr(g, base);
+	e_c(&g.em, '.');
+	e_bref(&g.em, n.ref);
+};
+
+fn glsl_expr_simple(g: *codegen, n: *tnode, k: u16) bool = {
+	if (k == N_INT) { glsl_emit_int(g, n); return true; };
+	if (k == N_FLOAT) { glsl_emit_float(g, n); return true; };
+	if (k == N_BOOL) { glsl_emit_bool(g, n); return true; };
+	if (k == N_ID) { e_bref(&g.em, n.ref); return true; };
+	return false;
+};
+
+fn glsl_expr_complex(g: *codegen, n: *tnode, k: u16) bool = {
+	if (k == N_BIN) { glsl_bin(g, n); return true; };
+	if (k == N_UN) { glsl_un(g, n); return true; };
+	if (k == N_CALL) { glsl_call(g, n); return true; };
+	if (k == N_CAST) { glsl_cast(g, n); return true; };
+	if (k == N_IDX) { glsl_idx(g, n); return true; };
+	if (k == N_FLD) { glsl_fld(g, n); return true; };
+	if (k == N_STRUCT_LIT) { glsl_emit_struct_lit(g, n); return true; };
+	if (k == N_ARR_LIT) {
+		glsl_err(g, n.ref, "array literals require explicit array type");
+		return true;
+	};
+	if (k == N_NULL || k == N_CHAR || k == N_STR || k == N_RAWSTR) {
+		glsl_err(g, n.ref, "literal type not supported in GLSL");
+		return true;
+	};
+	if (k == N_LEN || k == N_SIZE || k == N_ASSERT || k == N_ABORT ||
+		k == N_MATCH || k == N_SWITCH || k == N_SLICE || k == N_IS) {
+		glsl_err(g, n.ref, "expression not supported in GLSL target");
+		return true;
+	};
+	return false;
+};
+
+fn glsl_expr(g: *codegen, n: *tnode) void = {
+	let k = n.kind: u16;
+	if (glsl_expr_simple(g, n, k)) { return; };
+	if (glsl_expr_complex(g, n, k)) { return; };
+	glsl_err(g, n.ref, "unsupported expression in GLSL target");
+};
+
+fn glsl_stmt(g: *codegen, n: *tnode) void = {
+	let k = n.kind;
+	if (k == N_LET) { glsl_let(g, n, true); return; };
+	if (k == N_RET) { glsl_ret(g, n); return; };
+	if (k == N_IF) { glsl_if(g, n); return; };
+	if (k == N_FOR) { glsl_for(g, n); return; };
+	if (k == N_BLOCK) { glsl_block(g, n); return; };
+	if (k == N_ASGN) { glsl_asgn(g, n); return; };
+	if (k == N_BREAK) { emit_s(&g.em, "break"); e_stmt_end(&g.em); return; };
+	if (k == N_CONTINUE) { emit_s(&g.em, "continue"); e_stmt_end(&g.em); return; };
+	if (k == N_EXPR_STMT) {
+		let expr = t_first_nn(n);
+		glsl_expr(g, expr);
+		e_stmt_end(&g.em);
+		return;
+	};
+	glsl_err(g, n.ref, "statement not supported in GLSL target");
+};
+
+fn glsl_block(g: *codegen, n: *tnode) void = {
+	e_block_start(&g.em);
+	let stmt = t_first(n);
+	for (stmt != null) {
+		glsl_stmt(g, unwrap(stmt));
+		stmt = unwrap(stmt).next;
+	};
+	e_block_end(&g.em);
+};
+
+fn glsl_if(g: *codegen, n: *tnode) void = {
+	let cond = t_first_nn(n);
+	let then_block = t_next_nn(cond);
+	e_if(&g.em);
+	glsl_expr(g, cond);
+	e_paren_close_sp(&g.em);
+	glsl_block(g, then_block);
+	let else_part = then_block.next;
+	if (else_part != null) {
+		e_else(&g.em);
+		if (unwrap(else_part).kind == N_IF) {
+			e_if(&g.em);
+			let econd = t_first_nn(unwrap(else_part));
+			glsl_expr(g, econd);
+			e_paren_close_sp(&g.em);
+			let eblock = t_next_nn(econd);
+			glsl_block(g, eblock);
+			return;
+		};
+		e_sp(&g.em);
+		glsl_block(g, unwrap(else_part));
+	};
+};
+
+fn glsl_for(g: *codegen, n: *tnode) void = {
+	if ((n.flags & F_NULLABLE) != 0) {
+		emit_s(&g.em, "while (");
+		glsl_expr(g, t_first_nn(n));
+		e_paren_close_sp(&g.em);
+		let while_body = t_next_nn(t_first_nn(n));
+		glsl_block(g, while_body);
+		return;
+	};
+	e_for(&g.em);
+	let child = t_first(n);
+	if ((n.ival & 1) != 0) {
+		match (child) {
+		case let init: *tnode =>
+			if (init.kind == N_LET) {
+				glsl_let(g, init, false);
+			} else {
+				glsl_expr(g, init);
+			};
+		case null => void;
+		};
+	};
+	e_c(&g.em, ';');
+	e_sp(&g.em);
+	if ((n.ival & 2) != 0 && child != null) {
+		let cond = unwrap(child).next;
+		if (cond != null) { glsl_expr(g, unwrap(cond)); };
+	};
+	e_c(&g.em, ';');
+	e_sp(&g.em);
+	if ((n.ival & 4) != 0 && child != null) {
+		let after = unwrap(child).next;
+		if ((n.ival & 2) != 0 && after != null) { after = unwrap(after).next; };
+		if (after != null) {
+			if (unwrap(after).kind == N_ASGN) {
+				let a = unwrap(after);
+				let lhs = t_first_nn(a);
+				let rhs = t_next_nn(lhs);
+				glsl_emit_asgn_expr(g, lhs, rhs, a.ival: u16);
+			} else {
+				glsl_expr(g, unwrap(after));
+			};
+		};
+	};
+	e_paren_close_sp(&g.em);
+	let body = n.last_child;
+	if (body != null) { glsl_block(g, unwrap(body)); };
+};
+
+fn glsl_asgn(g: *codegen, n: *tnode) void = {
+	let lhs = t_first_nn(n);
+	let rhs = t_next_nn(lhs);
+	glsl_emit_asgn_expr(g, lhs, rhs, n.ival: u16);
+	e_stmt_end(&g.em);
+};
+
+fn glsl_emit_asgn_expr(g: *codegen, lhs: *tnode, rhs: *tnode, op: u16) void = {
+	glsl_expr(g, lhs);
+	glsl_emit_asgn_op(g, op);
+	glsl_expr(g, rhs);
+};
+
+fn glsl_ret(g: *codegen, n: *tnode) void = {
+	let val = t_first(n);
+	if (val == null) {
+		emit_s(&g.em, "return");
+		e_stmt_end(&g.em);
+		return;
+	};
+	emit_s(&g.em, "return ");
+	glsl_expr(g, unwrap(val));
+	e_stmt_end(&g.em);
+};
+
+fn glsl_is_builtin_var_name(r: bref, src: *[*]u8) bool = {
+	return bref_match(r, "gl_Position", src) ||
+		bref_match(r, "gl_PointSize", src) ||
+		bref_match(r, "gl_FragColor", src) ||
+		bref_match(r, "gl_FragCoord", src) ||
+		bref_match(r, "gl_FrontFacing", src);
+};
+
+fn glsl_global_qual_from_flags(g: *codegen, n: *tnode) i64 = {
+	let qual: i64 = GLSL_QUAL_NONE;
+	if ((n.flags & F_GLSL_ATTRIBUTE) != 0) { qual = GLSL_QUAL_ATTRIBUTE; };
+	if ((n.flags & F_GLSL_UNIFORM) != 0) {
+		if (qual != GLSL_QUAL_NONE) {
+			glsl_err(g, n.ref, "only one of #[attribute]/#[uniform]/#[varying]/#[builtin] is allowed");
+		};
+		qual = GLSL_QUAL_UNIFORM;
+	};
+	if ((n.flags & F_GLSL_VARYING) != 0) {
+		if (qual != GLSL_QUAL_NONE) {
+			glsl_err(g, n.ref, "only one of #[attribute]/#[uniform]/#[varying]/#[builtin] is allowed");
+		};
+		qual = GLSL_QUAL_VARYING;
+	};
+	if ((n.flags & F_GLSL_BUILTIN) != 0) {
+		if (qual != GLSL_QUAL_NONE) {
+			glsl_err(g, n.ref, "only one of #[attribute]/#[uniform]/#[varying]/#[builtin] is allowed");
+		};
+		qual = GLSL_QUAL_BUILTIN;
+	};
+	return qual;
+};
+
+fn glsl_base_type_ref(g: *codegen, ty: *tnode) bref = {
+	let t = ty;
+	match (resolve_alias_type(g, t)) {
+	case let resolved: *tnode => t = resolved;
+	case null => void;
+	};
+	let ref = t.ref;
+	if (t.kind == N_T_QUAL) {
+		let member = t_first(t);
+		if (member != null) { ref = unwrap(member).ref; };
+	};
+	if (ref.length == 0) { ref = ty.ref; };
+	let stripped = bref_empty();
+	if (glsl_strip_gl_type(ref, g.t.src, &stripped)) { return stripped; };
+	return ref;
+};
+
+fn glsl_validate_global_qualifier(g: *codegen, name: bref, qual: i64, base: bref) void = {
+	if (glsl_is_builtin_var_name(name, g.t.src) && qual != GLSL_QUAL_BUILTIN) {
+		glsl_err(g, name, "builtin variables must be declared with #[builtin]");
+	};
+	if (qual == GLSL_QUAL_ATTRIBUTE && glsl_stage == GLSL_STAGE_FRAGMENT) {
+		glsl_err(g, name, "attribute is not allowed in fragment shaders");
+	};
+	if (qual == GLSL_QUAL_VARYING) {
+		if (!bref_match(base, "f32", g.t.src) &&
+			!bref_match(base, "float", g.t.src) &&
+			!glsl_is_vec_type(base, g.t.src) &&
+			!glsl_is_mat_type(base, g.t.src)) {
+			glsl_err(g, name, "varying must be float, vec, or mat in GLSL ES 1.00");
+		};
+	};
+	if (glsl_is_sampler_name(base, g.t.src) && qual != GLSL_QUAL_UNIFORM) {
+		glsl_err(g, name, "samplers must be declared as uniform");
+	};
+	if (qual == GLSL_QUAL_BUILTIN) {
+		if (glsl_stage == GLSL_STAGE_VERTEX) {
+			if (bref_match(name, "gl_Position", g.t.src)) {
+				if (!bref_match(base, "vec4", g.t.src)) {
+					glsl_err(g, name, "gl_Position must be vec4");
+				};
+				return;
+			};
+			if (bref_match(name, "gl_PointSize", g.t.src)) {
+				if (!bref_match(base, "f32", g.t.src) &&
+					!bref_match(base, "float", g.t.src)) {
+					glsl_err(g, name, "gl_PointSize must be f32");
+				};
+				return;
+			};
+			glsl_err(g, name, "unknown #[builtin] for vertex shader");
+		} else {
+			if (bref_match(name, "gl_FragColor", g.t.src)) {
+				if (!bref_match(base, "vec4", g.t.src)) {
+					glsl_err(g, name, "gl_FragColor must be vec4");
+				};
+				return;
+			};
+			if (bref_match(name, "gl_FragCoord", g.t.src)) {
+				if (!bref_match(base, "vec4", g.t.src)) {
+					glsl_err(g, name, "gl_FragCoord must be vec4");
+				};
+				return;
+			};
+			if (bref_match(name, "gl_FrontFacing", g.t.src)) {
+				if (!bref_match(base, "bool", g.t.src)) {
+					glsl_err(g, name, "gl_FrontFacing must be bool");
+				};
+				return;
+			};
+			glsl_err(g, name, "unknown #[builtin] for fragment shader");
+		};
+	};
+};
+
+fn glsl_emit_global_decl(g: *codegen, n: *tnode, ty: *tnode) void = {
+	let base_ty = ty;
+	let arr_dim = false;
+	if (ty.kind == N_T_ARR) {
+		arr_dim = true;
+		let elem = t_first(ty);
+		if (elem == null) { glsl_err(g, ty.ref, "array type missing element"); };
+		base_ty = unwrap(elem);
+	};
+	if (base_ty.kind != N_T_ALIAS && base_ty.kind != N_T_PRIM &&
+		base_ty.kind != N_T_QUAL) {
+		glsl_err(g, n.ref, "global variables require explicit GLSL types");
+	};
+	let qual = glsl_global_qual_from_flags(g, n);
+	if (qual == GLSL_QUAL_NONE) {
+		glsl_err(g, n.ref,
+			"global variables must be annotated with #[attribute]/#[uniform]/#[varying]/#[builtin]");
+	};
+	if (base_ty.kind == N_T_ALIAS) {
+		let legacy = glsl_parse_qualifier(base_ty.ref, g.t.src);
+		if (legacy.has_qual) {
+			glsl_err(g, n.ref,
+				"qualifier-prefixed types are deprecated; use #[attribute]/#[uniform]/#[varying]/#[builtin]");
+		};
+	};
+	let base = glsl_base_type_ref(g, base_ty);
+	if (base.length == 0) {
+		glsl_err(g, n.ref, "unable to resolve global type");
+	};
+	glsl_validate_global_qualifier(g, n.ref, qual, base);
+	if (qual == GLSL_QUAL_ATTRIBUTE && arr_dim) {
+		glsl_err(g, n.ref, "attribute arrays are not supported in GLSL ES 1.00");
+	};
+	if (qual == GLSL_QUAL_BUILTIN && arr_dim) {
+		glsl_err(g, n.ref, "builtin variables cannot be arrays");
+	};
+	if (qual == GLSL_QUAL_BUILTIN) {
+		return;
+	};
+	if (qual == GLSL_QUAL_ATTRIBUTE) { emit_s(&g.em, "attribute "); }
+	else if (qual == GLSL_QUAL_UNIFORM) { emit_s(&g.em, "uniform "); }
+	else if (qual == GLSL_QUAL_VARYING) { emit_s(&g.em, "varying "); };
+	glsl_emit_type(g, base_ty);
+	ef1_b_raw(&g.em, " %", n.ref);
+	if (arr_dim) { glsl_emit_array_dims(g, ty); };
+	e_stmt_end(&g.em);
+};
+
+fn glsl_global_init_ok(g: *codegen, n: *tnode) bool = {
+	if (n.kind == N_INT && n.ival == 0) { return true; };
+	if (n.kind == N_T_PRIM && bref_match(n.ref, "void", g.t.src)) { return true; };
+	if (n.kind == N_STRUCT_LIT) { return true; };
+	return false;
+};
+
+fn glsl_global(g: *codegen, n: *tnode) void = {
+	if (dict_has_bref(&g.globals, n.ref)) {
+		glsl_err(g, n.ref,
+			"duplicate global variable name (pika does not allow shadowing global names)");
+	};
+	dict_set_bref(&g.globals, n.ref, n: uintptr: u64);
+	let child = t_first(n);
+	let ty: nullable *tnode = null;
+	let init: *tnode = t_first_nn(n);
+	if (child != null && is_type_kind(unwrap(child).kind)) {
+		ty = child;
+		init = t_next_nn(unwrap(child));
+	};
+	if (ty == null) {
+		if (init.kind == N_STRUCT_LIT) {
+			ty = t_new_ref(g.t, N_T_ALIAS, init.ref);
+		} else {
+			glsl_err(g, n.ref, "global variables require explicit type in GLSL");
+		};
+	};
+	glsl_emit_global_decl(g, n, unwrap(ty));
+	if (init.kind == N_STRUCT_LIT && !glsl_expr_is_zero(g, init)) {
+		glsl_err(g, init.ref, "global struct initializer must be zero in GLSL");
+	};
+	if (!glsl_global_init_ok(g, init)) {
+		glsl_err(g, init.ref, "global initializers are not allowed for GLSL inputs");
+	};
+};
+
+fn glsl_def(g: *codegen, n: *tnode) void = {
+	let child = t_first(n);
+	if (child == null || !is_type_kind(unwrap(child).kind)) {
+		glsl_err(g, n.ref, "def requires explicit type in GLSL");
+	};
+	let ty = unwrap(child);
+	let init = t_next_nn(ty);
+	emit_s(&g.em, "const ");
+	glsl_emit_type(g, ty);
+	ef1_b_raw(&g.em, " %", n.ref);
+	glsl_emit_assign_expr(g, init);
+	e_stmt_end(&g.em);
+};
+
+fn glsl_emit_assign_expr(g: *codegen, expr: *tnode) void = {
+	e_assign(&g.em);
+	glsl_expr(g, expr);
+};
+
+fn glsl_let(g: *codegen, n: *tnode, with_semicolon: bool) void = {
+	let child = t_first(n);
+	let ty: nullable *tnode = null;
+	let init: nullable *tnode = null;
+	match (child) {
+	case let c: *tnode =>
+		if (is_type_kind(c.kind)) {
+			ty = c;
+			init = c.next;
+		} else {
+			init = c;
+		};
+	case null => void;
+	};
+	if (ty == null) {
+		if (init != null) { ty = glsl_infer_expr_type(g, unwrap(init)); };
+		if (ty == null) { glsl_err(g, n.ref, "local variables require explicit type in GLSL"); };
+	};
+	let ty_nn = unwrap(ty);
+	vars_register(g, n.ref, ty_nn: uintptr: u64);
+	if (ty_nn.kind == N_T_ALIAS) {
+		let info = glsl_parse_qualifier(ty_nn.ref, g.t.src);
+		if (info.has_qual) {
+			glsl_err(g, n.ref,
+				"qualifier-prefixed types are deprecated; use #[attribute]/#[uniform]/#[varying]/#[builtin]");
+		};
+	};
+		if (ty_nn.kind == N_T_ARR) {
+			let elem = t_first(ty_nn);
+			if (elem == null) { glsl_err(g, n.ref, "array missing element type"); };
+			let arr_init_opt = init;
+			let inferred = (ty_nn.flags & F_INFERRED) != 0;
+		let size_val: i64 = 0;
+		let size_known = false;
+		if (inferred) {
+			if (arr_init_opt == null) {
+				glsl_err(g, n.ref, "inferred array requires array literal initializer");
+			};
+				let init_nn = unwrap(arr_init_opt);
+				if (init_nn.kind != N_ARR_LIT) {
+					glsl_err(g, init_nn.ref, "array initializer must be an array literal");
+				};
+				if ((init_nn.flags & F_VARIADIC) != 0) {
+					glsl_err(g, init_nn.ref, "variadic array literal requires explicit size in GLSL");
+				};
+				size_val = arr_lit_count(init_nn): i64;
+				size_known = true;
+			} else {
+				size_known = glsl_array_size_value(g, ty_nn, &size_val);
+			};
+		glsl_emit_type(g, unwrap(elem));
+		ef1_b_raw(&g.em, " %", n.ref);
+		if (inferred) {
+			ef1_i(&g.em, "[%]", size_val);
+		} else {
+			glsl_emit_array_dims(g, ty_nn);
+		};
+		if (!with_semicolon && arr_init_opt != null) {
+			glsl_err(g, n.ref, "array initializers are not supported in for-init");
+		};
+		if (with_semicolon) { e_stmt_end(&g.em); };
+		if (arr_init_opt == null) { return; };
+		let arr_init = unwrap(arr_init_opt);
+		if (arr_init.kind != N_ARR_LIT) {
+			glsl_err(g, arr_init.ref, "array initializer must be an array literal");
+		};
+		if ((arr_init.flags & F_VARIADIC) != 0 && !size_known) {
+			glsl_err(g, arr_init.ref, "variadic array literal requires constant size");
+		};
+		let elem_count = arr_lit_count(arr_init);
+		if (size_known && elem_count: i64 > size_val) {
+			glsl_err(g, arr_init.ref, "array literal has more elements than size");
+		};
+		let idx: i64 = 0;
+		let item = t_first(arr_init);
+		for (item != null) {
+			e_bref(&g.em, n.ref);
+			ef1_i(&g.em, "[%]", idx);
+			glsl_emit_assign_expr(g, unwrap(item));
+			e_stmt_end(&g.em);
+			idx += 1;
+			item = unwrap(item).next;
+		};
+			if (size_known && elem_count: i64 < size_val) {
+				let fill_expr = t_last(arr_init);
+				let use_fill = (arr_init.flags & F_VARIADIC) != 0;
+				if (use_fill && fill_expr == null) {
+					glsl_err(g, arr_init.ref, "variadic array literal requires value");
+				};
+				if (!use_fill) {
+					glsl_err(g, arr_init.ref, "array literal missing elements (use ... or provide all elements)");
+				};
+				for (let i: i64 = elem_count: i64; i < size_val; i += 1) {
+					e_bref(&g.em, n.ref);
+					ef1_i(&g.em, "[%]", i);
+					glsl_emit_assign_expr(g, unwrap(fill_expr));
+					e_stmt_end(&g.em);
+				};
+			};
+		return;
+	};
+	glsl_emit_type(g, ty_nn);
+	ef1_b_raw(&g.em, " %", n.ref);
+	if (init != null) {
+		glsl_emit_assign_expr(g, unwrap(init));
+	};
+	if (with_semicolon) { e_stmt_end(&g.em); };
+};
+
+fn glsl_param_list(g: *codegen, n: *tnode) void = {
+	e_c(&g.em, '(');
+	let el = el_start(&g.em);
+	let param = t_first(n);
+	for (param != null && unwrap(param).kind == N_PARAM) {
+		let p = unwrap(param);
+		let pty = t_first_nn(p);
+		if (pty.kind == N_T_ARR) {
+			glsl_err(g, p.ref, "array parameters are not supported in GLSL");
+		};
+		let info = glsl_parse_qualifier(pty.ref, g.t.src);
+		if (info.has_qual) {
+			glsl_err(g, p.ref,
+				"qualifier-prefixed types are deprecated; use #[attribute]/#[uniform]/#[varying]/#[builtin]");
+		};
+		el_sep(&el);
+		glsl_emit_type(g, pty);
+		ef1_b_raw(&g.em, " %", p.ref);
+		param = p.next;
+	};
+	e_c(&g.em, ')');
+};
+
+fn glsl_fn_decl(g: *codegen, n: *tnode) void = {
+	if ((n.flags & F_EXTERN) != 0) { return; };
+	if ((n.flags & F_SYMBOL) != 0) {
+		glsl_err(g, n.ref, "@symbol is not supported in GLSL");
+	};
+	let ret = unwrap(g_skip_to_ret(n));
+	glsl_emit_type(g, ret);
+	ef1_b_raw(&g.em, " %", n.ref);
+	glsl_param_list(g, n);
+	e_stmt_end(&g.em);
+};
+
+fn glsl_fn(g: *codegen, n: *tnode) void = {
+	if ((n.flags & F_EXTERN) != 0) { return; };
+	if ((n.flags & F_SYMBOL) != 0) {
+		glsl_err(g, n.ref, "@symbol is not supported in GLSL");
+	};
+	let ret = unwrap(g_skip_to_ret(n));
+	vars_clear(g);
+	let param = t_first(n);
+	for (param != null && unwrap(param).kind == N_PARAM) {
+		let p = unwrap(param);
+		let pty = t_first_nn(p);
+		vars_register(g, p.ref, pty: uintptr: u64);
+		param = p.next;
+	};
+	if (bref_match(n.ref, "main", g.t.src)) {
+		if (!bref_match(ret.ref, "void", g.t.src) && ret.kind != N_T_PRIM) {
+			glsl_err(g, n.ref, "GLSL main must return void");
+		};
+	};
+	glsl_emit_type(g, ret);
+	ef1_b_raw(&g.em, " %", n.ref);
+	glsl_param_list(g, n);
+	e_sp(&g.em);
+	let body = t_next_nn(ret);
+	glsl_block(g, body);
+	e_nl(&g.em);
+	e_nl(&g.em);
+};
+
+fn glsl_typedef(g: *codegen, n: *tnode) void = {
+	let ty = t_first_nn(n);
+	dict_set_bref(&g.types, n.ref, ty: uintptr: u64);
+	if (glsl_is_builtin_type_name(n.ref, g.t.src) ||
+		glsl_is_qualifier_name(n.ref, g.t.src)) {
+		return;
+	};
+	if (ty.kind == N_T_STRUCT) {
+		emit_s(&g.em, "struct ");
+		e_bref(&g.em, n.ref);
+		e_sp(&g.em);
+		e_block_start(&g.em);
+		let field = t_first(ty);
+		for (field != null) {
+			let f = unwrap(field);
+			glsl_emit_type(g, t_first_nn(f));
+			ef1_b_raw(&g.em, " %", f.ref);
+			e_stmt_end(&g.em);
+			field = f.next;
+		};
+		e_block_end(&g.em);
+		e_stmt_end(&g.em);
+		e_nl(&g.em);
+		return;
+	};
+	if (ty.kind == N_T_ENUM || ty.kind == N_T_TAGGED) {
+		glsl_err(g, n.ref, "unsupported type alias in GLSL");
+	};
+	emit_s(&g.em, "#define ");
+	e_bref(&g.em, n.ref);
+	e_sp(&g.em);
+	glsl_emit_type(g, ty);
+	e_nl(&g.em);
+};
+
+fn glsl_use(g: *codegen, n: *tnode) void = {
+	// n.ref is the full path, first_child.ref is the alias
+	if (bref_match(n.ref, "gl", g.t.src)) {
+		register_use_alias(g, n);
+		return;
+	};
+	glsl_err(g, n.ref, "module imports are not supported in GLSL target");
+};
+
+fn glsl_collect_fns(g: *codegen, unit: *tnode) void = {
+	let decl = t_first(unit);
+	for (decl != null) {
+		let d = unwrap(decl);
+		if (d.kind == N_FN) {
+			if (dict_has_bref(&g.funcs, d.ref) ||
+				dict_has_bref(&g.globals, d.ref)) {
+				glsl_err(g, d.ref,
+					"duplicate function name (pika does not allow shadowing global names)");
+			};
+			let ret = g_skip_to_ret(d);
+			if (ret != null) {
+				dict_set_bref(&g.funcs, d.ref, unwrap(ret): uintptr: u64);
+			};
+			dict_set_bref(&g.globals, d.ref, d: uintptr: u64);
+		};
+		decl = d.next;
+	};
+};
+
+fn glsl_collect_defs(g: *codegen, unit: *tnode) void = {
+	let decl = t_first(unit);
+	for (decl != null) {
+		let d = unwrap(decl);
+		if (d.kind == N_DEF) {
+			if (dict_has_bref(&g.globals, d.ref)) {
+				glsl_err(g, d.ref,
+					"duplicate define name (pika does not allow shadowing global names)");
+			};
+			dict_set_bref(&g.globals, d.ref, d: uintptr: u64);
+		};
+		decl = d.next;
+	};
+};
+
+fn glsl_register_gl_type(g: *codegen, name: str) void = {
+	let type_ref = glsl_find_type_bref(g, name);
+	if (type_ref.length == 0) { return; };
+	if (dict_has_bref(&g.globals, type_ref)) {
+		glsl_err(g, type_ref,
+			"duplicate global variable name (pika does not allow shadowing global names)");
+	};
+	let type_ptr = dict_get_bref(&g.types, type_ref);
+	if (type_ptr == 0) { return; };
+	dict_set_bref(&g.globals, type_ref, type_ptr);
+};
+
+fn glsl_register_gl_types(g: *codegen) void = {
+	glsl_register_gl_type(g, "gl_vec2");
+	glsl_register_gl_type(g, "gl_vec3");
+	glsl_register_gl_type(g, "gl_vec4");
+	glsl_register_gl_type(g, "gl_ivec2");
+	glsl_register_gl_type(g, "gl_ivec3");
+	glsl_register_gl_type(g, "gl_ivec4");
+	glsl_register_gl_type(g, "gl_bvec2");
+	glsl_register_gl_type(g, "gl_bvec3");
+	glsl_register_gl_type(g, "gl_bvec4");
+	glsl_register_gl_type(g, "gl_mat2");
+	glsl_register_gl_type(g, "gl_mat3");
+	glsl_register_gl_type(g, "gl_mat4");
+	glsl_register_gl_type(g, "gl_sampler2D");
+	glsl_register_gl_type(g, "gl_samplerCube");
+};
+
+fn pkgen_generate_glsl(g: *codegen, is_fragment: bool) void = {
+	glsl_set_stage(is_fragment);
+	let unit = t_first(g.t.root);
+	if (unit == null) { return; };
+	let uw = unwrap(unit);
+
+	glsl_collect_fns(g, uw);
+	glsl_collect_defs(g, uw);
+
+	emit_s(&g.em, "#version 100\n");
+	emit_s(&g.em, "precision mediump float;\n\n");
+
+	let decl = t_first(uw);
+	for (decl != null) {
+		let use_decl = unwrap(decl);
+		if (use_decl.kind == N_USE) { glsl_use(g, use_decl); };
+		decl = use_decl.next;
+	};
+	let type_decl = t_first(uw);
+	for (type_decl != null) {
+		let type_decl_node = unwrap(type_decl);
+		if (type_decl_node.kind == N_TYPEDEF) { glsl_typedef(g, type_decl_node); };
+		type_decl = type_decl_node.next;
+	};
+	glsl_register_gl_types(g);
+	let def_decl = t_first(uw);
+	for (def_decl != null) {
+		let def_decl_node = unwrap(def_decl);
+		if (def_decl_node.kind == N_DEF) { glsl_def(g, def_decl_node); };
+		def_decl = def_decl_node.next;
+	};
+	let glob_decl = t_first(uw);
+	for (glob_decl != null) {
+		let global_decl = unwrap(glob_decl);
+		if (global_decl.kind == N_GLOBAL) { glsl_global(g, global_decl); };
+		glob_decl = global_decl.next;
+	};
+	e_nl(&g.em);
+	let fn_decl = t_first(uw);
+	for (fn_decl != null) {
+		let fn_decl_node = unwrap(fn_decl);
+		if (fn_decl_node.kind == N_FN) { glsl_fn_decl(g, fn_decl_node); };
+		fn_decl = fn_decl_node.next;
+	};
+	e_nl(&g.em);
+	let fn_def = t_first(uw);
+	for (fn_def != null) {
+		let fn_def_node = unwrap(fn_def);
+		if (fn_def_node.kind == N_FN) { glsl_fn(g, fn_def_node); };
+		fn_def = fn_def_node.next;
+	};
+};

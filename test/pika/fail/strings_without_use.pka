@@ -1,0 +1,5 @@
+// Should fail: must 'use strings;' to use strings module
+export fn _main() void = {
+	let s: str = "hello";
+	let bytes = strings::toutf8(s);
+};

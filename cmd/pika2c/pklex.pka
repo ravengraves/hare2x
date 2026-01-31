@@ -1,0 +1,337 @@
+// pklex.pka - Pika lexical analysis (bytes -> tokens)
+
+fn lex(t: *tree) void = {
+	let pos = 0z;
+	let src = t.src;
+	let slen = t.src_len;
+	let start: size = 0;
+	let c: u8 = 0;
+	let tok_ref: bref = bref_empty();
+	let tok_kind: u16 = 0;
+	let tok_node: *tnode = t.root;
+
+	for (pos < slen) {
+		// Skip whitespace
+		for (pos < slen && is_space(src[pos])) {
+			pos += 1;
+		};
+		if (pos >= slen) {
+			break;
+		};
+
+		// Skip comments
+		if (pos + 1 < slen && src[pos] == '/' && src[pos + 1] == '/') {
+			for (pos < slen && src[pos] != '\n') {
+				pos += 1;
+			};
+			continue;
+		};
+
+		start = pos;
+		c = src[pos];
+
+		// Identifier or keyword
+		if (is_ident_start(c)) {
+			for (pos < slen && is_ident(src[pos])) {
+				pos += 1;
+			};
+			tok_ref = bref_new(start, pos - start);
+			tok_kind = lex_keyword(tok_ref, src);
+			tok_node = t_new_ref(t, tok_kind, tok_ref);
+			t_append(t.root, tok_node);
+			continue;
+		};
+
+		// Number
+		if (is_digit(c)) {
+			tok_kind = lex_number(src, slen, &pos);
+			tok_ref = bref_new(start, pos - start);
+			tok_node = t_new_ref(t, tok_kind, tok_ref);
+			t_append(t.root, tok_node);
+			continue;
+		};
+
+		// String literal
+		if (c == '"') {
+			pos += 1;
+			for (pos < slen && src[pos] != '"') {
+				if (src[pos] == '\\' && pos + 1 < slen) {
+					pos += 1;
+				};
+				pos += 1;
+			};
+			if (pos < slen) {
+				pos += 1;
+			};
+			tok_ref = bref_new(start, pos - start);
+			tok_node = t_new_ref(t, TK_STR, tok_ref);
+			t_append(t.root, tok_node);
+			continue;
+		};
+
+		// Character literal
+		if (c == '\'') {
+			pos += 1;
+			if (pos < slen && src[pos] == '\\' && pos + 1 < slen) {
+				let esc = src[pos + 1];
+				pos += 2;
+				if (esc == 'x') { pos += 2; }
+				else if (esc == 'u' || esc == 'o') { pos += 4; }
+				else if (esc == 'U' || esc == 'O') { pos += 8; };
+			} else if (pos < slen) {
+				pos += 1;
+			};
+			if (pos < slen && src[pos] == '\'') {
+				pos += 1;
+			};
+			tok_ref = bref_new(start, pos - start);
+			tok_node = t_new_ref(t, TK_CHAR, tok_ref);
+			t_append(t.root, tok_node);
+			continue;
+		};
+
+		// Raw string literal (backtick)
+		if (c == '`') {
+			pos += 1;
+			for (pos < slen && src[pos] != '`') { pos += 1; };
+			if (pos < slen) { pos += 1; };
+			tok_ref = bref_new(start, pos - start);
+			tok_node = t_new_ref(t, TK_RAWSTR, tok_ref);
+			t_append(t.root, tok_node);
+			continue;
+		};
+
+		// Operators and punctuation
+		tok_kind = lex_op(src, slen, &pos);
+		tok_ref = bref_new(start, pos - start);
+		tok_node = t_new_ref(t, tok_kind, tok_ref);
+		t_append(t.root, tok_node);
+	};
+};
+
+fn lex_keyword(r: bref, src: *[*]u8) u16 = {
+	let n = r.length;
+	if (n == 2) {
+		if (bref_match(r, "fn", src)) { return TK_FN; };
+		if (bref_match(r, "if", src)) { return TK_IF; };
+	} else if (n == 3) {
+		if (bref_match(r, "let", src)) { return TK_LET; };
+		if (bref_match(r, "for", src)) { return TK_FOR; };
+		if (bref_match(r, "use", src)) { return TK_USE; };
+		if (bref_match(r, "def", src)) { return TK_DEF; };
+	} else if (n == 4) {
+		if (bref_match(r, "else", src)) { return TK_ELSE; };
+		if (bref_match(r, "type", src)) { return TK_TYPE; };
+		if (bref_match(r, "case", src)) { return TK_CASE; };
+		if (bref_match(r, "true", src)) { return TK_TRUE; };
+		if (bref_match(r, "null", src)) { return TK_NULL; };
+		if (bref_match(r, "void", src)) { return TK_VOID; };
+		if (bref_match(r, "enum", src)) { return TK_ENUM; };
+	} else if (n == 5) {
+		if (bref_match(r, "const", src)) { return TK_CONST; };
+		if (bref_match(r, "break", src)) { return TK_BREAK; };
+		if (bref_match(r, "match", src)) { return TK_MATCH; };
+		if (bref_match(r, "false", src)) { return TK_FALSE; };
+		if (bref_match(r, "union", src)) { return TK_UNION; };
+		if (bref_match(r, "yield", src)) { return TK_YIELD; };
+	} else if (n == 6) {
+		if (bref_match(r, "return", src)) { return TK_RETURN; };
+		if (bref_match(r, "switch", src)) { return TK_SWITCH; };
+		if (bref_match(r, "struct", src)) { return TK_STRUCT; };
+		if (bref_match(r, "static", src)) { return TK_STATIC; };
+		if (bref_match(r, "export", src)) { return TK_EXPORT; };
+	} else if (n == 8) {
+		if (bref_match(r, "continue", src)) { return TK_CONTINUE; };
+		if (bref_match(r, "nullable", src)) { return TK_NULLABLE; };
+	};
+	return TK_IDENT;
+};
+
+fn lex_digits_underscore(src: *[*]u8, nbytes: size, pos: *size, base: u8) bool = {
+	let p = *pos;
+	if (p >= nbytes) { return false; };
+	let c0 = src[p];
+	let is_d = false;
+	if (base == 10) {
+		is_d = (c0 >= '0' && c0 <= '9');
+	} else if (base == 16) {
+		is_d = is_hex(c0);
+	} else if (base == 8) {
+		is_d = (c0 >= '0' && c0 <= '7');
+	} else if (base == 2) {
+		is_d = (c0 == '0' || c0 == '1');
+	};
+	if (!is_d) { return false; };
+	let saw_digit = false;
+	let last_underscore = false;
+	for (p < nbytes) {
+		let c = src[p];
+		is_d = false;
+		if (base == 10) {
+			is_d = (c >= '0' && c <= '9');
+		} else if (base == 16) {
+			is_d = is_hex(c);
+		} else if (base == 8) {
+			is_d = (c >= '0' && c <= '7');
+		} else if (base == 2) {
+			is_d = (c == '0' || c == '1');
+		};
+		if (is_d) {
+			saw_digit = true;
+			last_underscore = false;
+			p += 1;
+			continue;
+		};
+		if (c == '_') {
+			last_underscore = true;
+			p += 1;
+			continue;
+		};
+		break;
+	};
+	if (!saw_digit || last_underscore) { return false; };
+	*pos = p;
+	return true;
+};
+
+fn lex_number(src: *[*]u8, nbytes: size, pos: *size) u16 = {
+	let p = *pos;
+	let start = p;
+	let is_float = false;
+	let has_prefix = false;
+
+	// Check for hex/octal/binary
+	if (p + 1 < nbytes && src[p] == '0') {
+		let prefix = src[p + 1];
+		if (prefix == 'x' || prefix == 'X') {
+			has_prefix = true;
+			p += 2;
+			if (!lex_digits_underscore(src, nbytes, &p, 16)) {
+				err_at(start, src, nbytes, "invalid numeric literal");
+			};
+		} else if (prefix == 'o' || prefix == 'O') {
+			has_prefix = true;
+			p += 2;
+			if (!lex_digits_underscore(src, nbytes, &p, 8)) {
+				err_at(start, src, nbytes, "invalid numeric literal");
+			};
+		} else if (prefix == 'b' || prefix == 'B') {
+			has_prefix = true;
+			p += 2;
+			if (!lex_digits_underscore(src, nbytes, &p, 2)) {
+				err_at(start, src, nbytes, "invalid numeric literal");
+			};
+		};
+	};
+
+	if (!has_prefix) {
+		// Decimal part
+		if (!lex_digits_underscore(src, nbytes, &p, 10)) {
+			err_at(start, src, nbytes, "invalid numeric literal");
+		};
+
+		// Float: decimal point
+		if (p < nbytes && src[p] == '.' && p + 1 < nbytes && is_digit(src[p + 1])) {
+			is_float = true;
+			p += 1;
+			if (!lex_digits_underscore(src, nbytes, &p, 10)) {
+				err_at(start, src, nbytes, "invalid numeric literal");
+			};
+		};
+
+		// Float: exponent
+		if (p < nbytes && (src[p] == 'e' || src[p] == 'E')) {
+			is_float = true;
+			p += 1;
+			if (p < nbytes && (src[p] == '+' || src[p] == '-')) {
+				p += 1;
+			};
+			if (!lex_digits_underscore(src, nbytes, &p, 10)) {
+				err_at(start, src, nbytes, "invalid numeric literal");
+			};
+		};
+	};
+
+	// Type suffix
+	let suffix_len: size = 0;
+	let suffix_tok: u16 = 0;
+	if (p < nbytes) {
+		suffix_len = 0;
+		suffix_tok = num_suffix_tok_at(src, p, nbytes - p, &suffix_len);
+		if (suffix_tok != 0) {
+			if (suffix_tok == TK_F32 || suffix_tok == TK_F64) {
+				if (!has_prefix) {
+					is_float = true;
+					p += suffix_len;
+				};
+			} else if (!is_float) {
+				p += suffix_len;
+			};
+		};
+	};
+
+	*pos = p;
+	if (is_float) {
+		return TK_FLOAT;
+	};
+	return TK_INT;
+};
+
+fn lex_op(src: *[*]u8, nbytes: size, pos: *size) u16 = {
+	let p = *pos;
+	let c = src[p];
+
+	// Two-char operators
+	if (p + 1 < nbytes) {
+		let c2 = src[p + 1];
+		if (c == '=' && c2 == '=') { *pos = p + 2; return TK_EQ_EQ; };
+		if (c == '!' && c2 == '=') { *pos = p + 2; return TK_NE; };
+		if (c == '<' && c2 == '=') { *pos = p + 2; return TK_LE; };
+		if (c == '>' && c2 == '=') { *pos = p + 2; return TK_GE; };
+		if (c == '&' && c2 == '&') { *pos = p + 2; return TK_AND; };
+		if (c == '|' && c2 == '|') { *pos = p + 2; return TK_OR; };
+		if (c == '^' && c2 == '^') { *pos = p + 2; return TK_LXOR; };
+		if (c == '<' && c2 == '<') {
+			if (p + 2 < nbytes && src[p + 2] == '=') { *pos = p + 3; return TK_SHL_EQ; };
+			*pos = p + 2; return TK_SHL;
+		};
+		if (c == '>' && c2 == '>') {
+			if (p + 2 < nbytes && src[p + 2] == '=') { *pos = p + 3; return TK_SHR_EQ; };
+			*pos = p + 2; return TK_SHR;
+		};
+		if (c == '=' && c2 == '>') { *pos = p + 2; return TK_ARROW; };
+		if (c == ':' && c2 == ':') { *pos = p + 2; return TK_COLONCOLON; };
+		if (c == '.' && c2 == '.') {
+			if (p + 2 < nbytes && src[p + 2] == '.') { *pos = p + 3; return TK_ELLIPSIS; };
+			*pos = p + 2; return TK_DOTDOT;
+		};
+		if (c == '+' && c2 == '=') { *pos = p + 2; return TK_PLUS_EQ; };
+		if (c == '-' && c2 == '=') { *pos = p + 2; return TK_MINUS_EQ; };
+		if (c == '*' && c2 == '=') { *pos = p + 2; return TK_STAR_EQ; };
+		if (c == '/' && c2 == '=') { *pos = p + 2; return TK_SLASH_EQ; };
+		if (c == '%' && c2 == '=') { *pos = p + 2; return TK_PERCENT_EQ; };
+		if (c == '&' && c2 == '=') { *pos = p + 2; return TK_AMP_EQ; };
+		if (c == '|' && c2 == '=') { *pos = p + 2; return TK_PIPE_EQ; };
+		if (c == '^' && c2 == '=') { *pos = p + 2; return TK_CARET_EQ; };
+	};
+
+	// Single-char operators
+	*pos = p + 1;
+	if (c == '+') { return TK_PLUS; };
+	if (c == '-') { return TK_MINUS; };
+	if (c == '*') { return TK_STAR; };
+	if (c == '/') { return TK_SLASH; };
+	if (c == '%') { return TK_PERCENT; };
+	if (c == '&') { return TK_AMP; };
+	if (c == '|') { return TK_PIPE; };
+	if (c == '^') { return TK_CARET; };
+	if (c == '~') { return TK_TILDE; };
+	if (c == '!') { return TK_BANG; };
+	if (c == '<') { return TK_LT; };
+	if (c == '>') { return TK_GT; };
+	if (c == '=') { return TK_EQ; };
+	if (c == '?') { return TK_QUESTION; };
+
+	// Punctuation (use ASCII values)
+	return c: u16;
+};

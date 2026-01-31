@@ -1,0 +1,15 @@
+// ERROR: yield never is not supported; use abort()
+// Expected: "yield never is not supported; use abort()"
+use rt;
+
+export fn main() void = {
+	let n: i32 = 3;
+	let p: nullable *i32 = &n;
+	let v: i32 = match (p) {
+	case let ptr: *i32 =>
+		yield *ptr;
+	case null =>
+		yield never;
+	};
+	assert(v == 3);
+};

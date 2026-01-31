@@ -1,0 +1,4 @@
+// ERROR: duplicate global variable name
+def x = 32;
+def x = "test";
+let x = 43;

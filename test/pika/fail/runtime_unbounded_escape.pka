@@ -1,0 +1,9 @@
+// RUNTIME ERROR: unbounded array access bypasses bounds checking
+use rt;
+
+export fn _main() void = {
+	let arr: [3]i32 = [1, 2, 3];
+	let p: *[*]i32 = &arr: *[*]i32;  // cast to unbounded array
+	let x = p[0x7FFFFFFF];  // no bounds check - should crash/segfault
+	assert(x != 0);
+};

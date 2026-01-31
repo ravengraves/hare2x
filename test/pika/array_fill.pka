@@ -1,0 +1,28 @@
+// array_fill.pka - Variadic array fill semantics
+use rt;
+
+fn test_zero_fill() void = {
+	let a: [4]i32 = [0...];
+	assert(a[0] == 0, "zero fill[0]");
+	assert(a[3] == 0, "zero fill[3]");
+};
+
+fn test_one_fill() void = {
+	let a: [4]i32 = [1...];
+	assert(a[0] == 1, "one fill[0]");
+	assert(a[3] == 1, "one fill[3]");
+};
+
+fn test_last_fill() void = {
+	let a: [6]i32 = [0, 1, 2, 3...];
+	assert(a[0] == 0, "last fill[0]");
+	assert(a[3] == 3, "last fill[3]");
+	assert(a[4] == 3, "last fill[4]");
+	assert(a[5] == 3, "last fill[5]");
+};
+
+export fn main() void = {
+	test_zero_fill();
+	test_one_fill();
+	test_last_fill();
+};

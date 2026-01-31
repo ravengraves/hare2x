@@ -1,0 +1,7 @@
+// ERROR: cannot switch on slices; use if-else
+fn test() void = {
+	let arr: []i32 = [];
+	switch (arr) {
+	case => void;
+	};
+};

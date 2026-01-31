@@ -1,0 +1,54 @@
+// Test static local variables
+
+use rt;
+
+// Counter using static variable - retains value between calls
+fn counter() i32 = {
+	static let count: i32 = 0;
+	count += 1;
+	return count;
+};
+
+// Static with inferred type
+fn counter2() i32 = {
+	static let n = 100;
+	n += 10;
+	return n;
+};
+
+// Multiple static variables in same function
+fn multi_static() i32 = {
+	static let a: i32 = 0;
+	static let b: i32 = 1000;
+	a += 1;
+	b -= 1;
+	return a + b;
+};
+
+// Static array
+fn get_buffer() *[*]u8 = {
+	static let buf: [64]u8 = [0...];
+	// ERROR on next line: Return type mismatch - &buf[0] is *u8, not *[*]u8
+	// Expected: "/tmp/static.ha:31:15: error: Return type *u8 is not assignable to function result type *[*]u8"
+	// Fix: Cast the array: return &buf: *[*]u8;
+	return &buf[0];
+};
+
+export fn _main() void = {
+	// Test counter - should increment each call
+	let c1 = counter();  // 1
+	let c2 = counter();  // 2
+	let c3 = counter();  // 3
+
+	// Test counter2 - should increment by 10 each call
+	let n1 = counter2();  // 110
+	let n2 = counter2();  // 120
+
+	// Test multi_static
+	let m1 = multi_static();  // 1 + 999 = 1000
+	let m2 = multi_static();  // 2 + 998 = 1000
+
+	// Test static buffer
+	let buf = get_buffer();
+	buf[0] = 42;
+};

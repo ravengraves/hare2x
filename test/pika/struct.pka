@@ -1,0 +1,21 @@
+// struct.pka - struct tests
+
+export type point = struct {
+	x: i32,
+	y: i32,
+};
+
+export type rect = struct {
+	min: point,
+	max: point,
+};
+
+export fn main() void = {
+	let p = point { x = 10, y = 20 };
+	assert(p.x == 10);
+	assert(p.y == 20);
+
+	let r = rect { min = p, max = point { x = 30, y = 40 } };
+	assert(r.min.x == 10);
+	assert(r.max.y == 40);
+};

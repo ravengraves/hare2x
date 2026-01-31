@@ -1,0 +1,29 @@
+// globals.ha - Test global variables
+use rt;
+
+// Global constants
+const MAX_SIZE: i32 = 100;
+const PI: f64 = 3.14159;
+
+// Global mutable variable
+let counter: i32 = 0;
+
+// Static global (not exported)
+let internal_state: i32 = 42;
+
+fn increment() void = {
+	counter += 1;
+};
+
+fn get_internal() i32 = {
+	return internal_state;
+};
+
+export fn main() void = {
+	assert(MAX_SIZE == 100);
+	assert(counter == 0);
+	increment();
+	increment();
+	assert(counter == 2);
+	assert(get_internal() == 42);
+};

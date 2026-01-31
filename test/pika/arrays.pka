@@ -1,0 +1,149 @@
+// arrays.ha - Array, slice, and len() tests
+use rt;
+
+// Sum array elements using len()
+fn sum_with_len(arr: *[*]i32, n: size) i32 = {
+	let total: i32 = 0;
+	for (let i = 0z; i < n; i += 1) {
+		total += arr[i];
+	};
+	return total;
+};
+
+// Find max using len()
+fn find_max(arr: *[*]i32, n: size) i32 = {
+	let max = arr[0];
+	for (let i = 1z; i < n; i += 1) {
+		if (arr[i] > max) {
+			max = arr[i];
+		};
+	};
+	return max;
+};
+
+// Test len() on fixed arrays
+fn test_len_fixed() void = {
+	let arr3: [3]i32 = [10, 20, 30];
+	let arr5: [5]u8 = [1, 2, 3, 4, 5];
+	let arr10: [10]i64 = [0...];
+
+	assert(len(arr3) == 3, "len of 3-elem array");
+	assert(len(arr5) == 5, "len of 5-elem array");
+	assert(len(arr10) == 10, "len of 10-elem array");
+};
+
+// Test len() in expressions
+fn test_len_expr() void = {
+	let data: [8]i32 = [1, 2, 3, 4, 5, 6, 7, 8];
+
+	// Use len() in arithmetic
+	let half = len(data) / 2;
+	assert(half == 4, "half of len");
+
+	let doubled = len(data) * 2;
+	assert(doubled == 16, "double of len");
+
+	// Use len() in loop bounds
+	let sum: i32 = 0;
+	for (let i = 0z; i < len(data); i += 1) {
+		sum += data[i];
+	};
+	assert(sum == 36, "sum via len loop");
+};
+
+// Test slicing with [start..end]
+fn test_slice_basic() void = {
+	let arr: [6]i32 = [10, 20, 30, 40, 50, 60];
+
+	// Get slice starting at index 2
+	let slice = arr[2..];
+	assert(slice[0] == 30, "slice[0]");
+	assert(slice[1] == 40, "slice[1]");
+
+	// Modify through slice
+	slice[0] = 300;
+	assert(arr[2] == 300, "modify via slice");
+};
+
+// Test slice iteration with known length
+fn test_slice_sum() void = {
+	let arr: [5]i32 = [1, 2, 3, 4, 5];
+	let p = &arr: *[*]i32;
+
+	// Sum using pointer and len
+	let sum = sum_with_len(p, len(arr));
+	assert(sum == 15, "slice sum");
+
+	// Find max
+	let max = find_max(p, len(arr));
+	assert(max == 5, "slice max");
+};
+
+// Test partial array processing via slice offset
+fn test_slice_offset() void = {
+	let arr: [10]i32 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+	// Sum first 5 elements
+	let sum_first = sum_with_len(&arr: *[*]i32, 5);
+	assert(sum_first == 15, "first 5 sum");
+
+	// Sum last 5 elements - use slicing
+	let slice_last = arr[5..];
+	let sum_last = sum_with_len(slice_last: *[*]i32, 5);
+	assert(sum_last == 40, "last 5 sum");
+
+	// Sum middle 4 elements - use slicing
+	let slice_mid = arr[3..7];
+	let sum_mid = sum_with_len(slice_mid: *[*]i32, 4);
+	assert(sum_mid == 22, "mid 4 sum");  // 4+5+6+7 = 22
+};
+
+// Test bubble sort with len()
+fn test_sort_with_len() void = {
+	let arr: [5]i32 = [5, 2, 8, 1, 9];
+	let n = len(arr);
+	let p = &arr: *[*]i32;
+
+	// Bubble sort
+	for (let i = 0z; i < n; i += 1) {
+		for (let j = 0z; j < n - 1 - i; j += 1) {
+			if (p[j] > p[j + 1]) {
+				let tmp = p[j];
+				p[j] = p[j + 1];
+				p[j + 1] = tmp;
+			};
+		};
+	};
+
+	assert(arr[0] == 1, "sorted[0]");
+	assert(arr[1] == 2, "sorted[1]");
+	assert(arr[2] == 5, "sorted[2]");
+	assert(arr[3] == 8, "sorted[3]");
+	assert(arr[4] == 9, "sorted[4]");
+};
+
+// Test fill pattern with len()
+fn test_fill_pattern() void = {
+	let arr: [8]i32 = [0...];
+
+	// Fill with index values
+	for (let i = 0z; i < len(arr); i += 1) {
+		arr[i] = (i * i): i32;
+	};
+
+	assert(arr[0] == 0, "fill[0]");
+	assert(arr[1] == 1, "fill[1]");
+	assert(arr[2] == 4, "fill[2]");
+	assert(arr[3] == 9, "fill[3]");
+	assert(arr[7] == 49, "fill[7]");
+};
+
+export fn main() void = {
+	test_len_fixed();
+	test_len_expr();
+	test_slice_basic();
+	test_slice_sum();
+	test_slice_offset();
+	test_sort_with_len();
+	test_fill_pattern();
+};

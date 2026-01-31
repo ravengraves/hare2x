@@ -1,0 +1,34 @@
+// Test: break inside match case without braces
+fn test_break_in_match() void = {
+	let x: nullable *i32 = null;
+	for (true) {
+		match (x) {
+			// ERROR on next line: Invalid cast from *i32 to void
+			// Expected: "/tmp/break_in_match.ha:6:51: error: Invalid cast from *i32 to void"
+			// Fix: Use void value, not cast: case let p: *i32 => void;
+			case let p: *i32 => p:void;
+			case null => break;  // No braces needed
+		};
+	};
+};
+
+// Test: multi-statement case body without braces
+fn test_multiline_case() i32 = {
+	let x: nullable *i32 = null;
+	let result: i32 = 0;
+	match (x) {
+	case let p: *i32 =>
+		result = *p;
+		result = result + 1;
+	case null =>
+		result = 42;
+		result = result * 2;
+	};
+	return result;  // Should be 84
+};
+
+export fn main() void = {
+	test_break_in_match();
+	let r = test_multiline_case();
+	if (r != 84) { abort(); };
+};

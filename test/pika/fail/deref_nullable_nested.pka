@@ -1,0 +1,4 @@
+// ERROR: cannot dereference nullable pointer to get inner pointer
+fn bad(pp: nullable **i32) *i32 = {
+	return *pp;
+};

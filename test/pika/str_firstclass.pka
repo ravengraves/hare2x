@@ -1,0 +1,46 @@
+// Test first-class str type with strings module
+use strings;
+use rt;
+
+fn get_greeting() str = {
+	return "hello";
+};
+
+fn str_length(s: str) size = {
+	let bytes: []u8 = strings::toutf8(s);
+	return len(bytes);
+};
+
+fn make_str(bytes: []u8) str = {
+	return strings::fromutf8_unsafe(bytes);
+};
+
+// Test native string equality operators
+fn compare_strs(a: str, b: str) bool = {
+	return a == b;
+};
+
+export fn main() void = {
+	let greeting = get_greeting();
+	let slen = str_length(greeting);
+
+	// Test via function
+	let eq = compare_strs("abc", "abc");
+	assert(eq);
+	assert(!compare_strs("abc", "abd"));
+
+	// Test direct string literal equality
+	assert("hello" == make_str(['h', 'e', 'l', 'l', 'o']));
+	assert("hello" != "world");
+
+	// Test variable equality
+	let s1: str = "test";
+	let s2: str = "test";
+	let s3: str = "other";
+	assert(s1 == s2);
+	assert(s1 != s3);
+
+	// Test mixed (variable vs literal)
+	assert(greeting == "hello");
+	assert(greeting != "bye");
+};

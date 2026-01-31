@@ -1,0 +1,562 @@
+// gen_js.pka - JavaScript emission utilities
+
+fn js_emit_prelude(g: *codegen) void = {
+	emit_s(&g.em, `// JS backend internals (generated)
+const _pkHasBuf = typeof Buffer !== "undefined";
+const _pkEnc = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
+
+function _pkSliceInfo(val) {
+    if (!val || typeof val !== "object") return null;
+    if (typeof val.len !== "number" || val.data === undefined) return null;
+    const off = val.off || 0;
+    return { data: val.data, off, len: val.len };
+}
+
+function _pkAbort(msg) {
+    if (typeof rt !== "undefined" && rt && rt.abort) {
+        rt.abort(msg);
+        return;
+    }
+    throw new Error(String(msg || "abort"));
+}
+
+function _pkAssert(cond, msg) {
+    if (!cond) _pkAbort(msg || "assertion failed");
+}
+
+function _pkUtf8Bytes(s) {
+    if (s === null || s === undefined) return new Uint8Array(0);
+    if (_pkHasBuf) return Buffer.from(String(s), "utf8");
+    if (_pkEnc) return _pkEnc.encode(String(s));
+    const str = String(s);
+    const out = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i += 1) out[i] = str.charCodeAt(i) & 0xff;
+    return out;
+}
+
+function _pkUtf8Len(s) {
+    return _pkUtf8Bytes(s).length;
+}
+
+function _pkToBytes(val, maxLen) {
+    if (val === null || val === undefined) return new Uint8Array(0);
+    if (val && (val._pkPtr || val.__pika_ptr)) {
+        if (val.base !== undefined) {
+            const off = val.offset || 0;
+            const end = maxLen === undefined ? undefined : off + Math.max(0, maxLen | 0);
+            if (val.base instanceof Uint8Array) return val.base.subarray(off, end);
+            if (Array.isArray(val.base)) return Uint8Array.from(val.base.slice(off, end));
+            if (_pkHasBuf && Buffer.isBuffer(val.base)) return val.base.subarray(off, end);
+        }
+        try {
+            return _pkToBytes(val.get(), maxLen);
+        } catch (_) {
+            return new Uint8Array(0);
+        }
+    }
+    const slice = _pkSliceInfo(val);
+    if (slice) {
+        const bytes = _pkToBytes(slice.data, slice.len);
+        return bytes.subarray(slice.off, slice.off + slice.len);
+    }
+    if (val instanceof Uint8Array) return val;
+    if (_pkHasBuf && Buffer.isBuffer(val)) return val;
+    if (Array.isArray(val)) return Uint8Array.from(val);
+    if (typeof val === "string") return _pkUtf8Bytes(val);
+    return _pkUtf8Bytes(String(val));
+}
+
+function _pkLen(val) {
+    if (val === null || val === undefined) return 0;
+    if (typeof val === "string") return _pkUtf8Len(val);
+    if (Array.isArray(val) || val instanceof Uint8Array || (_pkHasBuf && Buffer.isBuffer(val))) return val.length;
+    if (typeof val === "object" && typeof val.len === "number") return val.len;
+    return 0;
+}
+
+function _pkIdx(arr, idx) {
+    if (arr && (arr._pkSlice || arr.__pika_slice)) {
+        if (idx < 0 || idx >= arr.len) _pkAbort("index out of bounds");
+        return arr.data[arr.off + idx];
+    }
+    if (arr === null || arr === undefined) _pkAbort("null array");
+    if (idx < 0 || idx >= arr.length) _pkAbort("index out of bounds");
+    return arr[idx];
+}
+
+function _pkIdxSet(arr, idx, v) {
+    if (arr && (arr._pkSlice || arr.__pika_slice)) {
+        if (idx < 0 || idx >= arr.len) _pkAbort("index out of bounds");
+        arr.data[arr.off + idx] = v;
+        return v;
+    }
+    if (arr === null || arr === undefined) _pkAbort("null array");
+    if (idx < 0 || idx >= arr.length) _pkAbort("index out of bounds");
+    arr[idx] = v;
+    return v;
+}
+
+function _pkSliceMake(data, off, len, cap) {
+    return { _pkSlice: true, __pika_slice: true, data, off: off || 0, len: len || 0, cap: cap || len || 0 };
+}
+
+function _pkSlice(src, start, end) {
+    if (src === null || src === undefined) _pkAbort("null slice");
+    let base = src;
+    let off = 0;
+    let len = src.length;
+    let cap = src.length;
+    if (src && (src._pkSlice || src.__pika_slice)) {
+        base = src.data;
+        off = src.off || 0;
+        len = src.len;
+        cap = src.cap || src.len;
+    }
+    const s = start === undefined ? 0 : start;
+    const e = end === undefined ? len : end;
+    if (s < 0 || e < s || e > len) _pkAbort("slice bounds");
+    return _pkSliceMake(base, off + s, e - s, cap - s);
+}
+
+function _pkPtr(id, get, set, base, offset) {
+    return { _pkPtr: true, __pika_ptr: true, id, get, set, base, offset };
+}
+
+function _pkPtrId(p) {
+    return p === null ? "null" : p.id;
+}
+
+function _pkPtrIdx(base, idx) {
+    return base + "[" + idx + "]";
+}
+
+function _pkPtrField(base, field) {
+    return base + "." + field;
+}
+
+function _pkPtrEq(a, b) {
+    if (a === b) return true;
+    if (a === null || b === null) return false;
+    const aPtr = a && (a._pkPtr || a.__pika_ptr);
+    const bPtr = b && (b._pkPtr || b.__pika_ptr);
+    if (!aPtr || !bPtr) return false;
+    if (a.base !== undefined && b.base !== undefined) return a.base === b.base && a.offset === b.offset;
+    return a.id === b.id;
+}
+
+function _pkPtrFrom(base, offset) {
+    return _pkPtr(_pkPtrIdx("mem", offset), () => base[offset], (v) => { base[offset] = v; return v; }, base, offset);
+}
+
+function _pkPtrGet(p) {
+    if (p === null) _pkAbort("null pointer dereference");
+    return p.get();
+}
+
+function _pkPtrSet(p, v) {
+    if (p === null) _pkAbort("null pointer dereference");
+    return p.set(v);
+}
+
+function _pkPtrIndex(p, idx) {
+    if (p === null) _pkAbort("null pointer dereference");
+    if (p.base !== undefined) return p.base[p.offset + idx];
+    return _pkPtrGet(p)[idx];
+}
+
+function _pkPtrIndexSet(p, idx, v) {
+    if (p === null) _pkAbort("null pointer dereference");
+    if (p.base !== undefined) {
+        p.base[p.offset + idx] = v;
+        return v;
+    }
+    _pkPtrGet(p)[idx] = v;
+    return v;
+}
+
+function _pkPtrSlice(p, start, end) {
+    if (p === null) _pkAbort("null pointer dereference");
+    if (end === undefined) _pkAbort("unbounded slice requires end index");
+    let base = p.base;
+    let off = p.offset || 0;
+    if (base === undefined) {
+        base = _pkPtrGet(p);
+        off = 0;
+    }
+    const s = start === undefined ? 0 : start;
+    if (end < s) _pkAbort("slice bounds");
+    const len = end - s;
+    return _pkSliceMake(base, off + s, len, len);
+}
+
+const _pkStaticEntries = [];
+let _pkStaticBytes = null;
+
+function _pkPackBytes(bytes, off, data) {
+    if (!bytes || !data) return;
+    if (typeof bytes.set === "function") {
+        bytes.set(data, off | 0);
+        return;
+    }
+    const len = data.length | 0;
+    for (let i = 0; i < len; i += 1) {
+        bytes[(off | 0) + i] = data[i];
+    }
+}
+
+function _pkPackStr(bytes, off, val) {
+    const data = _pkToBytes(val);
+    _pkPackBytes(bytes, off, data);
+}
+
+function _pkPackI64(view, off, val) {
+    if (typeof BigInt !== "undefined") {
+        let v = typeof val === "bigint" ? val : BigInt(Math.trunc(val));
+        v = BigInt.asIntN(64, v);
+        view.setUint32(off | 0, Number(v & 0xffffffffn), true);
+        view.setInt32((off | 0) + 4, Number((v >> 32n) & 0xffffffffn), true);
+        return;
+    }
+    const x = Math.trunc(val);
+    const lo = x >>> 0;
+    const hi = (x / 0x100000000) | 0;
+    view.setUint32(off | 0, lo, true);
+    view.setInt32((off | 0) + 4, hi, true);
+}
+
+function _pkPackU64(view, off, val) {
+    if (typeof BigInt !== "undefined") {
+        let v = typeof val === "bigint" ? val : BigInt(Math.trunc(val));
+        v = BigInt.asUintN(64, v);
+        view.setUint32(off | 0, Number(v & 0xffffffffn), true);
+        view.setUint32((off | 0) + 4, Number((v >> 32n) & 0xffffffffn), true);
+        return;
+    }
+    const x = Math.trunc(val);
+    const lo = x >>> 0;
+    const hi = Math.floor(x / 0x100000000) >>> 0;
+    view.setUint32(off | 0, lo, true);
+    view.setUint32((off | 0) + 4, hi, true);
+}
+
+function _pkStaticAdd(name, sizeOrFn, packFn) {
+    let size = 0;
+    if (typeof sizeOrFn === "function") {
+        size = sizeOrFn() | 0;
+    } else {
+        size = sizeOrFn | 0;
+    }
+    if (size < 0) size = 0;
+    _pkStaticEntries.push({
+        name: String(name),
+        size,
+        pack: packFn,
+    });
+}
+
+function _pkStaticInit() {
+    if (_pkStaticBytes) return _pkStaticBytes;
+    let total = 0;
+    for (const entry of _pkStaticEntries) {
+        total += entry.size | 0;
+    }
+    const bytes = new Uint8Array(total);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let off = 0;
+    for (const entry of _pkStaticEntries) {
+        const size = entry.size | 0;
+        if (entry.pack) entry.pack(view, bytes, off);
+        off += size;
+    }
+    _pkStaticBytes = bytes;
+    return bytes;
+}
+`);
+};
+
+fn js_is_reserved_name(r: bref, src: *[*]u8) bool = {
+	let n = r.length;
+	if (n == 2) {
+		return bref_match(r, "do", src) || bref_match(r, "if", src) || bref_match(r, "in", src);
+	};
+	if (n == 3) {
+		return bref_match(r, "for", src) || bref_match(r, "let", src) ||
+		       bref_match(r, "new", src) || bref_match(r, "try", src) ||
+		       bref_match(r, "var", src);
+	};
+	if (n == 4) {
+		return bref_match(r, "case", src) || bref_match(r, "else", src) ||
+		       bref_match(r, "enum", src) || bref_match(r, "eval", src) ||
+		       bref_match(r, "null", src) || bref_match(r, "this", src) ||
+		       bref_match(r, "true", src) || bref_match(r, "void", src) ||
+		       bref_match(r, "with", src);
+	};
+	if (n == 5) {
+		return bref_match(r, "catch", src) || bref_match(r, "class", src) ||
+		       bref_match(r, "const", src) || bref_match(r, "false", src) ||
+		       bref_match(r, "super", src) || bref_match(r, "throw", src) ||
+		       bref_match(r, "while", src) || bref_match(r, "yield", src) ||
+		       bref_match(r, "await", src) || bref_match(r, "async", src);
+	};
+	if (n == 6) {
+		return bref_match(r, "delete", src) || bref_match(r, "export", src) ||
+		       bref_match(r, "import", src) || bref_match(r, "return", src) ||
+		       bref_match(r, "static", src) || bref_match(r, "typeof", src);
+	};
+	if (n == 7) {
+		return bref_match(r, "default", src) || bref_match(r, "extends", src) ||
+		       bref_match(r, "finally", src) || bref_match(r, "package", src) ||
+		       bref_match(r, "private", src) || bref_match(r, "public", src);
+	};
+	if (n == 8) {
+		return bref_match(r, "continue", src) || bref_match(r, "debugger", src) ||
+		       bref_match(r, "function", src);
+	};
+	if (n == 9) {
+		return bref_match(r, "arguments", src) || bref_match(r, "interface", src) ||
+		       bref_match(r, "protected", src);
+	};
+	if (n == 10) {
+		return bref_match(r, "implements", src) || bref_match(r, "instanceof", src);
+	};
+	return false;
+};
+
+fn js_emit_name(g: *codegen, r: bref) void = {
+	do_indent(&g.em);
+	if (dict_has_bref(&g.static_vars, r)) {
+		emit_s(&g.em, "_ps_");
+		e_bref(&g.em, g.cur_fn);
+		e_c(&g.em, '_');
+		sb_bref(&g.em.buf, r, g.t.src);
+		return;
+	};
+	let sym = dict_get_bref(&g.symbols, r);
+	if (sym != 0) {
+		let sn: *tnode = sym: uintptr: *tnode;
+		let sr = sn.ref;
+		if (sr.length > 2) {
+			let inner = bref { pos = sr.pos + 1, length = sr.length - 2 };
+			if (js_is_reserved_name(inner, g.t.src)) {
+				emit_s(&g.em, "__pika_");
+			};
+			sb_bref(&g.em.buf, inner, g.t.src);
+			return;
+		};
+	};
+	if (g.prefix.length > 0 && dict_has_bref(&g.exported_funcs, r)) {
+		sb_bref(&g.em.buf, g.prefix, g.prefix_src);
+		sb_char(&g.em.buf, '_');
+	} else if (js_is_reserved_name(r, g.t.src)) {
+		emit_s(&g.em, "__pika_");
+	};
+	sb_bref(&g.em.buf, r, g.t.src);
+};
+
+fn js_hex_digit(v: u8) u8 = {
+	if (v < 10) { return '0' + v; };
+	return 'a' + v - 10;
+};
+
+fn js_hex_byte(em: *emitter, b: u8) void = {
+	e_raw(em, "\\x");
+	e_raw_c(em, js_hex_digit(b >> 4));
+	e_raw_c(em, js_hex_digit(b & 0xf));
+};
+
+fn js_hex_u16(em: *emitter, v: u16) void = {
+	e_raw(em, "\\u");
+	e_raw_c(em, js_hex_digit(((v >> 12) & 0xf): u8));
+	e_raw_c(em, js_hex_digit(((v >> 8) & 0xf): u8));
+	e_raw_c(em, js_hex_digit(((v >> 4) & 0xf): u8));
+	e_raw_c(em, js_hex_digit((v & 0xf): u8));
+};
+
+fn js_hex_u32(em: *emitter, v: u32) void = {
+	if (v == 0) { e_raw_c(em, '0'); return; };
+	let buf: [8]u8 = [0...];
+	let i = 8z;
+	for (v > 0) {
+		i -= 1;
+		buf[i] = js_hex_digit((v & 0xf): u8);
+		v >>= 4;
+	};
+	for (i < 8) { e_raw_c(em, buf[i]); i += 1; };
+};
+
+fn js_parse_hex(src: *[*]u8, pos: size, count: size) u32 = {
+	let val: u32 = 0;
+	for (let i = 0z; i < count; i += 1) {
+		let c = src[pos + i];
+		val <<= 4;
+		if (c >= '0' && c <= '9') { val |= (c - '0'): u32; }
+		else if (c >= 'a' && c <= 'f') { val |= (c - 'a' + 10): u32; }
+		else if (c >= 'A' && c <= 'F') { val |= (c - 'A' + 10): u32; };
+	};
+	return val;
+};
+
+fn js_parse_oct(src: *[*]u8, pos: size, count: size) u32 = {
+	let val: u32 = 0;
+	for (let i = 0z; i < count; i += 1) {
+		let c = src[pos + i];
+		val <<= 3;
+		if (c >= '0' && c <= '7') { val |= (c - '0'): u32; };
+	};
+	return val;
+};
+
+fn js_emit_codepoint(em: *emitter, cp: u32) void = {
+	if (cp == '\n': u32) { e_raw(em, "\\n"); return; };
+	if (cp == '\r': u32) { e_raw(em, "\\r"); return; };
+	if (cp == '\t': u32) { e_raw(em, "\\t"); return; };
+	if (cp == '\\': u32) { e_raw(em, "\\\\"); return; };
+	if (cp == '"': u32) { e_raw(em, "\\\""); return; };
+	if (cp >= 32 && cp <= 126) { e_raw_c(em, cp: u8); return; };
+	if (cp <= 0xff) { js_hex_byte(em, cp: u8); return; };
+	if (cp <= 0xffff) { js_hex_u16(em, cp: u16); return; };
+	emit_s(em, "\\u{");
+	js_hex_u32(em, cp);
+	e_c(em, '}');
+};
+
+fn js_emit_str_content(em: *emitter, r: bref, src: *[*]u8) void = {
+	let i = 1z;
+	let end = r.length - 1;
+	e_raw_c(em, '"');
+	for (i < end) {
+		let c = src[r.pos + i];
+		if (c == '\\' && i + 1 < end) {
+			let next = src[r.pos + i + 1];
+			if (next == 'n') { js_emit_codepoint(em, '\n'); i += 2; continue; };
+			if (next == 'r') { js_emit_codepoint(em, '\r'); i += 2; continue; };
+			if (next == 't') { js_emit_codepoint(em, '\t'); i += 2; continue; };
+			if (next == '0') { js_emit_codepoint(em, 0); i += 2; continue; };
+			if (next == '"') { js_emit_codepoint(em, '"'); i += 2; continue; };
+			if (next == '\\') { js_emit_codepoint(em, '\\'); i += 2; continue; };
+			if (next == 'x' && i + 3 < end) {
+				let cp_x2 = js_parse_hex(src, r.pos + i + 2, 2);
+				js_emit_codepoint(em, cp_x2);
+				i += 4;
+				continue;
+			};
+			if (next == 'o' && i + 5 < end) {
+				let cp_o4 = js_parse_oct(src, r.pos + i + 2, 4);
+				js_emit_codepoint(em, cp_o4);
+				i += 6;
+				continue;
+			};
+			if (next == 'O' && i + 9 < end) {
+				let cp_O8 = js_parse_oct(src, r.pos + i + 2, 8);
+				js_emit_codepoint(em, cp_O8);
+				i += 10;
+				continue;
+			};
+			if (next == 'u' && i + 5 < end) {
+				let cp_u4 = js_parse_hex(src, r.pos + i + 2, 4);
+				js_emit_codepoint(em, cp_u4);
+				i += 6;
+				continue;
+			};
+			if (next == 'U' && i + 9 < end) {
+				let cp_U8 = js_parse_hex(src, r.pos + i + 2, 8);
+				js_emit_codepoint(em, cp_U8);
+				i += 10;
+				continue;
+			};
+			js_emit_codepoint(em, '\\');
+			js_emit_codepoint(em, next: u32);
+			i += 2;
+			continue;
+		};
+		js_emit_codepoint(em, c: u32);
+		i += 1;
+	};
+	e_raw_c(em, '"');
+};
+
+fn js_emit_rawstr_content(em: *emitter, r: bref, src: *[*]u8) void = {
+	let i = 1z;
+	let end = r.length - 1;
+	e_raw_c(em, '"');
+	for (i < end) {
+		let c = src[r.pos + i];
+		js_emit_codepoint(em, c: u32);
+		i += 1;
+	};
+	e_raw_c(em, '"');
+};
+
+fn js_str_part(g: *codegen, n: *tnode) void = {
+	if (n.kind == N_STR) {
+		js_emit_str_content(&g.em, n.ref, g.t.src);
+		return;
+	};
+	if (n.kind == N_RAWSTR) {
+		js_emit_rawstr_content(&g.em, n.ref, g.t.src);
+		return;
+	};
+	err_bref(n.ref, g.t.src, g.t.src_len, "gen_js: unsupported string literal");
+};
+
+fn js_str(g: *codegen, n: *tnode) void = {
+	js_str_part(g, n);
+	let child = t_first(n);
+	for (child != null) {
+		emit_s(&g.em, " + ");
+		js_str_part(g, unwrap(child));
+		child = unwrap(child).next;
+	};
+};
+
+fn js_binop(em: *emitter, tk: u16) bool = {
+	if (tk == TK_PLUS) { emit_s(em, " + "); return true; };
+	if (tk == TK_MINUS) { emit_s(em, " - "); return true; };
+	if (tk == TK_STAR) { emit_s(em, " * "); return true; };
+	if (tk == TK_SLASH) { emit_s(em, " / "); return true; };
+	if (tk == TK_PERCENT) { emit_s(em, " % "); return true; };
+	if (tk == TK_AMP) { emit_s(em, " & "); return true; };
+	if (tk == TK_PIPE) { emit_s(em, " | "); return true; };
+	if (tk == TK_CARET) { emit_s(em, " ^ "); return true; };
+	if (tk == TK_SHL) { emit_s(em, " << "); return true; };
+	if (tk == TK_SHR) { emit_s(em, " >> "); return true; };
+	if (tk == TK_EQ_EQ) { emit_s(em, " === "); return true; };
+	if (tk == TK_NE) { emit_s(em, " !== "); return true; };
+	if (tk == TK_LT) { emit_s(em, " < "); return true; };
+	if (tk == TK_GT) { emit_s(em, " > "); return true; };
+	if (tk == TK_LE) { emit_s(em, " <= "); return true; };
+	if (tk == TK_GE) { emit_s(em, " >= "); return true; };
+	if (tk == TK_AND) { emit_s(em, " && "); return true; };
+	if (tk == TK_OR) { emit_s(em, " || "); return true; };
+	if (tk == TK_LXOR) { emit_s(em, " !== "); return true; };
+	return false;
+};
+
+fn js_asgn_op(em: *emitter, tk: u16) bool = {
+	if (tk == TK_EQ) { emit_s(em, " = "); return true; };
+	if (tk == TK_PLUS_EQ) { emit_s(em, " += "); return true; };
+	if (tk == TK_MINUS_EQ) { emit_s(em, " -= "); return true; };
+	if (tk == TK_STAR_EQ) { emit_s(em, " *= "); return true; };
+	if (tk == TK_SLASH_EQ) { emit_s(em, " /= "); return true; };
+	if (tk == TK_PERCENT_EQ) { emit_s(em, " %= "); return true; };
+	if (tk == TK_AMP_EQ) { emit_s(em, " &= "); return true; };
+	if (tk == TK_PIPE_EQ) { emit_s(em, " |= "); return true; };
+	if (tk == TK_CARET_EQ) { emit_s(em, " ^= "); return true; };
+	if (tk == TK_SHL_EQ) { emit_s(em, " <<= "); return true; };
+	if (tk == TK_SHR_EQ) { emit_s(em, " >>= "); return true; };
+	return false;
+};
+
+fn js_asgn_binop(em: *emitter, tk: u16) bool = {
+	if (tk == TK_PLUS_EQ) { return js_binop(em, TK_PLUS); };
+	if (tk == TK_MINUS_EQ) { return js_binop(em, TK_MINUS); };
+	if (tk == TK_STAR_EQ) { return js_binop(em, TK_STAR); };
+	if (tk == TK_SLASH_EQ) { return js_binop(em, TK_SLASH); };
+	if (tk == TK_PERCENT_EQ) { return js_binop(em, TK_PERCENT); };
+	if (tk == TK_AMP_EQ) { return js_binop(em, TK_AMP); };
+	if (tk == TK_PIPE_EQ) { return js_binop(em, TK_PIPE); };
+	if (tk == TK_CARET_EQ) { return js_binop(em, TK_CARET); };
+	if (tk == TK_SHL_EQ) { return js_binop(em, TK_SHL); };
+	if (tk == TK_SHR_EQ) { return js_binop(em, TK_SHR); };
+	return false;
+};

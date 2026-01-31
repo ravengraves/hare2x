@@ -1,0 +1,111 @@
+// nullable.ha - Test nullable pointers and match
+use rt;
+
+// Basic nullable pointer with match
+// Must use match to narrow type before dereference
+fn check_nullable(p: nullable *i32) i32 = {
+	match (p) {
+	// ERROR on next line: Cannot dereference nullable pointer without binding
+	// Expected: "/tmp/nullable.ha:8:31: error: Cannot dereference nullable pointer type"
+	// Fix: Use let binding: case let val: *i32 => return *val;
+	case *i32 => return *p;
+	case null => return -1;
+	};
+};
+
+// Match with null case first
+fn check_null_first(p: nullable *i32) i32 = {
+	match (p) {
+	case null => return 0;
+	case *i32 => return *p;
+	};
+};
+
+// Nullable pointer to struct
+type point = struct {
+	x: i32,
+	y: i32,
+};
+
+fn get_x(p: nullable *point) i32 = {
+	match (p) {
+	case *point => return p.x;
+	case null => return -1;
+	};
+};
+
+// Function returning nullable pointer
+fn find_positive(arr: *[*]i32, n: size) nullable *i32 = {
+	for (let i = 0z; i < n; i += 1) {
+		if (arr[i] > 0) {
+			return &arr[i];
+		};
+	};
+	return null;
+};
+
+// Helper to safely get value from nullable pointer
+fn deref_or_default(p: nullable *i32, default_val: i32) i32 = {
+	match (p) {
+	case *i32 => return *p;
+	case null => return default_val;
+	};
+};
+
+// Test basic nullable assignment and comparison
+fn test_basic() void = {
+	let p: nullable *i32 = null;
+	assert(p == null, "should be null initially");
+
+	let x: i32 = 42;
+	p = &x;
+	assert(p != null, "should not be null after assignment");
+
+	// Use match to access the value
+	let val = deref_or_default(p, 0);
+	assert(val == 42, "should deref to 42");
+};
+
+// Test nullable with match
+fn test_match() void = {
+	let x: i32 = 50;
+	assert(check_nullable(&x) == 50, "match with value");
+	assert(check_nullable(null) == -1, "match with null");
+};
+
+// Test match with null case first
+fn test_null_first() void = {
+	let x: i32 = 25;
+	assert(check_null_first(&x) == 25, "null first with value");
+	assert(check_null_first(null) == 0, "null first with null");
+};
+
+// Test nullable struct pointer
+fn test_struct() void = {
+	let pt = point { x = 10, y = 20 };
+	assert(get_x(&pt) == 10, "struct pointer value");
+	assert(get_x(null) == -1, "struct pointer null");
+};
+
+// Test returning nullable
+fn test_find() void = {
+	let arr: [5]i32 = [-1, -2, 3, -4, 5];
+	let p = find_positive(&arr[0], 5);
+	assert(p != null, "should find positive");
+
+	// Use match to access the found value
+	let found = deref_or_default(p, 0);
+	assert(found == 3, "should find first positive");
+
+	let neg: [3]i32 = [-1, -2, -3];
+	let q = find_positive(&neg[0], 3);
+	assert(q == null, "should not find positive");
+};
+
+export fn _main() void = {
+	test_basic();
+	test_match();
+	test_null_first();
+	test_struct();
+	test_find();
+};

@@ -1,0 +1,859 @@
+// core.ha - Core infrastructure with static memory pools (no malloc)
+use rt;
+use strings;
+
+// ============================================================================
+// Static Memory Pools - Replace arena allocator
+// ============================================================================
+
+def NODE_POOL_SIZE: size = 512*1024;
+def OUTBUF_SIZE: size = 4194304;    // 4MB output
+def SRCBUF_SIZE: size = 1048576;    // 1MB input
+def DICT_SIZE: size = 8192;
+
+// Node pool (allocated in tree.ha since it needs tnode type)
+// Here we just track the index
+let node_idx: size = 0;
+
+// Output buffer
+let outbuf: [4194304]u8 = [0...];
+
+// Source buffer (read from stdin)
+let srcbuf: [1048576]u8 = [0...];
+
+// ============================================================================
+// Binary Reference (bref) - Zero-copy string reference into source
+// ============================================================================
+
+type bref = struct {
+	pos: size,
+	length: size,
+};
+
+fn bref_new(pos: size, length: size) bref = {
+	return bref { pos = pos, length = length };
+};
+
+fn bref_empty() bref = {
+	return bref { pos = 0, length = 0 };
+};
+
+fn bref_is_empty(r: bref) bool = {
+	return r.length == 0;
+};
+
+fn bref_eq(a: bref, b: bref, src: *[*]u8) bool = {
+	if (a.length != b.length) {
+		return false;
+	};
+	return bref_to_str(a, src) == bref_to_str(b, src);
+};
+
+fn bref_match(r: bref, lit: str, src: *[*]u8) bool = {
+	if (r.length != len(lit)) {
+		return false;
+	};
+	return bref_to_str(r, src) == lit;
+};
+
+// Convert a bref to str using unbounded array slicing
+fn bref_to_str(r: bref, src: *[*]u8) str = {
+	return strings::fromutf8_unsafe(src[r.pos..r.pos + r.length]);
+};
+
+fn bref_char_at(r: bref, i: size, src: *[*]u8) u8 = {
+	if (i >= r.length) {
+		return 0;
+	};
+	return src[r.pos + i];
+};
+
+fn bref_starts_with(r: bref, prefix: str, src: *[*]u8) bool = {
+	let plen = len(prefix);
+	if (r.length < plen) {
+		return false;
+	};
+	// Compare just the prefix portion
+	let prefix_str = strings::fromutf8_unsafe(src[r.pos..r.pos + plen]);
+	return prefix_str == prefix;
+};
+
+fn bref_ends_with(r: bref, suffix: str, src: *[*]u8) bool = {
+	let slen = len(suffix);
+	if (r.length < slen) {
+		return false;
+	};
+	let start = r.pos + r.length - slen;
+	let suffix_str = strings::fromutf8_unsafe(src[start..start + slen]);
+	return suffix_str == suffix;
+};
+
+fn bref_hash(r: bref, src: *[*]u8) u64 = {
+	let h: u64 = 0xcbf29ce484222325;  // FNV-1a offset basis
+	for (let i = 0z; i < r.length; i += 1) {
+		h ^= src[r.pos + i]: u64;
+		h *= 0x100000001b3;  // FNV-1a prime
+	};
+	return h;
+};
+
+// ============================================================================
+// String Buffer - Uses static output buffer
+// ============================================================================
+
+type strbuf = struct {
+	data: *[*]u8,
+	length: size,
+	cap: size,
+};
+
+fn sb_init_static(sb: *strbuf) void = {
+	sb.data = (&outbuf[0]): *[*]u8;
+	sb.length = 0;
+	sb.cap = OUTBUF_SIZE;
+};
+
+fn sb_check(sb: *strbuf, needed: size) void = {
+	if (sb.length + needed > sb.cap) {
+		abort("strbuf: overflow");
+	};
+};
+
+fn sb_clear(sb: *strbuf) void = {
+	sb.length = 0;
+};
+
+fn sb_char(sb: *strbuf, c: u8) void = {
+	sb_check(sb, 1);
+	sb.data[sb.length] = c;
+	sb.length += 1;
+};
+
+fn sb_str(sb: *strbuf, s: *u8, slen: size) void = {
+	sb_check(sb, slen);
+	let src: *[*]u8 = s: *[*]u8;
+	for (let i = 0z; i < slen; i += 1) {
+		sb.data[sb.length + i] = src[i];
+	};
+	sb.length += slen;
+};
+
+fn sb_s(sb: *strbuf, s: str) void = {
+	let slen = len(s);
+	sb_check(sb, slen);
+	let bytes = strings::toutf8(s);
+	for (let i = 0z; i < slen; i += 1) {
+		sb.data[sb.length + i] = bytes[i];
+	};
+	sb.length += slen;
+};
+
+fn sb_bytes(sb: *strbuf, data: []u8) void = {
+	let slen = len(data);
+	sb_check(sb, slen);
+	for (let i = 0z; i < slen; i += 1) {
+		sb.data[sb.length + i] = data[i];
+	};
+	sb.length += slen;
+};
+
+fn sb_slice(sb: *strbuf, data: *[*]u8, start: size, end: size) void = {
+	let slen = end - start;
+	sb_check(sb, slen);
+	for (let i = 0z; i < slen; i += 1) {
+		sb.data[sb.length + i] = data[start + i];
+	};
+	sb.length += slen;
+};
+
+fn sb_bref(sb: *strbuf, r: bref, src: *[*]u8) void = {
+	sb_check(sb, r.length);
+	for (let i = 0z; i < r.length; i += 1) {
+		sb.data[sb.length + i] = src[r.pos + i];
+	};
+	sb.length += r.length;
+};
+
+fn sb_int(sb: *strbuf, n: i64) void = {
+	if (n < 0) {
+		sb_char(sb, '-');
+		sb_uint(sb, (-n): u64);
+	} else {
+		sb_uint(sb, n: u64);
+	};
+};
+
+fn sb_uint(sb: *strbuf, n: u64) void = {
+	if (n == 0) {
+		sb_char(sb, '0');
+		return;
+	};
+	let buf: [64]u8 = [0...];
+	let i = 64z;
+	for (n > 0) {
+		i -= 1;
+		buf[i] = ('0': u8) + (n % 10): u8;
+		n /= 10;
+	};
+	sb_str(sb, &buf[i], 64 - i);
+};
+
+fn sb_hex(sb: *strbuf, n: u64) void = {
+	sb_char(sb, '0');
+	sb_char(sb, 'x');
+	if (n == 0) {
+		sb_char(sb, '0');
+		return;
+	};
+	let buf: [16]u8 = [0...];
+	let i = 16z;
+	for (n > 0) {
+		i -= 1;
+		let d = (n & 0xf): u8;
+		if (d < 10) {
+			buf[i] = ('0': u8) + d;
+		} else {
+			buf[i] = ('a': u8) + d - 10;
+		};
+		n >>= 4;
+	};
+	sb_str(sb, &buf[i], 16 - i);
+};
+
+fn sb_repeat(sb: *strbuf, c: u8, count: size) void = {
+	sb_check(sb, count);
+	for (let i = 0z; i < count; i += 1) {
+		sb.data[sb.length + i] = c;
+	};
+	sb.length += count;
+};
+
+fn sb_len(sb: *strbuf) size = {
+	return sb.length;
+};
+
+fn sb_get(sb: *strbuf) *[*]u8 = {
+	return sb.data;
+};
+
+// ============================================================================
+// Dictionary - Static arrays with linear probing
+// ============================================================================
+
+type dict_entry = struct {
+	key_hash: u64,
+	key: bref,
+	value: u64,
+	occupied: bool,
+};
+
+// Separate dict pools: types, vars, funcs, globals
+let types_dict_entries: [8192]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let vars_dict_entries: [8192]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let funcs_dict_entries: [8192]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let globals_dict_entries: [2048]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let exported_funcs_entries: [1024]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let exported_types_entries: [1024]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let symbol_dict_entries: [1024]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let static_vars_entries: [1024]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let aliases_dict_entries: [256]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+
+type dict = struct {
+	entries: *[*]dict_entry,
+	count: size,
+	cap: size,
+	src: *[*]u8,
+};
+
+fn dict_init_types(d: *dict, src: *[*]u8) void = {
+	d.cap = DICT_SIZE;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&types_dict_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn dict_init_vars(d: *dict, src: *[*]u8) void = {
+	d.cap = DICT_SIZE;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&vars_dict_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn dict_init_funcs(d: *dict, src: *[*]u8) void = {
+	d.cap = DICT_SIZE;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&funcs_dict_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn dict_init_globals(d: *dict, src: *[*]u8) void = {
+	d.cap = 2048;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&globals_dict_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn dict_init_exported_funcs(d: *dict, src: *[*]u8) void = {
+	d.cap = 1024;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&exported_funcs_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn dict_init_exported_types(d: *dict, src: *[*]u8) void = {
+	d.cap = 1024;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&exported_types_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn dict_init_symbols(d: *dict, src: *[*]u8) void = {
+	d.cap = 1024;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&symbol_dict_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn dict_init_static_vars(d: *dict, src: *[*]u8) void = {
+	d.cap = 1024;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&static_vars_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn dict_init_aliases(d: *dict, src: *[*]u8) void = {
+	d.cap = 256;
+	d.count = 0;
+	d.src = src;
+	d.entries = (&aliases_dict_entries[0]): *[*]dict_entry;
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+};
+
+fn dict_clear(d: *dict) void = {
+	for (let i = 0z; i < d.cap; i += 1) {
+		d.entries[i].occupied = false;
+	};
+	d.count = 0;
+};
+
+fn dict_find_slot(d: *dict, h: u64, key: bref) size = {
+	let idx_i: i64 = (h % (d.cap: u64)): i64;
+	if (idx_i < 0) { idx_i += d.cap: i64; };
+	for (let i = 0z; i < d.cap; i += 1) {
+		let slot_i: i64 = (idx_i + (i: i64)) % (d.cap: i64);
+		if (slot_i < 0) { slot_i += d.cap: i64; };
+		let slot = slot_i: size;
+		if (!d.entries[slot].occupied) {
+			return slot;
+		};
+		if (d.entries[slot].key_hash == h && bref_eq(d.entries[slot].key, key, d.src)) {
+			return slot;
+		};
+	};
+	abort("dict: table full");
+};
+
+fn dict_set_bref(d: *dict, key: bref, val: u64) void = {
+	if (d.count * 10 > d.cap * 7) {
+		abort("dict: load factor exceeded");
+	};
+	let h = bref_hash(key, d.src);
+	let slot = dict_find_slot(d, h, key);
+	if (!d.entries[slot].occupied) {
+		d.count += 1;
+	};
+	d.entries[slot].key_hash = h;
+	d.entries[slot].key = key;
+	d.entries[slot].value = val;
+	d.entries[slot].occupied = true;
+};
+
+fn dict_remove_bref(d: *dict, key: bref) void = {
+	let h = bref_hash(key, d.src);
+	let idx_i: i64 = (h % (d.cap: u64)): i64;
+	if (idx_i < 0) { idx_i += d.cap: i64; };
+	for (let i = 0z; i < d.cap; i += 1) {
+		let slot_i: i64 = (idx_i + (i: i64)) % (d.cap: i64);
+		if (slot_i < 0) { slot_i += d.cap: i64; };
+		let slot = slot_i: size;
+		if (!d.entries[slot].occupied) { return; };
+		if (d.entries[slot].key_hash == h && bref_eq(d.entries[slot].key, key, d.src)) {
+			d.entries[slot].occupied = false;
+			d.count -= 1;
+			let next = (slot + 1) % d.cap;
+			for (d.entries[next].occupied) {
+				let rekey = d.entries[next].key;
+				let reval = d.entries[next].value;
+				d.entries[next].occupied = false;
+				d.count -= 1;
+				dict_set_bref(d, rekey, reval);
+				next = (next + 1) % d.cap;
+			};
+			return;
+		};
+	};
+};
+
+fn dict_get_bref(d: *dict, key: bref) u64 = {
+	let h = bref_hash(key, d.src);
+	let idx_i: i64 = (h % (d.cap: u64)): i64;
+	if (idx_i < 0) { idx_i += d.cap: i64; };
+	for (let i = 0z; i < d.cap; i += 1) {
+		let slot_i: i64 = (idx_i + (i: i64)) % (d.cap: i64);
+		if (slot_i < 0) { slot_i += d.cap: i64; };
+		let slot = slot_i: size;
+		if (!d.entries[slot].occupied) {
+			return 0;
+		};
+		if (d.entries[slot].key_hash == h && bref_eq(d.entries[slot].key, key, d.src)) {
+			return d.entries[slot].value;
+		};
+	};
+	return 0;
+};
+
+fn dict_has_bref(d: *dict, key: bref) bool = {
+	let h = bref_hash(key, d.src);
+	let idx_i: i64 = (h % (d.cap: u64)): i64;
+	if (idx_i < 0) { idx_i += d.cap: i64; };
+	for (let i = 0z; i < d.cap; i += 1) {
+		let slot_i: i64 = (idx_i + (i: i64)) % (d.cap: i64);
+		if (slot_i < 0) { slot_i += d.cap: i64; };
+		let slot = slot_i: size;
+		if (!d.entries[slot].occupied) {
+			return false;
+		};
+		if (d.entries[slot].key_hash == h && bref_eq(d.entries[slot].key, key, d.src)) {
+			return true;
+		};
+	};
+	return false;
+};
+
+// ============================================================================
+// Error Handling
+// ============================================================================
+
+type line_col = struct {
+	line: u64,
+	col: u64,
+};
+
+fn pos_to_line_col(pos: size, src: *[*]u8, src_len: size) line_col = {
+	let line: u64 = 1;
+	let col: u64 = 1;
+	for (let i = 0z; i < pos && i < src_len; i += 1) {
+		if (src[i] == '\n') {
+			line += 1;
+			col = 1;
+		} else {
+			col += 1;
+		};
+	};
+	return line_col { line = line, col = col };
+};
+
+fn err(msg: str) void = {
+	rt::write(2, strings::toutf8("error: "): *[*]u8, 7);
+	rt::write(2, strings::toutf8(msg): *[*]u8, len(msg));
+	rt::write(2, strings::toutf8("\n"): *[*]u8, 1);
+	rt::exit(1);
+};
+
+fn warn_at(pos: size, src: *[*]u8, src_len: size, msg: str) void = {
+	let lc = pos_to_line_col(pos, src, src_len);
+
+	// Format location using strbuf
+	let buf: [64]u8 = [0...];
+	let sb = strbuf { data = (&buf[0]): *[*]u8, length = 0, cap = 64 };
+	sb_uint(&sb, lc.line);
+	sb_char(&sb, ':');
+	sb_uint(&sb, lc.col);
+	sb_s(&sb, ": warning: ");
+
+	// Write location + prefix
+	rt::write(2, sb.data: *opaque, sb.length);
+
+	// Write message and newline
+	let bytes = strings::toutf8(msg);
+	rt::write(2, bytes: *[*]u8, len(msg));
+	rt::write(2, strings::toutf8("\n"): *[*]u8, 1);
+};
+
+fn warn_bref(r: bref, src: *[*]u8, src_len: size, msg: str) void = {
+	warn_at(r.pos, src, src_len, msg);
+};
+
+fn err_at(pos: size, src: *[*]u8, src_len: size, msg: str) void = {
+	let lc = pos_to_line_col(pos, src, src_len);
+
+	// Format location using strbuf
+	let buf: [64]u8 = [0...];
+	let sb = strbuf { data = (&buf[0]): *[*]u8, length = 0, cap = 64 };
+	sb_uint(&sb, lc.line);
+	sb_char(&sb, ':');
+	sb_uint(&sb, lc.col);
+	sb_s(&sb, ": error: ");
+
+	// Write location + prefix
+	rt::write(2, sb.data: *opaque, sb.length);
+
+	// Write message and newline
+	let bytes = strings::toutf8(msg);
+	rt::write(2, bytes: *[*]u8, len(msg));
+	rt::write(2, strings::toutf8("\n"): *[*]u8, 1);
+
+	// Find line start and end
+	let line_start = pos;
+	for (line_start > 0 && src[line_start - 1] != '\n') {
+		line_start -= 1;
+	};
+	let line_end = pos;
+	for (line_end < src_len && src[line_end] != '\n') {
+		line_end += 1;
+	};
+
+	// Print the source line
+	let line_len = line_end - line_start;
+	if (line_len > 0 && line_len < 200) {
+		rt::write(2, &src[line_start]: *opaque, line_len);
+		rt::write(2, strings::toutf8("\n"): *[*]u8, 1);
+
+		// Print caret indicator
+		let col_offset = pos - line_start;
+		let caret_buf: [200]u8 = [0...];
+		let caret_ptr: *[*]u8 = (&caret_buf[0]): *[*]u8;
+		let caret_i = 0z;
+		for (caret_i < col_offset && caret_i < 199) {
+			if (src[line_start + caret_i] == '\t') {
+				caret_ptr[caret_i] = '\t';
+			} else {
+				caret_ptr[caret_i] = ' ';
+			};
+			caret_i += 1;
+		};
+		caret_ptr[caret_i] = '^';
+		rt::write(2, caret_ptr: *opaque, caret_i + 1);
+		rt::write(2, strings::toutf8("\n"): *[*]u8, 1);
+	};
+
+	rt::exit(1);
+};
+
+fn err_bref(r: bref, src: *[*]u8, src_len: size, msg: str) void = {
+	err_at(r.pos, src, src_len, msg);
+};
+
+// ============================================================================
+// Numeric Parsing
+// ============================================================================
+
+type parse_result = struct {
+	val: i64,
+	ok: bool,
+};
+
+fn parse_int_base(r: bref, src: *[*]u8) parse_result = {
+	if (r.length == 0) {
+		return parse_result { val = 0, ok = false };
+	};
+	let start = 0z;
+	let neg = false;
+	if (src[r.pos] == '-') {
+		neg = true;
+		start = 1;
+	};
+	let base: i64 = 10;
+	if (r.length - start >= 2 && src[r.pos + start] == '0') {
+		let prefix_c = src[r.pos + start + 1];
+		if (prefix_c == 'x' || prefix_c == 'X') {
+			base = 16;
+			start += 2;
+		} else if (prefix_c == 'o' || prefix_c == 'O') {
+			base = 8;
+			start += 2;
+		} else if (prefix_c == 'b' || prefix_c == 'B') {
+			base = 2;
+			start += 2;
+		};
+	};
+	let val: i64 = 0;
+	for (let i = start; i < r.length; i += 1) {
+		let c = src[r.pos + i];
+		let digit: i64 = -1;
+		if (c >= '0' && c <= '9') {
+			digit = (c - '0'): i64;
+		} else if (c >= 'a' && c <= 'f') {
+			digit = (c - 'a' + 10): i64;
+		} else if (c >= 'A' && c <= 'F') {
+			digit = (c - 'A' + 10): i64;
+		} else if (c == '_') {
+			continue;
+		} else {
+			break;
+		};
+		if (digit >= base) {
+			return parse_result { val = 0, ok = false };
+		};
+		val = val * base + digit;
+	};
+	if (neg) {
+		val = -val;
+	};
+	return parse_result { val = val, ok = true };
+};
+
+// ============================================================================
+// String utilities
+// ============================================================================
+
+fn cstr_len(s: *[*]u8) size = {
+	let i = 0z;
+	for (s[i] != 0) {
+		i += 1;
+	};
+	return i;
+};
+
+fn cstr_eq(a: *[*]u8, b: *[*]u8) bool = {
+	let i = 0z;
+	for (a[i] != 0 && b[i] != 0) {
+		if (a[i] != b[i]) {
+			return false;
+		};
+		i += 1;
+	};
+	return a[i] == b[i];
+};
+
+// ============================================================================
+// Character classification
+// ============================================================================
+
+fn is_alpha(c: u8) bool = {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+};
+
+fn is_digit(c: u8) bool = {
+	return c >= '0' && c <= '9';
+};
+
+fn is_hex(c: u8) bool = {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+};
+
+fn is_alnum(c: u8) bool = {
+	return is_alpha(c) || is_digit(c);
+};
+
+fn is_ident_start(c: u8) bool = {
+	return is_alpha(c) || c == '_';
+};
+
+fn is_ident(c: u8) bool = {
+	return is_alnum(c) || c == '_';
+};
+
+fn is_space(c: u8) bool = {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+};
+
+// ============================================================================
+// Expression Parsing Stacks - For iterative parsing (no recursion)
+// ============================================================================
+
+def EXPR_STACK_SIZE: size = 256;
+
+// Operand stack - holds tnode pointers
+let expr_operands: [256]uintptr = [0...];
+let expr_operand_top: size = 0;
+
+// Binary operator stack - holds (operator_kind, bref_pos, bref_len)
+type binop_entry = struct {
+	op: u16,
+	ref_pos: size,
+	ref_len: size,
+};
+let expr_operators: [256]binop_entry = [binop_entry { op = 0, ref_pos = 0, ref_len = 0 }...];
+let expr_operator_top: size = 0;
+
+// Unary operator stack - holds (operator_kind, bref)
+type unop_entry = struct {
+	op: u16,
+	ref_pos: size,
+	ref_len: size,
+};
+let unary_operators: [64]unop_entry = [unop_entry { op = 0, ref_pos = 0, ref_len = 0 }...];
+let unary_op_top: size = 0;
+
+// Stack operations
+fn push_operand(n: uintptr) void = {
+	if (expr_operand_top >= EXPR_STACK_SIZE) {
+		abort("expression too complex (operand stack overflow)");
+	};
+	expr_operands[expr_operand_top] = n;
+	expr_operand_top += 1;
+};
+
+fn pop_operand() uintptr = {
+	if (expr_operand_top == 0) {
+		abort("expression parse error (operand underflow)");
+	};
+	expr_operand_top -= 1;
+	return expr_operands[expr_operand_top];
+};
+
+fn push_binop(op: u16, ref_pos: size, ref_len: size) void = {
+	if (expr_operator_top >= EXPR_STACK_SIZE) {
+		abort("expression too complex (operator stack overflow)");
+	};
+	expr_operators[expr_operator_top].op = op;
+	expr_operators[expr_operator_top].ref_pos = ref_pos;
+	expr_operators[expr_operator_top].ref_len = ref_len;
+	expr_operator_top += 1;
+};
+
+fn pop_binop() binop_entry = {
+	if (expr_operator_top == 0) {
+		abort("expression parse error (operator underflow)");
+	};
+	expr_operator_top -= 1;
+	return expr_operators[expr_operator_top];
+};
+
+fn binop_stack_empty() bool = {
+	return expr_operator_top == 0;
+};
+
+fn binop_stack_top() binop_entry = {
+	return expr_operators[expr_operator_top - 1];
+};
+
+fn push_unop(op: u16, ref_pos: size, ref_len: size) void = {
+	if (unary_op_top >= 64) {
+		abort("too many unary operators");
+	};
+	unary_operators[unary_op_top].op = op;
+	unary_operators[unary_op_top].ref_pos = ref_pos;
+	unary_operators[unary_op_top].ref_len = ref_len;
+	unary_op_top += 1;
+};
+
+fn reset_expr_stacks() void = {
+	expr_operand_top = 0;
+	expr_operator_top = 0;
+	unary_op_top = 0;
+};
+
+// ============================================================================
+// Type Parsing Stacks - For iterative type parsing (no recursion)
+// ============================================================================
+
+def TYPE_WRAPPER_STACK_SIZE: size = 64;
+def TYPE_FRAME_STACK_SIZE: size = 32;
+
+// State machine states for type parsing
+def TPS_PARSE: u16 = 0;       // Parse wrappers + base type
+def TPS_APPLY: u16 = 1;       // Apply wrappers to result
+def TPS_TAGGED_MORE: u16 = 2; // Check for more tagged union members
+
+// Type wrapper entry - tracks pointer/slice/array wrappers
+type type_wrapper = struct {
+	kind: u16,           // N_T_PTR, N_T_SLICE, N_T_UARR, N_T_ARR
+	flags: u16,          // F_NULLABLE
+	size_node: uintptr,  // For arrays, the size expression node
+};
+
+// Type parsing frame - state machine stack entry
+type type_frame = struct {
+	state: u16,           // TPS_PARSE, TPS_APPLY, TPS_TAGGED_MORE
+	wrappers_start: size, // Where this frame's wrappers start in wrapper stack
+	tagged_node: uintptr, // For tagged union parsing
+};
+
+// Static stacks for type parsing
+let type_wrappers: [64]type_wrapper = [type_wrapper { kind = 0, flags = 0, size_node = 0 }...];
+let type_wrapper_top: size = 0;
+
+let type_frames: [32]type_frame = [type_frame { state = 0, wrappers_start = 0, tagged_node = 0 }...];
+let type_frame_top: size = 0;
+
+// ============================================================================
+// get_expr_type Stacks - For iterative type inference (no recursion)
+// ============================================================================
+
+def GET_TYPE_STACK_SIZE: size = 32;
+
+// States for get_expr_type state machine
+def GTS_EVAL: u16 = 0;      // Evaluate expression type
+def GTS_DEREF: u16 = 1;     // Dereference result (for *expr)
+def GTS_FIELD: u16 = 2;     // Look up field in result (for expr.field)
+def GTS_SLICE: u16 = 3;     // Create slice type from array element type
+def GTS_ARR_LIT: u16 = 4;   // Build array type from literal element type
+def GTS_ADDR: u16 = 5;      // Add pointer level (for &expr)
+def GTS_INDEX: u16 = 6;     // Array indexing - get element type (for arr[i])
+
+// Frame for get_expr_type
+type get_type_frame = struct {
+	state: u16,
+	node: uintptr,    // Expression node being evaluated
+	field_ref: bref,  // For GTS_FIELD: the field name to look up
+};
+
+let get_type_frames: [32]get_type_frame = [get_type_frame { state = 0, node = 0, field_ref = bref { pos = 0, length = 0 } }...];
+let get_type_frame_top: size = 0;
+
+// ============================================================================
+// Tree Traversal Stack - For iterative tree walking (emit_bounds_checks, etc.)
+// ============================================================================
+
+def TREE_WALK_STACK_SIZE: size = 256;
+
+let tree_walk_stack: [256]uintptr = [0...];
+let tree_walk_top: size = 0;
+
+fn tree_walk_push(n: uintptr) void = {
+	if (tree_walk_top >= TREE_WALK_STACK_SIZE) {
+		abort("tree too deep (walk stack overflow)");
+	};
+	tree_walk_stack[tree_walk_top] = n;
+	tree_walk_top += 1;
+};
+
+fn tree_walk_pop() uintptr = {
+	if (tree_walk_top == 0) {
+		abort("tree walk underflow");
+	};
+	tree_walk_top -= 1;
+	return tree_walk_stack[tree_walk_top];
+};
+
+fn tree_walk_empty() bool = {
+	return tree_walk_top == 0;
+};

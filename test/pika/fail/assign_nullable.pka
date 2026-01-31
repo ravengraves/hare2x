@@ -1,0 +1,4 @@
+// ERROR: cannot assign nullable pointer to non-nullable
+fn bad(q: nullable *i32) void = {
+	let p: *i32 = q;
+};

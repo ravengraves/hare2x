@@ -1,0 +1,280 @@
+// match.pka - Pattern matching primitives for parsing
+use strings;
+
+// ============================================================================
+// Cursor Type
+// ============================================================================
+
+type cursor = struct {
+	node: nullable *tnode,
+	src: *[*]u8,
+	src_len: size,
+};
+
+fn cur_new(t: *tree) cursor = {
+	return cursor {
+		node = t.root.first_child,
+		src = t.src,
+		src_len = t.src_len,
+	};
+};
+
+fn cur_at(node: *tnode, src: *[*]u8, src_len: size) cursor = {
+	return cursor { node = node, src = src, src_len = src_len };
+};
+
+fn cur_children(node: *tnode, src: *[*]u8, src_len: size) cursor = {
+	return cursor { node = node.first_child, src = src, src_len = src_len };
+};
+
+fn cur_eof(c: *cursor) bool = {
+	return c.node == null;
+};
+
+fn cur_get(c: *cursor) nullable *tnode = {
+	return c.node;
+};
+
+fn cur_next(c: *cursor) void = {
+	match (c.node) {
+	case let n: *tnode => c.node = n.next;
+	case null => void;
+	};
+};
+
+// ============================================================================
+// Basic Matchers
+// ============================================================================
+
+fn m_kind(c: *cursor, k: u16) bool = {
+	match (c.node) {
+	case let n: *tnode =>
+		if (n.kind == k) {
+			c.node = n.next;
+			return true;
+		};
+		return false;
+	case null => return false;
+	};
+};
+
+fn m_kind2(c: *cursor, k1: u16, k2: u16) bool = {
+	match (c.node) {
+	case let n: *tnode =>
+		let k = n.kind;
+		if (k == k1 || k == k2) {
+			c.node = n.next;
+			return true;
+		};
+		return false;
+	case null => return false;
+	};
+};
+
+fn m_lit(c: *cursor, lit: str) bool = {
+	match (c.node) {
+	case let n: *tnode =>
+		if (bref_match(n.ref, lit, c.src)) {
+			c.node = n.next;
+			return true;
+		};
+		return false;
+	case null => return false;
+	};
+};
+
+fn m_any(c: *cursor) bool = {
+	match (c.node) {
+	case let n: *tnode =>
+		c.node = n.next;
+		return true;
+	case null => return false;
+	};
+};
+
+fn m_eof(c: *cursor) bool = {
+	return c.node == null;
+};
+
+// ============================================================================
+// Capturing Matchers
+// ============================================================================
+
+fn m_cap(c: *cursor, out: *nullable *tnode) bool = {
+	match (c.node) {
+	case let n: *tnode =>
+		*out = n;
+		c.node = n.next;
+		return true;
+	case null => return false;
+	};
+};
+
+fn m_cap_kind(c: *cursor, k: u16, out: *nullable *tnode) bool = {
+	match (c.node) {
+	case let n: *tnode =>
+		if (n.kind == k) {
+			*out = n;
+			c.node = n.next;
+			return true;
+		};
+		return false;
+	case null => return false;
+	};
+};
+
+fn m_cap_lit(c: *cursor, lit: str, out: *nullable *tnode) bool = {
+	match (c.node) {
+	case let n: *tnode =>
+		if (bref_match(n.ref, lit, c.src)) {
+			*out = n;
+			c.node = n.next;
+			return true;
+		};
+		return false;
+	case null => return false;
+	};
+};
+
+// ============================================================================
+// Optional Matchers
+// ============================================================================
+
+fn m_opt(c: *cursor, k: u16) nullable *tnode = {
+	match (c.node) {
+	case let n: *tnode =>
+		if (n.kind == k) {
+			c.node = n.next;
+			return n;
+		};
+		return null;
+	case null => return null;
+	};
+};
+
+fn m_opt_lit(c: *cursor, lit: str) nullable *tnode = {
+	match (c.node) {
+	case let n: *tnode =>
+		if (bref_match(n.ref, lit, c.src)) {
+			c.node = n.next;
+			return n;
+		};
+		return null;
+	case null => return null;
+	};
+};
+
+// ============================================================================
+// Lookahead
+// ============================================================================
+
+fn m_peek(c: *cursor) nullable *tnode = {
+	return c.node;
+};
+
+fn m_peek_is(c: *cursor, k: u16) bool = {
+	match (c.node) {
+	case let n: *tnode => return n.kind == k;
+	case null => return false;
+	};
+};
+
+fn m_peek_is2(c: *cursor, k1: u16, k2: u16) bool = {
+	match (c.node) {
+	case let n: *tnode =>
+		let k = n.kind;
+		return k == k1 || k == k2;
+	case null => return false;
+	};
+};
+
+fn m_peek_is3(c: *cursor, k1: u16, k2: u16, k3: u16) bool = {
+	match (c.node) {
+	case let n: *tnode =>
+		let k = n.kind;
+		return k == k1 || k == k2 || k == k3;
+	case null => return false;
+	};
+};
+
+fn m_peek_lit(c: *cursor, lit: str) bool = {
+	match (c.node) {
+	case let n: *tnode => return bref_match(n.ref, lit, c.src);
+	case null => return false;
+	};
+};
+
+fn m_peek_kind(c: *cursor) u16 = {
+	match (c.node) {
+	case let n: *tnode => return n.kind;
+	case null => return 0;
+	};
+};
+
+// ============================================================================
+// Require (match or error)
+// ============================================================================
+
+fn m_need(c: *cursor, k: u16) *tnode = {
+	return match (c.node) {
+	case let n: *tnode =>
+		if (n.kind != k) {
+			err_bref(n.ref, c.src, c.src_len, "unexpected token");
+		};
+		c.node = n.next;
+		yield n;
+	case null =>
+		err("unexpected end of input");
+		abort();
+	};
+};
+
+fn m_need_lit(c: *cursor, lit: str) *tnode = {
+	return match (c.node) {
+	case let n: *tnode =>
+		if (!bref_match(n.ref, lit, c.src)) {
+			err_bref(n.ref, c.src, c.src_len, "unexpected token");
+		};
+		c.node = n.next;
+		yield n;
+	case null =>
+		err("unexpected end of input");
+		abort();
+	};
+};
+
+fn m_need_ident(c: *cursor, ident_kind: u16) *tnode = {
+	return match (c.node) {
+	case let n: *tnode =>
+		if (n.kind != ident_kind) {
+			err_bref(n.ref, c.src, c.src_len, "expected identifier");
+		};
+		if (bref_match(n.ref, "offset", c.src)) {
+			err_bref(n.ref, c.src, c.src_len, "reserved keyword: offset");
+		};
+		c.node = n.next;
+		yield n;
+	case null =>
+		err("unexpected end of input, expected identifier");
+		abort();
+	};
+};
+
+fn err_cursor(c: *cursor, msg: str) void = {
+	match (c.node) {
+	case let n: *tnode => err_bref(n.ref, c.src, c.src_len, msg);
+	case null => err_at(c.src_len, c.src, c.src_len, msg);
+	};
+};
+
+// ============================================================================
+// Mark/Restore
+// ============================================================================
+
+fn m_mark(c: *cursor) cursor = {
+	return *c;
+};
+
+fn m_restore(c: *cursor, mark: cursor) void = {
+	*c = mark;
+};

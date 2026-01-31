@@ -1,0 +1,16 @@
+// ERROR on next line: exported type depends on unexported type
+// Expected: "error: exported type depends on unexported type"
+// Fix: export the dependency: export type none = !void;
+
+// TODO (Alec, 2026) technically this is not a pika-specific error, so need to fix the others transpilers eventually
+
+type none = !void;
+export type optional_int = (i32 | none);
+
+export fn _main() void = {
+	let v: optional_int = none: optional_int;
+	match (v) {
+	case i32 => void;
+	case none => void;
+	};
+};

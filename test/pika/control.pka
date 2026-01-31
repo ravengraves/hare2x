@@ -1,0 +1,73 @@
+// control.ha - Control flow tests
+
+// If statement
+export fn abs(x: i32) i32 = {
+	if (x < 0) {
+		return -x;
+	} else {
+		return x;
+	};
+};
+
+// If-else chain
+export fn sign(x: i32) i32 = {
+	if (x > 0) {
+		return 1;
+	} else if (x < 0) {
+		return -1;
+	} else {
+		return 0;
+	};
+};
+
+// For loop - counting
+export fn sum_to(n: i32) i32 = {
+	let total: i32 = 0;
+	for (let i: i32 = 1; i <= n; i += 1) {
+		total += i;
+	};
+	return total;
+};
+
+// For loop - while style
+export fn count_bits(n: u32) i32 = {
+	let count: i32 = 0;
+	for (n != 0) {
+		if ((n & 1) != 0) {
+			count += 1;
+		};
+		n >>= 1;
+	};
+	return count;
+};
+
+// Switch statement
+export fn day_name(day: i32) i32 = {
+	switch (day) {
+	case 0 => return 0;  // Sunday
+	case 1 => return 1;  // Monday
+	case 2 => return 2;  // Tuesday
+	case 3, 4, 5 => return 3;  // Wed-Fri
+	case => return -1;  // Unknown
+	};
+};
+
+// Break and continue
+export fn find_first_even(arr: *i32, n: i32) i32 = {
+	for (let i: i32 = 0; i < n; i += 1) {
+		let val = arr: *[*]i32;
+		if ((val[i] & 1) != 0) {
+			continue;
+		};
+		return val[i];
+	};
+	return -1;
+};
+
+export fn main() void = {
+	let a = abs(-5);
+	let s = sign(-10);
+	let sum = sum_to(100);
+	let bits = count_bits(255);
+	let day = day_name(3);
+};

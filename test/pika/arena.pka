@@ -1,0 +1,151 @@
+// arena.ha - Test static buffer arena allocator
+use rt;
+
+// Static buffer for arena
+const ARENA_SIZE: size = 4096;
+let arena_buf: [4096]u8 = [0...];
+let arena_used: size = 0;
+
+// Align size up to 8-byte boundary
+fn align8(n: size) size = {
+	return (n + 7) & ~7z;
+};
+
+// Allocate from arena, returns null if out of space
+fn arena_alloc(sz: size) nullable *u8 = {
+	let aligned = align8(sz);
+	if (arena_used + aligned > ARENA_SIZE) {
+		return null;
+	};
+	let ptr = &arena_buf[arena_used];
+	arena_used += aligned;
+	return ptr;
+};
+
+// Reset arena (free all allocations)
+fn arena_reset() void = {
+	arena_used = 0;
+};
+
+// Get remaining space
+fn arena_remaining() size = {
+	return ARENA_SIZE - arena_used;
+};
+
+// Get used space
+fn arena_used_bytes() size = {
+	return arena_used;
+};
+
+// Test: allocate integers
+fn test_int_alloc() void = {
+	arena_reset();
+
+	let r1 = arena_alloc(4);
+	let r2 = arena_alloc(4);
+	match (r1) {
+	case let p1_raw: *u8 => {
+		let p1 = p1_raw: *i32;
+		*p1 = 42;
+		match (r2) {
+		case let p2_raw: *u8 => {
+			let p2 = p2_raw: *i32;
+			*p2 = 100;
+			assert(*p1 == 42, "p1 value corrupted");
+			assert(*p2 == 100, "p2 value corrupted");
+		};
+		case null =>
+			assert(false, "second alloc failed");
+		};
+	};
+	case null =>
+		assert(false, "first alloc failed");
+	};
+	assert(arena_used_bytes() == 16, "expected 16 bytes used (8+8 aligned)");
+};
+
+// Test: allocate array
+fn test_array_alloc() void = {
+	arena_reset();
+
+	let result = arena_alloc(40);
+	match (result) {
+	case let ptr: *u8 => {
+		let arr = ptr: *[*]i32;
+		// Fill array using pointer indexing
+		for (let i: i32 = 0; i < 10; i += 1) {
+			arr[i] = i * i;
+		};
+		// Verify
+		assert(arr[0] == 0);
+		assert(arr[3] == 9);
+		assert(arr[9] == 81);
+	};
+	case null =>
+		assert(false, "array alloc failed");
+	};
+};
+
+// Test: exhaust arena
+fn test_exhaust() void = {
+	arena_reset();
+
+	// Allocate most of the arena
+	let big = arena_alloc(4000);
+	assert(big != null, "big alloc failed");
+
+	// Should have ~96 bytes left (4096 - 4000)
+	let remaining = arena_remaining();
+	assert(remaining == 96, "wrong remaining");
+
+	// This should succeed
+	let small = arena_alloc(90);
+	assert(small != null, "small alloc should succeed");
+
+	// This should fail (only 8 bytes left, need more than 8 aligned)
+	let fail = arena_alloc(16);
+	assert(fail == null, "should have failed");
+};
+
+// Test: reset and reuse
+fn test_reset() void = {
+	arena_reset();
+
+	let p1 = arena_alloc(100);
+	assert(p1 != null);
+	let used1 = arena_used_bytes();
+
+	arena_reset();
+	assert(arena_used_bytes() == 0, "reset failed");
+
+	let p2 = arena_alloc(100);
+	assert(p2 != null);
+
+	// After reset, should get same address
+	assert(p1 == p2, "should reuse same memory");
+};
+
+// Test: alignment
+fn test_alignment() void = {
+	arena_reset();
+
+	// Allocate 1 byte, should use 8
+	let p1 = arena_alloc(1);
+	assert(arena_used_bytes() == 8);
+
+	// Allocate 7 bytes, should use 8
+	let p2 = arena_alloc(7);
+	assert(arena_used_bytes() == 16);
+
+	// Allocate 9 bytes, should use 16
+	let p3 = arena_alloc(9);
+	assert(arena_used_bytes() == 32);
+};
+
+export fn main() void = {
+	test_int_alloc();
+	test_array_alloc();
+	test_exhaust();
+	test_reset();
+	test_alignment();
+};

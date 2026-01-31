@@ -1,0 +1,399 @@
+// ast_utils.pka - Common AST helpers
+
+fn kind_in2(k: u16, a: u16, b: u16) bool = {
+	return k == a || k == b;
+};
+
+fn kind_in4(k: u16, a: u16, b: u16, c: u16, d: u16) bool = {
+	return k == a || k == b || k == c || k == d;
+};
+
+fn node_is_kind(n: nullable *tnode, k: u16) bool = {
+	return match (n) {
+	case let p: *tnode => yield p.kind == k;
+	case null => yield false;
+	};
+};
+
+fn is_str_kind(k: u16) bool = {
+	return k == N_STR || k == N_RAWSTR;
+};
+
+fn is_lit_kind(k: u16) bool = {
+	return k == N_INT || k == N_FLOAT || k == N_BOOL || k == N_CHAR;
+};
+
+fn is_stmt_start_kind(k: u16) bool = {
+	return k == N_BLOCK || k == N_RET || k == N_EXPR_STMT || k == N_LET ||
+		k == N_IF || k == N_FOR || k == N_SWITCH || k == N_MATCH ||
+		k == N_BREAK || k == N_CONTINUE || k == N_ASGN || k == N_ASSERT;
+};
+
+fn tok_is_unary(k: u16) bool = {
+	return k == TK_MINUS || k == TK_BANG || k == TK_TILDE || k == TK_AMP || k == TK_STAR;
+};
+
+fn tok_is_str(k: u16) bool = {
+	return k == TK_STR || k == TK_RAWSTR;
+};
+
+fn tok_is_assign(k: u16) bool = {
+	return k == TK_EQ || (k >= TK_PLUS_EQ && k <= TK_CARET_EQ) || k == TK_SHL_EQ || k == TK_SHR_EQ;
+};
+
+fn node_is_lit(n: nullable *tnode) bool = {
+	return match (n) {
+	case let p: *tnode => yield is_lit_kind(p.kind);
+	case null => yield false;
+	};
+};
+
+fn node_is_str(n: nullable *tnode) bool = {
+	return match (n) {
+	case let p: *tnode => yield is_str_kind(p.kind);
+	case null => yield false;
+	};
+};
+
+fn type_is_prim_name(ty: *tnode, name: str, src: *[*]u8) bool = {
+	return ty.kind == N_T_PRIM && bref_match(ty.ref, name, src);
+};
+
+fn type_is_prim_tok(ty: *tnode, tok: u16) bool = {
+	return ty.kind == N_T_PRIM && ty.ival == tok: i64;
+};
+
+fn type_is_str(ty: *tnode, src: *[*]u8) bool = {
+	return ty.kind == N_T_PRIM &&
+		(ty.ival == TK_STR: i64 || bref_match(ty.ref, "str", src));
+};
+
+fn type_is_void(ty: *tnode, src: *[*]u8) bool = {
+	return ty.kind == N_T_PRIM &&
+		(ty.ival == TK_VOID: i64 || bref_match(ty.ref, "void", src));
+};
+
+fn type_strip_ptr(ty: *tnode) nullable *tnode = {
+	let t: *tnode = ty;
+	for (t.kind == N_T_PTR) {
+		let inner = t_first(t);
+		if (inner == null) { return null; };
+		t = unwrap(inner);
+	};
+	return t;
+};
+
+fn case_is_default(cn: *tnode) bool = {
+	return (cn.flags & F_STATIC) != 0;
+};
+
+fn case_has_binding(cn: *tnode) bool = {
+	return (cn.flags & F_MUTABLE) != 0;
+};
+
+fn case_list_first(root: *tnode) nullable *tnode = {
+	let first = t_first(root);
+	if (first == null) { return null; };
+	return unwrap(first).next;
+};
+
+fn case_body_start(cn: *tnode) nullable *tnode = {
+	let child = t_first(cn);
+	for (child != null) {
+		let c = unwrap(child);
+		if (is_stmt_start_kind(c.kind)) { return child; };
+		child = c.next;
+	};
+	return null;
+};
+
+fn case_value_count(cn: *tnode) size = {
+	let count = 0z;
+	let child = t_first(cn);
+	for (child != null) {
+		let c = unwrap(child);
+		if (is_stmt_start_kind(c.kind)) { break; };
+		count += 1;
+		child = c.next;
+	};
+	return count;
+};
+
+fn case_body_node(cn: *tnode) nullable *tnode = {
+	return t_last(cn);
+};
+
+fn case_total_cases(root: *tnode) size = {
+	let count = 0z;
+	let cn = case_list_first(root);
+	for (cn != null) {
+		count += 1;
+		cn = unwrap(cn).next;
+	};
+	return count;
+};
+
+fn case_has_default(root: *tnode) bool = {
+	let cn = case_list_first(root);
+	for (cn != null) {
+		if (case_is_default(unwrap(cn))) { return true; };
+		cn = unwrap(cn).next;
+	};
+	return false;
+};
+
+fn case_value_total(root: *tnode) size = {
+	let total = 0z;
+	let cn = case_list_first(root);
+	for (cn != null) {
+		let c = unwrap(cn);
+		if (!case_is_default(c)) { total += case_value_count(c); };
+		cn = c.next;
+	};
+	return total;
+};
+
+type body_cursor = struct {
+	node: nullable *tnode,
+	in_block: bool,
+};
+
+fn body_cursor_from(body: nullable *tnode) body_cursor = {
+	if (body == null) {
+		return body_cursor { node = null, in_block = false };
+	};
+	let b: *tnode = unwrap(body);
+	if (b.kind == N_BLOCK) {
+		return body_cursor { node = t_first(b), in_block = true };
+	};
+	return body_cursor { node = b, in_block = false };
+};
+
+fn body_cursor_next(c: *body_cursor) nullable *tnode = {
+	if (c.node == null) { return null; };
+	let n: *tnode = unwrap(c.node);
+	if (c.in_block) { c.node = n.next; }
+	else { c.node = null; };
+	return n;
+};
+
+fn tree_find_first_kind(root: *tnode, kind: u16) nullable *tnode = {
+	let saved_top = tree_walk_top;
+	tree_walk_push(root: uintptr);
+	for (!tree_walk_empty() && tree_walk_top > saved_top) {
+		let node: *tnode = tree_walk_pop(): *tnode;
+		if (node.kind == kind) {
+			tree_walk_top = saved_top;
+			return node;
+		};
+		let child = t_first(node);
+		for (child != null) {
+			let c: *tnode = unwrap(child);
+			tree_walk_push(c: uintptr);
+			child = c.next;
+		};
+	};
+	tree_walk_top = saved_top;
+	return null;
+};
+
+fn qual_id_matches(n: nullable *tnode, module: str, member: str, src: *[*]u8) bool = {
+	return match (n) {
+	case let q: *tnode =>
+		if (q.kind != N_QUAL_ID) { yield false; };
+		if (!bref_match(q.ref, module, src)) { yield false; };
+		yield match (t_first(q)) {
+		case let m: *tnode => yield bref_match(m.ref, member, src);
+		case null => yield false;
+		};
+	case null => yield false;
+	};
+};
+
+// ============================================================================
+// Array Utilities
+// ============================================================================
+
+// Count elements in array literal
+fn arr_lit_count(n: *tnode) size = {
+	let count = 0z;
+	let elem = t_first(n);
+	for (elem != null) {
+		count += 1;
+		elem = unwrap(elem).next;
+	};
+	return count;
+};
+
+// Check if a single node (non-recursive) is a zero value
+fn node_is_zero_scalar(n: *tnode) bool = {
+	if (kind_in2(n.kind, N_INT, N_BOOL) || n.kind == N_CHAR) {
+		return n.ival == 0;
+	};
+	if (n.kind == N_NULL) { return true; };
+	return false;
+};
+
+// Check if an expression is all zeros (iterative, uses tree_walk stack)
+fn expr_is_all_zeros(n: *tnode) bool = {
+	// Quick check for simple scalars
+	if (node_is_zero_scalar(n)) { return true; };
+	// Must be struct or array literal to contain nested zeros
+	if (n.kind != N_STRUCT_LIT && n.kind != N_ARR_LIT) { return false; };
+	// Use tree walk stack for iterative traversal
+	let saved_top = tree_walk_top;
+	tree_walk_push(n: uintptr);
+	for (!tree_walk_empty() && tree_walk_top > saved_top) {
+		let current: *tnode = tree_walk_pop(): *tnode;
+		if (node_is_zero_scalar(current)) { continue; };
+		if (current.kind == N_STRUCT_LIT) {
+			// Push all field values onto stack
+			let field = t_first(current);
+			for (field != null) {
+				let f: *tnode = unwrap(field);
+				let val = t_first(f);
+				if (val == null) {
+					tree_walk_top = saved_top;
+					return false;
+				};
+				tree_walk_push(unwrap(val): uintptr);
+				field = f.next;
+			};
+		} else if (current.kind == N_ARR_LIT) {
+			// Push all elements onto stack
+			let elem = t_first(current);
+			for (elem != null) {
+				tree_walk_push(unwrap(elem): uintptr);
+				elem = unwrap(elem).next;
+			};
+		} else {
+			// Not a zero scalar and not a composite - not all zeros
+			tree_walk_top = saved_top;
+			return false;
+		};
+	};
+	tree_walk_top = saved_top;
+	return true;
+};
+
+// Check if last element of array literal is zero/null
+fn arr_lit_last_is_zero(n: *tnode) bool = {
+	let last = t_last(n);
+	if (last == null) { return false; };
+	return expr_is_all_zeros(unwrap(last));
+};
+
+// Get size node from array type (second child after element type)
+fn arr_size_node(t: *tnode) nullable *tnode = {
+	match (t_first(t)) {
+	case let elem: *tnode => return elem.next;
+	case null => return null;
+	};
+};
+
+// Try to extract literal integer from array size
+fn arr_size_literal(arr_typ: *tnode, src: *[*]u8, out: *i64) bool = {
+	let size_node = arr_size_node(arr_typ);
+	if (size_node == null) { return false; };
+	let sn: *tnode = unwrap(size_node);
+	if (sn.kind == N_INT && sn.ref.length == 0) {
+		*out = sn.ival;
+		return true;
+	};
+	if (sn.kind == TK_INT) {
+		*out = parse_int_base(sn.ref, src).val;
+		return true;
+	};
+	return false;
+};
+// ============================================================================
+// Type Query Utilities
+// ============================================================================
+
+// Count pointer indirection depth
+fn ptr_depth(ty: *tnode) i64 = {
+	let depth: i64 = 0;
+	let t: *tnode = ty;
+	for (t.kind == N_T_PTR) {
+		depth += 1;
+		let inner: nullable *tnode = t_first(t);
+		if (inner == null) { break; };
+		t = unwrap(inner);
+	};
+	return depth;
+};
+
+// Check if type is a pointer (possibly multi-level) to a sized array
+fn is_ptr_to_array(typ: *tnode) bool = {
+	let current: *tnode = typ;
+	// Skip through pointer levels
+	for (current.kind == N_T_PTR) {
+		let inner = t_first(current);
+		if (inner == null) { return false; };
+		current = unwrap(inner);
+	};
+	// Check if innermost type is a sized array
+	return current.kind == N_T_ARR;
+};
+
+// ============================================================================
+// Variadic Array Analysis
+// ============================================================================
+
+// Information about variadic array literal [x, y...]
+type variadic_array_info = struct {
+	is_variadic: bool,
+	elem_count: size,
+	last_is_zero: bool,
+	arr_type: nullable *tnode,
+	arr_lit: nullable *tnode,
+	size_is_literal: bool,
+	size_literal: i64,
+};
+
+// Analyze variadic array literal initialization
+fn analyze_variadic_array(ty: nullable *tnode, init: nullable *tnode, src: *[*]u8) variadic_array_info = {
+	let info = variadic_array_info {
+		is_variadic = false,
+		elem_count = 0,
+		last_is_zero = false,
+		arr_type = null,
+		arr_lit = null,
+		size_is_literal = false,
+		size_literal = 0,
+	};
+
+	if (ty == null || init == null) { return info; };
+
+	let ty_nn: *tnode = unwrap(ty);
+	let init_nn: *tnode = unwrap(init);
+
+	// Check if init is variadic array literal
+	if (init_nn.kind != N_ARR_LIT || (init_nn.flags & F_VARIADIC) == 0) {
+		return info;
+	};
+
+	// Check if type is array
+	if (ty_nn.kind != N_T_ARR) { return info; };
+
+	// Variadic array found
+	info.is_variadic = true;
+	info.elem_count = arr_lit_count(init_nn);
+	info.last_is_zero = arr_lit_last_is_zero(init_nn);
+	info.arr_type = ty_nn;
+	info.arr_lit = init_nn;
+
+	// Try to extract size
+	if ((ty_nn.flags & F_INFERRED) != 0) {
+		info.size_is_literal = true;
+		info.size_literal = info.elem_count: i64;
+	} else {
+		let size_val: i64 = 0;
+		if (arr_size_literal(ty_nn, src, &size_val)) {
+			info.size_is_literal = true;
+			info.size_literal = size_val;
+		};
+	};
+
+	return info;
+};

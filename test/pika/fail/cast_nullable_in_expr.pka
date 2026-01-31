@@ -1,0 +1,8 @@
+// ERROR: cannot cast nullable pointer to non-nullable in expression
+fn use_ptr(p: *i32) void = {
+	p:void;
+};
+
+fn bad(q: nullable *i32) void = {
+	let p: *i32 = (q: *i32);
+};

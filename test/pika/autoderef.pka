@@ -1,0 +1,233 @@
+// Test: Pointer field access auto-dereference (. vs ->)
+use rt;
+
+type point = struct {
+	x: i32,
+	y: i32,
+};
+
+// Test pointer from array indexing with field access
+fn test_array_ptr() void = {
+	let points: [3]point = [
+		point { x = 1, y = 2 },
+		point { x = 3, y = 4 },
+		point { x = 5, y = 6 },
+	];
+
+	// Test: let ptr = &arr[i]; ptr.field should use ->
+	let ptr: *point = &points[1];
+	assert(ptr.x == 3);  // Should generate ptr->x
+	assert(ptr.y == 4);  // Should generate ptr->y
+};
+
+// Test single pointer auto-deref
+fn test_single_ptr() void = {
+	let pt = point { x = 10, y = 20 };
+	let p: *point = &pt;
+	assert(p.x == 10);  // p->x
+	assert(p.y == 20);  // p->y
+};
+
+// Test double pointer indirection
+fn test_double_ptr() void = {
+	let pt = point { x = 30, y = 40 };
+	let p: *point = &pt;
+	let pp: **point = &p;
+	assert(pp.x == 30);  // (*pp)->x
+	assert(pp.y == 40);  // (*pp)->y
+};
+
+// Test triple pointer indirection
+fn test_triple_ptr() void = {
+	let pt = point { x = 50, y = 60 };
+	let p: *point = &pt;
+	let pp: **point = &p;
+	let ppp: ***point = &pp;
+	assert(ppp.x == 50);  // (**ppp)->x
+	assert(ppp.y == 60);  // (**ppp)->y
+};
+
+// Test parameter pointer auto-deref
+fn use_point(p: *point) i32 = {
+	return p.x + p.y;
+};
+
+fn test_param() void = {
+	let pt = point { x = 100, y = 200 };
+	let sum = use_point(&pt);
+	assert(sum == 300);
+};
+
+// Test double pointer parameter
+fn use_pp(pp: **point) i32 = {
+	return pp.x * 2;  // (*pp)->x * 2
+};
+
+fn test_param_double() void = {
+	let pt = point { x = 25, y = 50 };
+	let p: *point = &pt;
+	let result = use_pp(&p);
+	assert(result == 50);
+};
+
+// Linked list node - self-referential struct
+type node = struct {
+	data: i32,
+	next: nullable *node,
+	prev: nullable *node,
+};
+
+type container = struct {
+	first: nullable *node,
+	last: nullable *node,
+	count: i32,
+};
+
+// Test parameter auto-deref with linked list operations
+fn append_node(c: *container, n: *node) void = {
+	// c.last auto-derefs c, then accesses last field
+	// Assign to local variable for match narrowing
+	let last = c.last;
+	match (last) {
+	case let l: *node => {
+		// In this arm, l is non-null
+		l.next = n;
+		n.prev = l;
+	};
+	case null =>
+		c.first = n;
+	};
+	c.last = n;
+	c.count += 1;
+};
+
+fn test_linked_list() void = {
+	let n1 = node { data = 1, next = null, prev = null };
+	let n2 = node { data = 2, next = null, prev = null };
+	let n3 = node { data = 3, next = null, prev = null };
+	let c = container { first = null, last = null, count = 0 };
+
+	append_node(&c, &n1);
+	assert(c.first == &n1);
+	assert(c.last == &n1);
+	assert(c.count == 1);
+
+	append_node(&c, &n2);
+	assert(n1.next == &n2);
+	assert(n2.prev == &n1);
+	assert(c.last == &n2);
+	assert(c.count == 2);
+
+	append_node(&c, &n3);
+	assert(n2.next == &n3);
+	assert(n3.prev == &n2);
+	assert(c.last == &n3);
+	assert(c.count == 3);
+};
+
+// Test mixed: struct with pointer field
+type box = struct {
+	pt: *point,
+};
+
+fn test_nested() void = {
+	let pt = point { x = 70, y = 80 };
+	let b = box { pt = &pt };
+	let pb: *box = &b;
+	// pb.pt auto-derefs pb (single ptr) to get *point
+	// Then pb.pt.x uses auto-deref because pb.pt is *point
+	assert(pb.pt.x == 70);
+};
+
+// Test deep pointer chain through pointer fields
+type inner = struct {
+	value: i32,
+};
+
+type middle = struct {
+	inner: *inner,
+};
+
+type outer = struct {
+	mid: *middle,
+};
+
+// Test nested auto-deref via pointer field inside pointer to struct
+type call_data = struct {
+	func: *inner,
+};
+
+fn test_pointer_field_chain() void = {
+	let leaf = inner { value = 1234 };
+	let cd = call_data { func = &leaf };
+	let pcd: *call_data = &cd;
+	assert(pcd.func.value == 1234);
+};
+
+fn test_pointer_chain() void = {
+	let leaf = inner { value = 777 };
+	let mid = middle { inner = &leaf };
+	let top = outer { mid = &mid };
+	let ptop: *outer = &top;
+	let pptop: **outer = &ptop;
+	assert(pptop.mid.inner.value == 777);
+};
+
+// Test that non-pointer vars use regular field access
+fn test_non_pointer() void = {
+	let pt = point { x = 111, y = 222 };
+	assert(pt.x == 111);  // Regular field access, not ->
+	assert(pt.y == 222);
+};
+
+// Test array pointer auto-dereference
+fn test_array_pointer_deref() void = {
+	let arr: [3]i32 = [10, 20, 30];
+	let ptr: *[3]i32 = &arr;
+	// ptr[0] should auto-deref to (*ptr)[0]
+	assert(ptr[0] == 10);
+	assert(ptr[1] == 20);
+	assert(ptr[2] == 30);
+};
+
+// Test double pointer to array
+fn test_double_array_pointer() void = {
+	let arr: [2]i32 = [100, 200];
+	let ptr: *[2]i32 = &arr;
+	let pptr: **[2]i32 = &ptr;
+	// pptr[0] should auto-deref twice: (**pptr)[0]
+	assert(pptr[0] == 100);
+	assert(pptr[1] == 200);
+};
+
+// Test match-based nullable access with auto-deref
+fn test_nullable_deref() void = {
+	let pt = point { x = 42, y = 84 };
+	let p: nullable *point = &pt;
+	// Use match to narrow type, then auto-deref
+	match (p) {
+	case let ptr: *point => {
+		assert(ptr.x == 42);
+		assert(ptr.y == 84);
+	};
+	case null =>
+		assert(false, "should not be null");
+	};
+};
+
+export fn main() void = {
+	test_array_ptr();
+	test_single_ptr();
+	test_double_ptr();
+	test_triple_ptr();
+	test_param();
+	test_param_double();
+	test_linked_list();
+	test_nested();
+	test_pointer_field_chain();
+	test_pointer_chain();
+	test_non_pointer();
+	test_nullable_deref();
+	test_array_pointer_deref();
+	test_double_array_pointer();
+};

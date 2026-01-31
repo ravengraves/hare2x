@@ -1,0 +1,11 @@
+// ERROR: match not exhaustive: missing cases
+type color = enum { RED, GREEN, BLUE };
+
+fn test() void = {
+	let c: color = color::RED;
+	match (c) {
+	case color::RED => void;
+	case color::GREEN => void;
+	// missing color::BLUE
+	};
+};

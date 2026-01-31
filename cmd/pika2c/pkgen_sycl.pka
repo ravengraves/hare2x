@@ -1,0 +1,3481 @@
+// pkgen_sycl.pka - Pika SYCL generation (AST -> SYCL C++)
+
+// ============================================================================
+// Constants & Configuration
+// ============================================================================
+
+// ============================================================================
+// Kernel Metadata Structures
+// ============================================================================
+
+type sycl_kernel_info = struct {
+	name: bref,                  // kernel name
+	dim: i64,                    // 1, 2, or 3
+	uses_nd_range: bool,         // true if first param is nd_item, false if id/item
+	local_params: [16]bref,      // Names of local_* parameters
+	local_count: size,           // Number of local_* parameters
+	fn_node: nullable *tnode,    // Pointer to function AST node
+};
+
+// Device function metadata for error propagation
+type sycl_fn_info = struct {
+	name: bref,
+	node: nullable *tnode,
+	may_fail: bool,
+	needs_error: bool,
+};
+
+// Global device function registry (max 256 per file)
+let sycl_fn_list: [256]sycl_fn_info = [sycl_fn_info {
+	name = bref { pos = 0, length = 0 },
+	node = null,
+	may_fail = false,
+	needs_error = false,
+}...];
+let sycl_fn_count: size = 0;
+
+// Global kernel registry (max 64 kernels per file)
+let sycl_kernels: [64]sycl_kernel_info = [sycl_kernel_info {
+	name = bref { pos = 0, length = 0 },
+	dim = 0,
+	uses_nd_range = false,
+	local_params = [bref { pos = 0, length = 0 }...],
+	local_count = 0,
+	fn_node = null,
+}...];
+let sycl_kernel_count: size = 0;
+
+// Current kernel context (when emitting operator() body)
+let sycl_current_kernel: nullable *sycl_kernel_info = null;
+
+// Error reference tracking (for device error propagation)
+// (defined in gen_sycl.pka)
+
+// ----------------------------------------------------------------------------
+// Device Function Registry (for error propagation)
+// ----------------------------------------------------------------------------
+
+fn sycl_fn_reset() void = {
+	sycl_fn_count = 0;
+};
+
+fn sycl_fn_add(fn_node: *tnode) void = {
+	if (sycl_fn_count >= 256) {
+		abort("too many device functions (max 256 per file)");
+	};
+	sycl_fn_list[sycl_fn_count].name = fn_node.ref;
+	sycl_fn_list[sycl_fn_count].node = fn_node;
+	sycl_fn_list[sycl_fn_count].may_fail = false;
+	sycl_fn_list[sycl_fn_count].needs_error = false;
+	sycl_fn_count += 1;
+};
+
+fn sycl_fn_find(name: bref, src: *[*]u8) nullable *sycl_fn_info = {
+	for (let i = 0z; i < sycl_fn_count; i += 1) {
+		if (bref_eq(sycl_fn_list[i].name, name, src)) {
+			return &sycl_fn_list[i];
+		};
+	};
+	return null;
+};
+
+fn sycl_fn_body_may_fail(fn_node: *tnode) bool = {
+	let body_opt = sycl_find_fn_body(fn_node);
+	if (body_opt == null) { return false; };
+
+	let stack: [512]uintptr = [0...];
+	let top: size = 0;
+	stack[top] = unwrap(body_opt): uintptr;
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let node: *tnode = stack[top]: *tnode;
+		if (node.kind == N_ASSERT || node.kind == N_ABORT) {
+			return true;
+		};
+		let child = t_first(node);
+		for (child != null) {
+			if (top >= 512) { abort("function too complex (may_fail scan overflow)"); };
+			stack[top] = unwrap(child): uintptr;
+			top += 1;
+			child = unwrap(child).next;
+		};
+	};
+
+	return false;
+};
+
+fn sycl_fn_calls_error(g: *codegen, fn_node: *tnode) bool = {
+	let body_opt = sycl_find_fn_body(fn_node);
+	if (body_opt == null) { return false; };
+
+	let stack: [512]uintptr = [0...];
+	let top: size = 0;
+	stack[top] = unwrap(body_opt): uintptr;
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let node: *tnode = stack[top]: *tnode;
+		if (node.kind == N_CALL) {
+			let func = t_first_nn(node);
+			if (func.kind == N_ID) {
+				match (sycl_fn_find(func.ref, g.t.src)) {
+				case let info: *sycl_fn_info =>
+					if ((*info).needs_error) { return true; };
+				case null => void;
+				};
+			};
+		};
+		let child = t_first(node);
+		for (child != null) {
+			if (top >= 512) { abort("function too complex (call scan overflow)"); };
+			stack[top] = unwrap(child): uintptr;
+			top += 1;
+			child = unwrap(child).next;
+		};
+	};
+
+	return false;
+};
+
+fn sycl_collect_device_functions(g: *codegen, unit: *tnode) void = {
+	sycl_fn_reset();
+
+	let decl_opt = t_first(unit);
+	for (decl_opt != null) {
+		let decl = unwrap(decl_opt);
+		if (decl.kind == N_FN && !sycl_is_kernel_fn(decl, g.t.src)) {
+			if ((decl.flags & F_EXTERN) == 0) {
+				sycl_fn_add(decl);
+			};
+		};
+		decl_opt = decl.next;
+	};
+
+	// Initial may_fail marks
+	for (let i = 0z; i < sycl_fn_count; i += 1) {
+		let fn_node = unwrap(sycl_fn_list[i].node);
+		sycl_fn_list[i].may_fail = sycl_fn_body_may_fail(fn_node);
+		sycl_fn_list[i].needs_error = sycl_fn_list[i].may_fail;
+	};
+
+	// Propagate through call graph
+	let changed = true;
+	for (changed) {
+		changed = false;
+		for (let j = 0z; j < sycl_fn_count; j += 1) {
+			if (!sycl_fn_list[j].needs_error) {
+				let call_fn_node = unwrap(sycl_fn_list[j].node);
+				if (sycl_fn_calls_error(g, call_fn_node)) {
+					sycl_fn_list[j].needs_error = true;
+					changed = true;
+				};
+			};
+		};
+	};
+};
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+fn sycl_err(g: *codegen, r: bref, msg: str) void = {
+	err_bref(r, g.t.src, g.t.src_len, msg);
+};
+
+fn sycl_warn(g: *codegen, r: bref, msg: str) void = {
+	warn_bref(r, g.t.src, g.t.src_len, msg);
+};
+
+// ============================================================================
+// Feature Detection and Validation
+// ============================================================================
+// We support portable SYCL 2020 features only.
+// Vendor extensions (ext::intel, ext::oneapi, ext::codeplay) are NOT supported.
+// USM pointer allocations are NOT supported - use buffers/accessors instead.
+
+fn sycl_check_unsupported(g: *codegen, name: bref) void = {
+	let src = g.t.src;
+
+	// === HARD ERRORS: Non-portable vendor extensions ===
+
+	// Intel extensions - NOT PORTABLE
+	if (sycl_bref_has_prefix(name, "ext::intel", src) ||
+	    sycl_bref_has_prefix(name, "sycl::ext::intel", src)) {
+		sycl_err(g, name, "Intel-specific extension not supported. Use portable SYCL 2020 features instead.");
+	};
+
+	// OneAPI extensions - NOT PORTABLE
+	if (sycl_bref_has_prefix(name, "ext::oneapi", src) ||
+	    sycl_bref_has_prefix(name, "sycl::ext::oneapi", src)) {
+		sycl_err(g, name, "OneAPI extension not supported. Use portable SYCL 2020 features instead.");
+	};
+
+	// Codeplay extensions - NOT PORTABLE
+	if (sycl_bref_has_prefix(name, "ext::codeplay", src) ||
+	    sycl_bref_has_prefix(name, "sycl::ext::codeplay", src)) {
+		sycl_err(g, name, "Codeplay extension not supported. Use portable SYCL 2020 features instead.");
+	};
+
+	// Any ext:: namespace is non-portable
+	if (sycl_bref_has_prefix(name, "ext::", src) ||
+	    sycl_bref_has_prefix(name, "sycl::ext::", src)) {
+		sycl_err(g, name, "Vendor extensions (ext::) not supported. Use portable SYCL 2020 features.");
+	};
+
+	// === HARD ERRORS: USM pointer allocations ===
+	// We use buffers/accessors, not raw pointer allocations
+
+	if (bref_match(name, "malloc_device", src) ||
+	    bref_match(name, "sycl::malloc_device", src)) {
+		sycl_err(g, name, "malloc_device not supported. Use buffers and accessors for portable memory management.");
+	};
+	if (bref_match(name, "malloc_shared", src) ||
+	    bref_match(name, "sycl::malloc_shared", src)) {
+		sycl_err(g, name, "malloc_shared not supported. Use buffers and accessors for portable memory management.");
+	};
+	if (bref_match(name, "malloc_host", src) ||
+	    bref_match(name, "sycl::malloc_host", src)) {
+		sycl_err(g, name, "malloc_host not supported. Use buffers and accessors for portable memory management.");
+	};
+	if (bref_match(name, "aligned_alloc_device", src) ||
+	    bref_match(name, "aligned_alloc_shared", src) ||
+	    bref_match(name, "aligned_alloc_host", src)) {
+		sycl_err(g, name, "USM aligned_alloc not supported. Use buffers and accessors.");
+	};
+	if (bref_match(name, "sycl::free", src)) {
+		sycl_err(g, name, "sycl::free (USM) not supported. Use buffers and accessors.");
+	};
+
+	// === WARNINGS: Features not yet implemented ===
+
+	// Sub-group operations (SYCL 2020 but complex to implement)
+	if (bref_match(name, "sycl::sub_group", src) ||
+	    bref_match(name, "sub_group", src)) {
+		sycl_warn(g, name, "sub_group operations not yet implemented. Use work-group operations instead.");
+		return;
+	};
+	if (bref_match(name, "sub_group_barrier", src)) {
+		sycl_warn(g, name, "sub_group_barrier not implemented. Use barrier() for work-group sync.");
+		return;
+	};
+
+	// Hierarchical parallelism
+	if (bref_match(name, "parallel_for_work_group", src) ||
+	    bref_match(name, "parallel_for_work_item", src)) {
+		sycl_warn(g, name, "Hierarchical parallelism not implemented. Use nd_range kernels.");
+		return;
+	};
+
+	// Image/sampler support
+	if (bref_match(name, "sycl::image", src) ||
+	    bref_match(name, "sycl::sampler", src)) {
+		sycl_warn(g, name, "Image and sampler types not implemented. Use buffer-based approaches.");
+		return;
+	};
+
+	// Vector types
+	if (bref_match(name, "sycl::vec", src) ||
+	    bref_match(name, "sycl::float4", src) ||
+	    bref_match(name, "sycl::int4", src)) {
+		sycl_warn(g, name, "SYCL vector types not fully supported. Use arrays or scalar operations.");
+		return;
+	};
+
+	// Async copy (complex memory semantics)
+	if (bref_match(name, "group_async_copy", src) ||
+	    bref_match(name, "async_copy", src)) {
+		sycl_warn(g, name, "async_copy not implemented. Use direct memory copies with barriers.");
+		return;
+	};
+
+	// === Check for unknown sycl:: functions ===
+	if (sycl_bref_has_prefix(name, "sycl::", src)) {
+		let known = sycl_is_builtin_call(name, src) ||
+			bref_match(name, "sycl::id", src) ||
+			bref_match(name, "sycl::item", src) ||
+			bref_match(name, "sycl::nd_item", src) ||
+			bref_match(name, "sycl::range", src) ||
+			bref_match(name, "sycl::nd_range", src) ||
+			bref_match(name, "sycl::queue", src) ||
+			bref_match(name, "sycl::buffer", src) ||
+			bref_match(name, "sycl::accessor", src) ||
+			bref_match(name, "sycl::handler", src) ||
+			bref_match(name, "sycl::group", src) ||
+			bref_match(name, "sycl::local_accessor", src);
+
+		if (!known) {
+			sycl_warn(g, name, "Unknown sycl:: feature. Check documentation for supported operations.");
+		};
+	};
+};
+
+fn sycl_bref_has_prefix(r: bref, prefix: str, src: *[*]u8) bool = {
+	let plen = len(prefix);
+	if (r.length < plen) { return false; };
+	let head = bref { pos = r.pos, length = plen };
+	return bref_match(head, prefix, src);
+};
+
+// ============================================================================
+// SYCL Call Info Extraction (for sycl:: prefix handling)
+// ============================================================================
+
+// Result of extracting call name from N_CALL function node
+type sycl_call_info = struct {
+	name: bref,               // The function name (e.g., "sqrt")
+	is_sycl_qualified: bool,  // true if it was sycl::sqrt
+	args: nullable *tnode,    // Pointer to first argument
+};
+
+fn sycl_extract_call_info(g: *codegen, func: *tnode) sycl_call_info = {
+	let result = sycl_call_info {
+		name = bref_empty(),
+		is_sycl_qualified = false,
+		args = func.next,
+	};
+
+	// Only handle N_QUAL_ID (sycl::sqrt) - require sycl:: prefix
+	if (func.kind == N_QUAL_ID) {
+		let mod_ref = bref_empty();
+		let member_ref = bref_empty();
+		if (qual_id_parts(g, func, &mod_ref, &member_ref) &&
+			bref_match(mod_ref, "sycl", g.t.src)) {
+			result.name = member_ref;
+			result.is_sycl_qualified = true;
+		};
+	};
+	return result;
+};
+
+// ============================================================================
+// Type Checking Functions
+// ============================================================================
+
+fn sycl_is_sycl_builtin(r: bref, src: *[*]u8) bool = {
+	// Check for sycl::id1/2/3, sycl::nd_item1/2/3, sycl::item1/2/3
+	return bref_match(r, "sycl::id1", src) || bref_match(r, "sycl::id2", src) ||
+		bref_match(r, "sycl::id3", src) ||
+		bref_match(r, "sycl::range1", src) || bref_match(r, "sycl::range2", src) ||
+		bref_match(r, "sycl::range3", src) ||
+		bref_match(r, "sycl::item1", src) || bref_match(r, "sycl::item2", src) ||
+		bref_match(r, "sycl::item3", src) ||
+		bref_match(r, "sycl::nd_item1", src) || bref_match(r, "sycl::nd_item2", src) ||
+		bref_match(r, "sycl::nd_item3", src);
+};
+
+fn sycl_is_id_type(r: bref, src: *[*]u8) bool = {
+	return bref_match(r, "sycl::id1", src) || bref_match(r, "sycl::id2", src) ||
+		bref_match(r, "sycl::id3", src);
+};
+
+fn sycl_is_range_type(r: bref, src: *[*]u8) bool = {
+	return bref_match(r, "sycl::range1", src) || bref_match(r, "sycl::range2", src) ||
+		bref_match(r, "sycl::range3", src);
+};
+
+fn sycl_is_item_type(r: bref, src: *[*]u8) bool = {
+	return bref_match(r, "sycl::item1", src) || bref_match(r, "sycl::item2", src) ||
+		bref_match(r, "sycl::item3", src);
+};
+
+fn sycl_is_nd_item_type(r: bref, src: *[*]u8) bool = {
+	return bref_match(r, "sycl::nd_item1", src) || bref_match(r, "sycl::nd_item2", src) ||
+		bref_match(r, "sycl::nd_item3", src);
+};
+
+fn sycl_get_index_dim(r: bref, src: *[*]u8) i64 = {
+	if (bref_match(r, "sycl::id1", src) ||
+		bref_match(r, "sycl::item1", src) ||
+		bref_match(r, "sycl::nd_item1", src)) {
+		return 1;
+	};
+	if (bref_match(r, "sycl::id2", src) ||
+		bref_match(r, "sycl::item2", src) ||
+		bref_match(r, "sycl::nd_item2", src)) {
+		return 2;
+	};
+	if (bref_match(r, "sycl::id3", src) ||
+		bref_match(r, "sycl::item3", src) ||
+		bref_match(r, "sycl::nd_item3", src)) {
+		return 3;
+	};
+	return 0;
+};
+
+fn sycl_qual_full_ref(t: *tnode) bref = {
+	let inner_opt = t_first(t);
+	if (inner_opt == null) { return bref_empty(); };
+	let inner = unwrap(inner_opt);
+	let end_pos = inner.ref.pos + inner.ref.length;
+	if (end_pos <= t.ref.pos) { return bref_empty(); };
+	return bref { pos = t.ref.pos, length = end_pos - t.ref.pos };
+};
+
+// ============================================================================
+// Type Emission Functions
+// ============================================================================
+
+fn sycl_find_struct_typedef_name(g: *codegen, target: *tnode) bref = {
+	let unit_opt = t_first(g.t.root);
+	if (unit_opt == null) { return bref_empty(); };
+	let unit = unwrap(unit_opt);
+	let decl_opt = t_first(unit);
+	for (decl_opt != null) {
+		let decl = unwrap(decl_opt);
+		if (decl.kind == N_TYPEDEF) {
+			let ty = t_first_nn(decl);
+			if (type_eq(g, ty, target)) { return decl.ref; };
+		};
+		decl_opt = decl.next;
+	};
+	return bref_empty();
+};
+
+fn sycl_emit_type(g: *codegen, ty: *tnode) void = {
+	let t = ty;
+	let suffix_kind: [32]u16 = [0...];
+	let suffix_size: [32]i64 = [0...];
+	let suffix_count: size = 0;
+	let alias_emit = bref_empty();
+	let emitted: bool = false;
+
+	for (t.kind == N_T_PTR || t.kind == N_T_ARR || t.kind == N_T_UARR) {
+		if (suffix_count >= 32) {
+			sycl_err(g, t.ref, "type nesting too deep");
+			break;
+		};
+		if (t.kind == N_T_PTR) {
+			let inner_opt = t_first(t);
+			if (inner_opt != null && unwrap(inner_opt).kind == N_T_UARR) {
+				// Treat *[*]T as a single pointer to element type
+				suffix_kind[suffix_count] = 1;
+				suffix_size[suffix_count] = 0;
+				suffix_count += 1;
+				t = t_first_nn(unwrap(inner_opt));
+				continue;
+			};
+		};
+		if (t.kind == N_T_ARR) {
+			suffix_kind[suffix_count] = 2;
+			suffix_size[suffix_count] = t.ival;
+		} else {
+			suffix_kind[suffix_count] = 1;
+			suffix_size[suffix_count] = 0;
+		};
+		suffix_count += 1;
+		t = t_first_nn(t);
+	};
+
+	// Prefer typedef names for direct struct aliases (e.g. f16/tensor_desc)
+	if (t.kind == N_T_ALIAS) {
+		let type_def_ptr = dict_get_bref(&g.types, t.ref);
+		if (type_def_ptr != 0) {
+			let type_def = type_def_ptr: uintptr: *tnode;
+			if (type_def.kind == N_T_STRUCT) {
+				alias_emit = t.ref;
+			};
+		};
+	};
+
+	// Resolve aliases without recursion (pika forbids recursion)
+	if (bref_is_empty(alias_emit)) {
+		let alias_depth: i64 = 0;
+		for (alias_depth < 10 && t.kind == N_T_ALIAS) {
+			if (sycl_is_sycl_builtin(t.ref, g.t.src)) {
+				alias_emit = t.ref;
+				break;
+			};
+			match (resolve_alias_type(g, t)) {
+			case let resolved: *tnode =>
+				t = resolved;
+				alias_depth += 1;
+				continue;
+			case null =>
+				alias_emit = t.ref;
+				break;
+			};
+		};
+	};
+
+	if (!bref_is_empty(alias_emit)) {
+		sycl_emit_type_name(g, alias_emit);
+		emitted = true;
+	};
+
+	if (!emitted && t.kind == N_T_SLICE) {
+		let elem_opt = t_first(t);
+		if (elem_opt == null) {
+			sycl_err(g, t.ref, "invalid slice type in SYCL");
+			return;
+		};
+		sycl_emit_slice_type(g, unwrap(elem_opt));
+		emitted = true;
+	} else if (!emitted && t.kind == N_T_PRIM) {
+		if (t.ref.length > 0) {
+			sycl_emit_type_name(g, t.ref);
+		} else if (t.ival == TK_F32: i64) {
+			emit_s(&g.em, "float");
+		} else if (t.ival == TK_F64: i64) {
+			emit_s(&g.em, "double");
+		} else if (t.ival == TK_I8: i64) {
+			emit_s(&g.em, "int8_t");
+		} else if (t.ival == TK_I16: i64) {
+			emit_s(&g.em, "int16_t");
+		} else if (t.ival == TK_I32: i64) {
+			emit_s(&g.em, "int32_t");
+		} else if (t.ival == TK_I64: i64) {
+			emit_s(&g.em, "int64_t");
+		} else if (t.ival == TK_U8: i64) {
+			emit_s(&g.em, "uint8_t");
+		} else if (t.ival == TK_U16: i64) {
+			emit_s(&g.em, "uint16_t");
+		} else if (t.ival == TK_U32: i64) {
+			emit_s(&g.em, "uint32_t");
+		} else if (t.ival == TK_U64: i64) {
+			emit_s(&g.em, "uint64_t");
+		} else if (t.ival == TK_PRIM_INT: i64) {
+			emit_s(&g.em, "int");
+		} else if (t.ival == TK_PRIM_UINT: i64) {
+			emit_s(&g.em, "unsigned int");
+		} else if (t.ival == TK_PRIM_BOOL: i64) {
+			emit_s(&g.em, "bool");
+		} else if (t.ival == TK_VOID: i64) {
+			emit_s(&g.em, "void");
+		} else if (t.ival == TK_SIZE: i64) {
+			emit_s(&g.em, "size_t");
+		} else if (t.ref.length > 0) {
+			sycl_emit_type_name(g, t.ref);
+		} else {
+			sycl_err(g, t.ref, "unsupported primitive type in SYCL");
+			return;
+		};
+		emitted = true;
+	} else if (!emitted && t.kind == N_T_QUAL) {
+		let mod_ref = bref_empty();
+		let inner_ref = bref_empty();
+		if (!tqual_parts(g, t, &mod_ref, &inner_ref)) {
+			sycl_err(g, t.ref, "unsupported qualified type in SYCL");
+			return;
+		};
+		if (!bref_match(mod_ref, "sycl", g.t.src)) {
+			sycl_err(g, t.ref, "unsupported qualified type in SYCL");
+			return;
+		};
+		if (bref_match(inner_ref, "id1", g.t.src)) { emit_s(&g.em, "sycl::id<1>"); return; };
+		if (bref_match(inner_ref, "id2", g.t.src)) { emit_s(&g.em, "sycl::id<2>"); return; };
+		if (bref_match(inner_ref, "id3", g.t.src)) { emit_s(&g.em, "sycl::id<3>"); return; };
+		if (bref_match(inner_ref, "range1", g.t.src)) { emit_s(&g.em, "sycl::range<1>"); return; };
+		if (bref_match(inner_ref, "range2", g.t.src)) { emit_s(&g.em, "sycl::range<2>"); return; };
+		if (bref_match(inner_ref, "range3", g.t.src)) { emit_s(&g.em, "sycl::range<3>"); return; };
+		if (bref_match(inner_ref, "item1", g.t.src)) { emit_s(&g.em, "sycl::item<1>"); return; };
+		if (bref_match(inner_ref, "item2", g.t.src)) { emit_s(&g.em, "sycl::item<2>"); return; };
+		if (bref_match(inner_ref, "item3", g.t.src)) { emit_s(&g.em, "sycl::item<3>"); return; };
+		if (bref_match(inner_ref, "nd_item1", g.t.src)) { emit_s(&g.em, "sycl::nd_item<1>"); return; };
+		if (bref_match(inner_ref, "nd_item2", g.t.src)) { emit_s(&g.em, "sycl::nd_item<2>"); return; };
+		if (bref_match(inner_ref, "nd_item3", g.t.src)) { emit_s(&g.em, "sycl::nd_item<3>"); return; };
+		sycl_err(g, inner_ref, "unsupported sycl qualified type");
+		return;
+	} else if (!emitted && t.kind == N_T_STRUCT) {
+		if (t.ref.length == 0) {
+			let alias_ref = sycl_find_struct_typedef_name(g, t);
+			if (!bref_is_empty(alias_ref)) {
+				sycl_emit_type_name(g, alias_ref);
+				emitted = true;
+			};
+		};
+		if (!emitted) {
+			ef1_b(&g.em, "struct %", t.ref);
+			emitted = true;
+		};
+	} else if (!emitted && (t.kind == N_T_ENUM || t.kind == N_T_UNION || t.kind == N_T_TAGGED)) {
+		sycl_err(g, t.ref, "enum/union types not supported in SYCL kernels");
+		return;
+	} else if (!emitted && (t.kind == N_T_FN || t.kind == N_T_ERR)) {
+		sycl_err(g, t.ref, "function/error types not supported in SYCL");
+		return;
+	} else if (!emitted) {
+		sycl_err(g, t.ref, "unsupported type in SYCL");
+		return;
+	};
+
+	for (let i = suffix_count; i > 0z; i -= 1) {
+		let idx = i - 1;
+		if (suffix_kind[idx] == 1) {
+			e_c(&g.em, '*');
+		} else if (suffix_kind[idx] == 2) {
+			e_c(&g.em, '[');
+			e_i(&g.em, suffix_size[idx]);
+			e_c(&g.em, ']');
+		};
+	};
+};
+
+fn sycl_emit_asgn_op(g: *codegen, tk: u16) void = {
+	if (tk == TK_EQ) { emit_s(&g.em, " = "); return; };
+	if (tk == TK_PLUS_EQ) { emit_s(&g.em, " += "); return; };
+	if (tk == TK_MINUS_EQ) { emit_s(&g.em, " -= "); return; };
+	if (tk == TK_STAR_EQ) { emit_s(&g.em, " *= "); return; };
+	if (tk == TK_SLASH_EQ) { emit_s(&g.em, " /= "); return; };
+	if (tk == TK_PERCENT_EQ) { emit_s(&g.em, " %= "); return; };
+	sycl_err(g, bref_empty(), "unsupported assignment operator in SYCL");
+};
+
+// Emit variable declaration with proper array handling
+// For arrays: "float arr[4]" not "float[4] arr"
+fn sycl_emit_var_decl(g: *codegen, ty: *tnode, name: bref) void = {
+	if (ty.kind == N_T_ARR) {
+		// Emit: element_type name[size] or element_type name[] if inferred
+		let elem_ty = t_first_nn(ty);
+		sycl_emit_type(g, elem_ty);
+		e_sp(&g.em);
+		e_bref(&g.em, name);
+		e_c(&g.em, '[');
+		// Only emit size if not inferred from initializer
+		if ((ty.flags & F_INFERRED) == 0) {
+			// Array size is the second child (elem.next)
+			let size_node_opt = elem_ty.next;
+			if (size_node_opt != null) {
+				let sn = unwrap(size_node_opt);
+				// Check if it's a literal integer
+				if (sn.ref.length == 0 && sn.kind == N_INT) {
+					e_i(&g.em, sn.ival);
+				} else {
+					// Named constant
+					e_bref(&g.em, sn.ref);
+				};
+			};
+		};
+		e_c(&g.em, ']');
+	} else {
+		// Normal type: type name
+		sycl_emit_type(g, ty);
+		e_sp(&g.em);
+		e_bref(&g.em, name);
+	};
+};
+
+// ============================================================================
+// Kernel Detection & Collection
+// ============================================================================
+
+fn sycl_name_has_kernel_prefix(name: bref, src: *[*]u8) bool = {
+	return name.length >= 7 &&
+		src[name.pos] == 'k': u8 && src[name.pos + 1] == 'e': u8 &&
+		src[name.pos + 2] == 'r': u8 && src[name.pos + 3] == 'n': u8 &&
+		src[name.pos + 4] == 'e': u8 && src[name.pos + 5] == 'l': u8 &&
+		src[name.pos + 6] == '_': u8;
+};
+
+fn sycl_is_kernel_fn(fn_node: *tnode, src: *[*]u8) bool = {
+	if ((fn_node.flags & F_KERNEL) != 0) { return true; };
+	// Legacy support: kernel_ prefix
+	return sycl_name_has_kernel_prefix(fn_node.ref, src);
+};
+
+fn sycl_find_param(fn_node: *tnode, param_name: bref, src: *[*]u8) nullable *tnode = {
+	let param_opt = t_first(fn_node);
+	if (param_opt == null) { return null; };
+
+	for (param_opt != null) {
+		let param = unwrap(param_opt);
+		if (param.kind != N_PARAM) { break; };
+		if (bref_eq(param.ref, param_name, src)) {
+			return param;
+		};
+		param_opt = param.next;
+	};
+	return null;
+};
+
+fn sycl_register_kernel(g: *codegen, fn_node: *tnode) void = {
+	if (sycl_kernel_count >= 64) {
+		sycl_err(g, fn_node.ref, "too many kernels (max 64 per file)");
+	};
+
+	let info: *sycl_kernel_info = &sycl_kernels[sycl_kernel_count];
+	info.name = fn_node.ref;
+	info.fn_node = fn_node;
+
+	// Inspect first parameter to determine launch style
+	let first_param_opt = t_first(fn_node);
+	if (first_param_opt == null) {
+		sycl_err(g, fn_node.ref, "kernel must have at least one parameter (id/item/nd_item)");
+	};
+	let first_param = unwrap(first_param_opt);
+	if (first_param.kind != N_PARAM) {
+		sycl_err(g, fn_node.ref, "kernel must have parameters");
+	};
+
+	let param_ty_opt = t_first(first_param);
+	if (param_ty_opt == null) {
+		sycl_err(g, first_param.ref, "parameter must have a type");
+	};
+	let param_ty = unwrap(param_ty_opt);
+
+	// Determine dimensionality and launch style from first parameter type
+	let type_ref = bref_empty();
+	if (param_ty.kind == N_T_QUAL) {
+		type_ref = sycl_qual_full_ref(param_ty);
+	} else if (param_ty.ref.length > 0) {
+		type_ref = param_ty.ref;
+	};
+	let dim: i64 = 0;
+	if (!bref_is_empty(type_ref)) {
+		dim = sycl_get_index_dim(type_ref, g.t.src);
+	};
+	let inner_opt: nullable *tnode = null;
+	if (param_ty.kind == N_T_QUAL) {
+		inner_opt = t_first(param_ty);
+	};
+	let inner_ref = bref_empty();
+	if (inner_opt != null) {
+		inner_ref = unwrap(inner_opt).ref;
+	};
+	if (dim == 0 && !bref_is_empty(inner_ref)) {
+		if (bref_match(inner_ref, "id1", g.t.src) ||
+			bref_match(inner_ref, "item1", g.t.src) ||
+			bref_match(inner_ref, "nd_item1", g.t.src)) {
+			dim = 1;
+		} else if (bref_match(inner_ref, "id2", g.t.src) ||
+			bref_match(inner_ref, "item2", g.t.src) ||
+			bref_match(inner_ref, "nd_item2", g.t.src)) {
+			dim = 2;
+		} else if (bref_match(inner_ref, "id3", g.t.src) ||
+			bref_match(inner_ref, "item3", g.t.src) ||
+			bref_match(inner_ref, "nd_item3", g.t.src)) {
+			dim = 3;
+		};
+	};
+	if (dim == 0) {
+		sycl_err(g, first_param.ref,
+			"kernel first param must be sycl::id1/2/3, sycl::item1/2/3, or sycl::nd_item1/2/3");
+	};
+	info.dim = dim;
+	if (param_ty.kind == N_T_QUAL) {
+		if (!bref_is_empty(inner_ref)) {
+			info.uses_nd_range = bref_match(inner_ref, "nd_item1", g.t.src) ||
+				bref_match(inner_ref, "nd_item2", g.t.src) ||
+				bref_match(inner_ref, "nd_item3", g.t.src);
+		} else {
+			info.uses_nd_range = false;
+		};
+	} else {
+		info.uses_nd_range = sycl_is_nd_item_type(type_ref, g.t.src);
+	};
+
+	// Scan parameters (skip first parameter)
+	let param_opt = first_param.next;
+	for (param_opt != null) {
+		let param = unwrap(param_opt);
+		if (param.kind != N_PARAM) { break; };
+
+		let pty_opt = t_first(param);
+		if (pty_opt != null) {
+			let pty = unwrap(pty_opt);
+			let resolved = sycl_resolve_type(g, pty);
+			let is_buffer = sycl_param_is_buffer(g, pty);
+			let has_access = (param.flags & (F_SYCL_READ | F_SYCL_WRITE)) != 0;
+
+			if (sycl_param_is_local(param)) {
+				if (!is_buffer) {
+					sycl_err(g, param.ref, "#[local] parameters must be *[*]T buffers");
+				};
+				if (has_access && (param.flags & (F_SYCL_READ | F_SYCL_WRITE)) !=
+					(F_SYCL_READ | F_SYCL_WRITE)) {
+					sycl_err(g, param.ref, "#[local] parameters use implicit read_write access");
+				};
+				if (info.local_count >= 16) {
+					sycl_err(g, param.ref, "too many local memory parameters (max 16)");
+				};
+				info.local_params[info.local_count] = param.ref;
+				info.local_count += 1;
+				// Local memory requires nd_range
+				info.uses_nd_range = true;
+			} else if (has_access && !is_buffer) {
+				sycl_err(g, param.ref, "access attributes require *[*]T buffer parameters");
+			} else if (is_buffer && !sycl_param_is_local(param)) {
+				// Enforce *[*]T buffer shape (pointer to unbounded array)
+				if (resolved.kind != N_T_PTR) {
+					sycl_err(g, param.ref, "SYCL buffer parameters must be *[*]T");
+				} else {
+					let inner_ptr = t_first(resolved);
+					if (inner_ptr == null || sycl_resolve_type(g, unwrap(inner_ptr)).kind != N_T_UARR) {
+						sycl_err(g, param.ref, "SYCL buffer parameters must be *[*]T");
+					};
+				};
+			} else {
+				if (resolved.kind == N_T_PTR || resolved.kind == N_T_SLICE ||
+					resolved.kind == N_T_UARR) {
+					sycl_err(g, param.ref, "SYCL pointer parameters must be *[*]T buffers");
+				};
+			};
+		};
+
+		param_opt = param.next;
+	};
+
+	sycl_kernel_count += 1;
+};
+
+fn sycl_collect_kernels(g: *codegen, unit: *tnode) void = {
+	let decl_opt = t_first(unit);
+	for (decl_opt != null) {
+		let decl = unwrap(decl_opt);
+		if (decl.kind == N_FN && sycl_is_kernel_fn(decl, g.t.src)) {
+			if ((decl.flags & F_KERNEL) == 0 && sycl_name_has_kernel_prefix(decl.ref, g.t.src)) {
+				sycl_warn(g, decl.ref, "kernel_ prefix is deprecated; use #[kernel] instead");
+			};
+			sycl_register_kernel(g, decl);
+		};
+		decl_opt = decl.next;
+	};
+};
+
+// ============================================================================
+// Device Function Emission
+// ============================================================================
+
+fn sycl_emit_device_function(g: *codegen, fn_node: *tnode) void = {
+	if ((fn_node.flags & F_EXTERN) != 0) { return; };
+	let info_opt = sycl_fn_find(fn_node.ref, g.t.src);
+	let needs_error = false;
+	match (info_opt) {
+	case let info: *sycl_fn_info => needs_error = (*info).needs_error;
+	case null => void;
+	};
+
+	// Get return type
+	let ret_type_opt = g_skip_to_ret(fn_node);
+	if (ret_type_opt == null) { return; };
+	let ret_type = unwrap(ret_type_opt);
+	let body = t_next_nn(ret_type);
+
+	// Emit inline function signature
+	emit_s(&g.em, "inline ");
+	sycl_emit_type(g, ret_type);
+	e_sp(&g.em);
+	if (!sycl_emit_symbol_name(g, fn_node)) {
+		e_bref(&g.em, fn_node.ref);
+	};
+	e_c(&g.em, '(');
+
+	// Emit parameters
+	let el = el_start(&g.em);
+	let param_opt = g_skip_symbol(fn_node);
+	for (param_opt != null && unwrap(param_opt).kind == N_PARAM) {
+		let param_decl = unwrap(param_opt);
+		el_sep(&el);
+		let pty_opt = t_first(param_decl);
+		if (pty_opt != null) {
+			sycl_emit_type(g, unwrap(pty_opt));
+		};
+		e_sp(&g.em);
+		e_bref(&g.em, param_decl.ref);
+
+		// Emit default argument value if present (only if no error param)
+		if (!needs_error) {
+			let default_opt = param_default(param_decl);
+			if (default_opt != null) {
+				emit_s(&g.em, " = ");
+				sycl_expr(g, unwrap(default_opt));
+			};
+		};
+
+		param_opt = param_decl.next;
+	};
+	if (needs_error) {
+		el_sep(&el);
+		emit_s(&g.em, "psycl_error_acc_t psycl_error_acc");
+	};
+
+	e_c(&g.em, ')');
+	e_sp(&g.em);
+
+	// Emit body
+	let prev_fn = g.cur_fn;
+	let prev_ret_type = g.cur_ret_type;
+	let prev_match_expected = g.match_expected;
+	let prev_narrowed = g.nullable_narrowed;
+	let prev_error_ref = sycl_current_error_ref;
+	g.cur_fn = fn_node.ref;
+	g.cur_ret_type = ret_type;
+	g.match_expected = null;
+	g.nullable_narrowed = bref_empty();
+	vars_clear(g);
+	// Register params for type checking
+	param_opt = g_skip_symbol(fn_node);
+	for (param_opt != null && unwrap(param_opt).kind == N_PARAM) {
+		let param_node = unwrap(param_opt);
+		let param_type_opt = t_first(param_node);
+		if (param_type_opt != null) {
+			vars_register(g, param_node.ref, unwrap(param_type_opt): uintptr: u64);
+		} else {
+			vars_register(g, param_node.ref, 0);
+		};
+		param_opt = param_node.next;
+	};
+	if (needs_error) {
+		sycl_current_error_ref = SYCL_ERROR_REF_PARAM;
+	} else {
+		sycl_current_error_ref = SYCL_ERROR_REF_NONE;
+	};
+	sycl_block(g, body);
+	sycl_current_error_ref = prev_error_ref;
+	g.cur_fn = prev_fn;
+	g.cur_ret_type = prev_ret_type;
+	g.match_expected = prev_match_expected;
+	g.nullable_narrowed = prev_narrowed;
+	e_nl(&g.em);
+};
+
+fn sycl_emit_device_functions(g: *codegen, unit: *tnode) void = {
+	let decl_opt = t_first(unit);
+	for (decl_opt != null) {
+		let decl = unwrap(decl_opt);
+		// Emit non-kernel functions as inline device functions
+		if (decl.kind == N_FN && !sycl_is_kernel_fn(decl, g.t.src)) {
+			sycl_emit_device_function(g, decl);
+			e_nl(&g.em);
+		};
+		decl_opt = decl.next;
+	};
+};
+
+// ============================================================================
+// SYCL Builtin Functions Mapping
+let SYCL_BUILTIN_NAMES: [_]str = [
+	"get_global_id", "get_global_id1", "get_global_id2", "get_global_id3", "get_local_id",
+	"get_local_id1", "get_local_id2", "get_local_id3", "get_group_id", "get_group_id1",
+	"get_group_id2", "get_group_id3", "get_global_range", "get_global_range1", "get_global_range2",
+	"get_global_range3", "get_local_range", "get_local_range1", "get_local_range2",
+	"get_local_range3", "get_group_range", "get_group_range1", "get_group_range2", "get_group_range3",
+	"get_local_linear_id", "get_global_linear_id", "get_id", "get_id1", "get_id2", "get_id3",
+	"get_range", "get_range1", "get_range2", "get_range3", "get_linear_id", "get_group",
+	"get_sub_group", "barrier", "group_barrier", "atomic_fetch_add",
+	"atomic_fetch_sub", "atomic_fetch_min", "atomic_fetch_max", "atomic_fetch_and", "atomic_fetch_or",
+	"atomic_fetch_xor", "atomic_store", "atomic_load", "atomic_exchange", "atomic_compare_exchange",
+	"reduce_over_group", "joint_reduce", "inclusive_scan_over_group", "exclusive_scan_over_group",
+	"joint_inclusive_scan", "joint_exclusive_scan", "group_broadcast", "any_of_group", "all_of_group",
+	"none_of_group", "permute_group_by_xor", "shift_group_left", "shift_group_right",
+	"select_from_group", "sqrt", "exp", "log", "sin", "cos", "tan", "sinh", "cosh", "tanh", "asin",
+	"acos", "atan", "atan2", "asinh", "acosh", "atanh", "floor", "ceil", "round", "trunc",
+	"pow", "exp2", "exp10", "expm1", "log2", "log10", "log1p", "rsqrt", "cbrt", "hypot", "fmin",
+	"fmax", "min", "max", "clamp", "fma", "mad", "abs", "fabs", "copysign", "fdim", "fmod",
+	"remainder", "sign", "isnan", "isinf", "isfinite", "isnormal", "signbit",
+];
+
+def SYCL_ATOMIC_OP: u8 = 0;
+def SYCL_ATOMIC_LOAD: u8 = 1;
+def SYCL_ATOMIC_CMPXCHG: u8 = 2;
+
+type sycl_atomic_info = struct {
+	name: str,
+	op: str,
+	kind: u8,
+};
+
+let SYCL_ATOMIC_BUILTINS: [_]sycl_atomic_info = [
+	sycl_atomic_info { name = "atomic_fetch_add", op = "fetch_add", kind = SYCL_ATOMIC_OP },
+	sycl_atomic_info { name = "atomic_fetch_sub", op = "fetch_sub", kind = SYCL_ATOMIC_OP },
+	sycl_atomic_info { name = "atomic_fetch_min", op = "fetch_min", kind = SYCL_ATOMIC_OP },
+	sycl_atomic_info { name = "atomic_fetch_max", op = "fetch_max", kind = SYCL_ATOMIC_OP },
+	sycl_atomic_info { name = "atomic_fetch_and", op = "fetch_and", kind = SYCL_ATOMIC_OP },
+	sycl_atomic_info { name = "atomic_fetch_or", op = "fetch_or", kind = SYCL_ATOMIC_OP },
+	sycl_atomic_info { name = "atomic_fetch_xor", op = "fetch_xor", kind = SYCL_ATOMIC_OP },
+	sycl_atomic_info { name = "atomic_store", op = "store", kind = SYCL_ATOMIC_OP },
+	sycl_atomic_info { name = "atomic_load", op = "", kind = SYCL_ATOMIC_LOAD },
+	sycl_atomic_info { name = "atomic_exchange", op = "exchange", kind = SYCL_ATOMIC_OP },
+	sycl_atomic_info { name = "atomic_compare_exchange", op = "", kind = SYCL_ATOMIC_CMPXCHG },
+];
+
+fn sycl_is_builtin_call(name: bref, src: *[*]u8) bool = {
+	for (let i = 0z; i < len(SYCL_BUILTIN_NAMES); i += 1) {
+		if (bref_match(name, SYCL_BUILTIN_NAMES[i], src)) { return true; };
+	};
+	return false;
+};
+
+fn sycl_emit_atomic_builtin(g: *codegen, name: bref, args: nullable *tnode) bool = {
+	for (let i = 0z; i < len(SYCL_ATOMIC_BUILTINS); i += 1) {
+		let info = SYCL_ATOMIC_BUILTINS[i];
+		if (!bref_match(name, info.name, g.t.src)) { continue; };
+		if (info.kind == SYCL_ATOMIC_OP) {
+			sycl_emit_atomic_op(g, args, info.op);
+			return true;
+		};
+		if (info.kind == SYCL_ATOMIC_LOAD) {
+			sycl_emit_atomic_load(g, args);
+			return true;
+		};
+		if (info.kind == SYCL_ATOMIC_CMPXCHG) {
+			sycl_emit_atomic_compare_exchange(g, args);
+			return true;
+		};
+		return false;
+	};
+	return false;
+};
+
+fn sycl_emit_builtin_call(g: *codegen, name: bref, args: nullable *tnode) void = {
+	if (sycl_emit_item_method_suffix(g, name, args, "get_global_id", "get_global_id", 
+			SYCL_ITEM_METHOD_CALL_INDEX, SYCL_ITEM_METHOD_CALL)) {
+		return;
+	};
+	if (sycl_emit_item_method_suffix( g, name, args, "get_local_id", "get_local_id",
+			SYCL_ITEM_METHOD_CALL_INDEX, SYCL_ITEM_METHOD_CALL))
+	{
+		return;
+	};
+	if (sycl_emit_item_method_suffix( g, name, args, "get_group_id", "get_group_id",
+			SYCL_ITEM_GROUP_METHOD_INDEXED, SYCL_ITEM_GROUP_METHOD_CALL))
+	{
+		return;
+	};
+	if (sycl_emit_item_method_suffix( g, name, args, "get_global_range", "get_global_range",
+			SYCL_ITEM_METHOD_INDEXED, SYCL_ITEM_METHOD_CALL))
+	{
+		return;
+	};
+	if (sycl_emit_item_method_suffix( g, name, args, "get_local_range", "get_local_range",
+			SYCL_ITEM_METHOD_INDEXED, SYCL_ITEM_METHOD_CALL))
+	{
+		return;
+	};
+	if (sycl_emit_item_method_suffix( g, name, args, "get_group_range", "get_group_range",
+			SYCL_ITEM_GROUP_METHOD_INDEXED, SYCL_ITEM_GROUP_METHOD_CALL))
+	{
+		return;
+	};
+	if (sycl_emit_item_method_suffix( g, name, args, "get_id", "get_id",
+			SYCL_ITEM_METHOD_CALL, SYCL_ITEM_METHOD_CALL))
+	{
+		return;
+	};
+	if (sycl_emit_item_method_suffix( g, name, args, "get_range", "get_range",
+			SYCL_ITEM_METHOD_CALL, SYCL_ITEM_METHOD_CALL))
+	{
+		return;
+	};
+	if (bref_match(name, "get_linear_id", g.t.src)) {
+		sycl_emit_item_method_call(g, args, "get_linear_id");
+		return;
+	};
+	if (bref_match(name, "get_local_linear_id", g.t.src)) {
+		sycl_emit_item_method_call(g, args, "get_local_linear_id");
+		return;
+	};
+	if (bref_match(name, "get_global_linear_id", g.t.src)) {
+		sycl_emit_item_method_call(g, args, "get_global_linear_id");
+		return;
+	};
+	if (bref_match(name, "get_group", g.t.src)) {
+		sycl_emit_item_method_call(g, args, "get_group");
+		return;
+	};
+	if (bref_match(name, "get_sub_group", g.t.src)) {
+		sycl_emit_item_method_call(g, args, "get_sub_group");
+		return;
+	};
+	if (bref_match(name, "barrier", g.t.src)) {
+		if (args != null) {
+			let arg0 = unwrap(args);
+			emit_s(&g.em, "sycl::group_barrier(");
+			sycl_expr(g, arg0);
+			emit_s(&g.em, ".get_group())");
+		};
+		return;
+	};
+	if (sycl_emit_atomic_builtin(g, name, args)) { return; };
+	if (bref_match(name, "min", g.t.src)) { sycl_emit_sycl_call_alias(g, "fmin", args); return; };
+	if (bref_match(name, "max", g.t.src)) { sycl_emit_sycl_call_alias(g, "fmax", args); return; };
+	sycl_emit_sycl_call(g, name, args);
+};
+
+// ---------------------------------------------------------------------------
+// Type Checking Helpers (SYCL)
+// ---------------------------------------------------------------------------
+
+fn sycl_expr(g: *codegen, n: *tnode) void = {
+	sycl_expr_impl(g, n);
+};
+
+fn sycl_expr_expected(g: *codegen, n: *tnode, expected: nullable *tnode) void = {
+	let prev = g.match_expected;
+	if (expected != null) { g.match_expected = expected; };
+	sycl_expr(g, n);
+	g.match_expected = prev;
+};
+
+fn sycl_expected_from_target(g: *codegen, target: *tnode) nullable *tnode = {
+	if (target.kind == N_ID) {
+		let ty_ptr = dict_get_bref(&g.vars, target.ref);
+		if (ty_ptr != 0) { return ty_ptr: uintptr: *tnode; };
+	};
+	return get_expr_type(g, target);
+};
+
+fn sycl_resolve_type(g: *codegen, ty: *tnode) *tnode = {
+	match (resolve_alias_type(g, ty)) {
+	case let resolved: *tnode => return resolved;
+	case null => return ty;
+	};
+};
+
+fn sycl_type_is_size(g: *codegen, ty: *tnode) bool = {
+	let t = sycl_resolve_type(g, ty);
+	return type_is_prim_name(t, "size", g.t.src) || type_is_prim_tok(t, TK_SIZE);
+};
+
+fn sycl_type_eq_relaxed(g: *codegen, a: *tnode, b: *tnode) bool = {
+	if (type_eq(g, a, b)) { return true; };
+	let ta = sycl_resolve_type(g, a);
+	let tb = sycl_resolve_type(g, b);
+	if (ta.kind != N_T_ARR || tb.kind != N_T_ARR) { return false; };
+	if ((ta.flags & ~F_INFERRED) != (tb.flags & ~F_INFERRED)) { return false; };
+	let a_elem = t_first(ta);
+	let b_elem = t_first(tb);
+	if (a_elem == null || b_elem == null) { return false; };
+	if (!type_eq(g, unwrap(a_elem), unwrap(b_elem))) { return false; };
+	let a_size = arr_size_node(ta);
+	let b_size = arr_size_node(tb);
+	if (a_size == null || b_size == null) { return false; };
+	let sa: *tnode = unwrap(a_size);
+	let sb: *tnode = unwrap(b_size);
+	if (sa.kind == N_INT && sb.kind == N_INT) {
+		return sa.ival == sb.ival;
+	};
+	if (sa.kind == N_INT && sb.kind == TK_INT) {
+		return sa.ival == parse_int_base(sb.ref, g.t.src).val;
+	};
+	if (sa.kind == TK_INT && sb.kind == N_INT) {
+		return parse_int_base(sa.ref, g.t.src).val == sb.ival;
+	};
+	if (sa.kind == TK_INT && sb.kind == TK_INT) {
+		return parse_int_base(sa.ref, g.t.src).val == parse_int_base(sb.ref, g.t.src).val;
+	};
+	if (sa.ref.length != 0 && sb.ref.length != 0) {
+		return bref_eq(sa.ref, sb.ref, g.t.src);
+	};
+	return false;
+};
+
+fn sycl_check_type_match(g: *codegen, expected: nullable *tnode, got: nullable *tnode, ref: bref) void = {
+	if (expected == null || got == null) { return; };
+	if (!sycl_type_eq_relaxed(g, unwrap(expected), unwrap(got))) {
+		sycl_err(g, ref, "type mismatch (implicit conversions not allowed; use explicit cast)");
+	};
+};
+
+fn sycl_check_expr_match(g: *codegen, expected: nullable *tnode, expr: *tnode) void = {
+	if (expected == null) { return; };
+	let stack_expr: [256]uintptr = [0...];
+	let stack_expected: [256]uintptr = [0...];
+	let sp: size = 0;
+	stack_expr[sp] = expr: uintptr;
+	stack_expected[sp] = unwrap(expected): uintptr;
+	sp += 1;
+
+	for (sp > 0z) {
+		sp -= 1;
+		let cur_expr: *tnode = stack_expr[sp]: *tnode;
+		let cur_expected: *tnode = stack_expected[sp]: *tnode;
+		let exp_resolved = sycl_resolve_type(g, cur_expected);
+
+		if (cur_expr.kind == N_ARR_LIT && exp_resolved.kind == N_T_ARR) {
+			let elem_ty_opt = t_first(exp_resolved);
+			if (elem_ty_opt != null) {
+				let elem_ty = unwrap(elem_ty_opt);
+				let elem_opt = t_first(cur_expr);
+				for (elem_opt != null) {
+					if (sp >= 256z) {
+						sycl_err(g, cur_expr.ref, "array literal too deep for SYCL type checking");
+					};
+					stack_expr[sp] = unwrap(elem_opt): uintptr;
+					stack_expected[sp] = elem_ty: uintptr;
+					sp += 1;
+					elem_opt = unwrap(elem_opt).next;
+				};
+			};
+			continue;
+		};
+
+		let got = get_expr_type(g, cur_expr);
+		if (got != null) {
+			if (!sycl_type_eq_relaxed(g, cur_expected, unwrap(got))) {
+				sycl_err(g, cur_expr.ref, "type mismatch (implicit conversions not allowed; use explicit cast)");
+			};
+			continue;
+		};
+
+		if (cur_expr.kind == N_NULL) {
+			let et = sycl_resolve_type(g, cur_expected);
+			if (et.kind == N_T_PTR) {
+				if ((et.flags & F_NULLABLE) != 0) { continue; };
+				sycl_err(g, cur_expr.ref, "cannot assign null to non-nullable pointer");
+			} else {
+				sycl_err(g, cur_expr.ref, "null literal requires a nullable pointer type");
+			};
+			continue;
+		};
+
+		if (cur_expr.kind == N_BOOL) {
+			let bool_ty = type_prim_dummy(g.t, TK_PRIM_BOOL);
+			if (!type_eq(g, cur_expected, bool_ty)) {
+				sycl_err(g, cur_expr.ref, "type mismatch (implicit conversions not allowed; use explicit cast)");
+			};
+			continue;
+		};
+
+		if (cur_expr.kind == N_INT || cur_expr.kind == N_CHAR) {
+			let int_ty = type_prim_dummy(g.t, TK_PRIM_INT);
+			if (!type_eq(g, cur_expected, int_ty)) {
+				if (sycl_type_is_size(g, cur_expected)) {
+					sycl_err(g, cur_expr.ref, "implicit conversion to size not allowed; use 'z' suffix (e.g., 0z)");
+				} else {
+					sycl_err(g, cur_expr.ref, "implicit conversion from int literal not allowed; add suffix or cast");
+				};
+			};
+			continue;
+		};
+
+		if (cur_expr.kind == N_FLOAT) {
+			let f64_ty = type_prim_dummy(g.t, TK_F64);
+			if (!type_eq(g, cur_expected, f64_ty)) {
+				sycl_err(g, cur_expr.ref, "implicit conversion from float literal not allowed; add suffix or cast");
+			};
+			continue;
+		};
+	};
+};
+
+fn sycl_is_str_expr(g: *codegen, n: *tnode) bool = {
+	if (node_is_str(n)) { return true; };
+	match (get_expr_type(g, n)) {
+	case let ty: *tnode =>
+		let resolved = resolve_alias_type(g, ty);
+		if (resolved == null) { return false; };
+		return type_is_str(unwrap(resolved), g.t.src);
+	case null => return false;
+	};
+};
+
+fn sycl_emit_strings_call(g: *codegen, func: *tnode) bool = {
+	let mod_ref = bref_empty();
+	let member_ref = bref_empty();
+	if (!qual_id_parts(g, func, &mod_ref, &member_ref)) { return false; };
+	if (!bref_match(mod_ref, "strings", g.t.src)) { return false; };
+	if (!g.use_strings) {
+		sycl_err(g, func.ref, "must 'use strings;' to use strings module");
+	};
+	let arg_opt = func.next;
+	if (bref_match(member_ref, "toutf8", g.t.src)) {
+		emit_s(&g.em, "strings_toutf8(");
+	} else if (bref_match(member_ref, "fromutf8_unsafe", g.t.src)) {
+		emit_s(&g.em, "strings_fromutf8_unsafe(");
+	} else {
+		return false;
+	};
+	match (arg_opt) {
+	case let arg: *tnode => sycl_expr(g, arg);
+	case null => void;
+	};
+	e_c(&g.em, ')');
+	return true;
+};
+
+// ============================================================================
+// Expression Generation
+// ============================================================================
+
+fn sycl_expr_impl(g: *codegen, n: *tnode) void = {
+	let k = n.kind;
+
+	// Literals
+	if (k == N_INT || k == TK_INT) {
+		e_i(&g.em, n.ival);
+		return;
+	};
+	if (k == N_CHAR) {
+		e_u(&g.em, sycl_char_val(n.ref, g.t.src): u64);
+		return;
+	};
+	if (k == N_FLOAT || k == TK_FLOAT) {
+		e_bref_no_underscore(&g.em, n.ref);
+		return;
+	};
+	if (k == N_BOOL || k == TK_TRUE || k == TK_FALSE) {
+		if (n.ival != 0) { emit_s(&g.em, "true"); } else { emit_s(&g.em, "false"); };
+		return;
+	};
+	if (k == N_NULL || k == TK_NULL) {
+		emit_s(&g.em, "nullptr");
+		return;
+	};
+	if (k == N_STR || k == N_RAWSTR) {
+		sycl_emit_str_literal(g, n);
+		return;
+	};
+
+	// Match expression
+	if (k == N_MATCH) {
+		sycl_match_expr(g, n);
+		return;
+	};
+
+	// Array literals
+	if (k == N_ARR_LIT) {
+		e_c(&g.em, '{');
+		let arr_el = el_start(&g.em);
+		let elem_opt = t_first(n);
+		for (elem_opt != null) {
+			let elem = unwrap(elem_opt);
+			el_sep(&arr_el);
+			sycl_expr(g, elem);
+			elem_opt = elem.next;
+		};
+		e_c(&g.em, '}');
+		return;
+	};
+
+	// Identifiers
+	if (k == N_ID || k == TK_IDENT) {
+		// If we're inside a kernel operator() body and this is a member parameter,
+		// emit it with _ suffix to reference the member variable
+		match (sycl_current_kernel) {
+		case let kern_info: *sycl_kernel_info =>
+			if (sycl_is_kernel_member_param(kern_info, n.ref, g.t.src)) {
+				e_bref(&g.em, n.ref);
+				e_c(&g.em, '_');
+				return;
+			};
+		case null => void;
+		};
+		let sym_fn_ptr = dict_get_bref(&g.globals, n.ref);
+		if (sym_fn_ptr != 0) {
+			let sym_fn_def: *tnode = sym_fn_ptr: uintptr: *tnode;
+			if (sym_fn_def.kind == N_FN && sycl_emit_symbol_name(g, sym_fn_def)) {
+				return;
+			};
+		};
+		e_bref(&g.em, n.ref);
+		return;
+	};
+
+	// Qualified identifiers (module::name) - for non-call contexts
+	if (k == N_QUAL_ID) {
+		let mod_ref = alias_expand_module(g, n.ref);
+		if (bref_match(mod_ref, "sycl", g.t.src)) {
+			let qual_member_opt = t_first(n);
+			if (qual_member_opt != null) {
+				ef1_b(&g.em, "sycl::%", unwrap(qual_member_opt).ref);
+			};
+		} else {
+			let other_member_opt = t_first(n);
+			if (other_member_opt != null) {
+				ef2_b(&g.em, "%::%", mod_ref, unwrap(other_member_opt).ref);
+			} else {
+				ef1_b(&g.em, "%::", mod_ref);
+			};
+		};
+		return;
+	};
+
+	// Binary operations
+	if (k == N_BIN) {
+		let left = t_first_nn(n);
+		let right = t_next_nn(left);
+		let bin_op = n.ival: u16;
+		if ((bin_op == TK_EQ_EQ || bin_op == TK_NE) &&
+			(sycl_is_str_expr(g, left) || sycl_is_str_expr(g, right))) {
+			if (bin_op == TK_EQ_EQ) {
+				emit_s(&g.em, "rt_strcmp(");
+			} else {
+				emit_s(&g.em, "(!rt_strcmp(");
+			};
+			sycl_expr(g, left);
+			emit_s(&g.em, ", ");
+			sycl_expr(g, right);
+			if (bin_op == TK_EQ_EQ) {
+				e_c(&g.em, ')');
+			} else {
+				emit_s(&g.em, "))");
+			};
+			return;
+		};
+		e_c(&g.em, '(');
+		sycl_expr(g, left);
+		e_sp(&g.em);
+		e_node(&g.em, n);  // Emit operator token
+		e_sp(&g.em);
+		sycl_expr(g, right);
+		e_c(&g.em, ')');
+		return;
+	};
+
+	// Unary operations
+	if (k == N_UN) {
+		let unary_inner: *tnode = t_first_nn(n);
+		let op = n.ival: u16;
+		if (op == TK_STAR) {
+			match (get_expr_type(g, unary_inner)) {
+			case let unary_ty: *tnode =>
+				if (unary_ty.kind == N_T_PTR && (unary_ty.flags & F_NULLABLE) != 0) {
+					let unary_narrowed = unary_inner.kind == N_ID && !bref_is_empty(g.nullable_narrowed) &&
+						bref_eq(unary_inner.ref, g.nullable_narrowed, g.t.src);
+					if (!unary_narrowed) {
+						sycl_err(g, n.ref, "cannot dereference nullable pointer (use match to narrow type)");
+					};
+				};
+			case null => void;
+			};
+		};
+		e_node(&g.em, n);  // Emit operator
+		e_c(&g.em, '(');
+		sycl_expr(g, unary_inner);
+		e_c(&g.em, ')');
+		return;
+	};
+
+	// Function calls
+	if (k == N_CALL) {
+		let func = t_first_nn(n);
+
+		// Check for direct recursion (not allowed in pika)
+		if (func.kind == N_ID && !bref_is_empty(g.cur_fn) &&
+		    bref_eq(func.ref, g.cur_fn, g.t.src)) {
+			sycl_err(g, func.ref, "recursion not allowed");
+		};
+
+		// Check for sycl:: qualified builtin calls (e.g., sycl::sqrt)
+		if (func.kind == N_QUAL_ID) {
+			if (sycl_emit_strings_call(g, func)) {
+				return;
+			};
+			let call_info = sycl_extract_call_info(g, func);
+			if (call_info.is_sycl_qualified) {
+				// Check for unsupported features
+				sycl_check_unsupported(g, call_info.name);
+
+				// Check if this is a known SYCL builtin
+				if (sycl_is_builtin_call(call_info.name, g.t.src)) {
+					sycl_emit_builtin_call(g, call_info.name, call_info.args);
+					return;
+				};
+
+				// Unknown sycl:: function - emit as sycl::name(...)
+				ef1_b(&g.em, "sycl::%(", call_info.name);
+				let call_el = el_start(&g.em);
+				let call_arg_opt = call_info.args;
+				for (call_arg_opt != null) {
+					el_sep(&call_el);
+					sycl_expr(g, unwrap(call_arg_opt));
+					call_arg_opt = unwrap(call_arg_opt).next;
+				};
+				e_c(&g.em, ')');
+				return;
+			};
+			// Non-sycl qualified call - emit as module::name(...)
+			let call_member_opt = t_first(func);
+			if (call_member_opt != null) {
+				ef2_b(&g.em, "%::%(", func.ref, unwrap(call_member_opt).ref);
+			} else {
+				ef1_b(&g.em, "%::(", func.ref);
+			};
+			let qual_el = el_start(&g.em);
+			let qual_arg_opt = func.next;
+			for (qual_arg_opt != null) {
+				el_sep(&qual_el);
+				sycl_expr(g, unwrap(qual_arg_opt));
+				qual_arg_opt = unwrap(qual_arg_opt).next;
+			};
+			e_c(&g.em, ')');
+			return;
+		};
+
+		// Regular function call (N_ID) - NOT recognized as SYCL builtin
+		// (only sycl::xxx prefixed calls are recognized as builtins)
+		let needs_error = false;
+		match (sycl_fn_find(func.ref, g.t.src)) {
+		case let fn_info: *sycl_fn_info => needs_error = (*fn_info).needs_error;
+		case null => void;
+		};
+
+		sycl_expr(g, func);
+		e_c(&g.em, '(');
+		let args_el = el_start(&g.em);
+		let args_arg_opt = func.next;
+		let param_emit: nullable *tnode = null;
+		let fn_ptr = dict_get_bref(&g.globals, func.ref);
+		if (fn_ptr != 0) {
+			let fn_def: *tnode = fn_ptr: uintptr: *tnode;
+			if (fn_def.kind == N_FN) {
+				param_emit = g_skip_symbol(fn_def);
+			};
+		};
+		for (true) {
+			let arg_info = call_arg_next(g, func.ref, &param_emit, &args_arg_opt);
+			if (arg_info.arg == null) { break; };
+			let cur_arg: *tnode = unwrap(arg_info.arg);
+			el_sep(&args_el);
+			match (arg_info.param) {
+			case let param_node: *tnode =>
+				let param_ty_opt = t_first(param_node);
+				if (param_ty_opt != null) {
+					let param_ty = unwrap(param_ty_opt);
+					if (param_ty.kind == N_T_PTR && (param_ty.flags & F_NULLABLE) == 0) {
+						if (cur_arg.kind == N_NULL) {
+							sycl_err(g, cur_arg.ref, "cannot pass null to non-nullable pointer");
+						};
+					};
+					sycl_check_expr_match(g, param_ty_opt, cur_arg);
+				};
+			case null => void;
+			};
+			sycl_expr(g, cur_arg);
+		};
+		if (needs_error) {
+			el_sep(&args_el);
+			sycl_emit_error_ref(g);
+		};
+		e_c(&g.em, ')');
+		return;
+	};
+
+	// len()
+	if (k == N_LEN) {
+		sycl_emit_len(g, n);
+		return;
+	};
+
+	// Slice expression
+	if (k == N_SLICE) {
+		sycl_emit_slice_expr(g, n);
+		return;
+	};
+
+	// Array indexing
+	if (k == N_IDX) {
+		let arr = t_first_nn(n);
+		let idx = t_next_nn(arr);
+		if (sycl_emit_slice_index_expr(g, n, arr, idx)) {
+			return;
+		};
+
+		match (get_expr_type(g, arr)) {
+		case let index_ty: *tnode =>
+			if (index_ty.kind == N_T_PTR && (index_ty.flags & F_NULLABLE) != 0) {
+				let index_narrowed = arr.kind == N_ID && !bref_is_empty(g.nullable_narrowed) &&
+					bref_eq(arr.ref, g.nullable_narrowed, g.t.src);
+				if (!index_narrowed) {
+					sycl_err(g, n.ref, "cannot index nullable pointer (use match to narrow type)");
+				};
+			};
+			let pcount: i64 = 0;
+			let inner_kind: u16 = 0;
+			let current: *tnode = index_ty;
+			for (current.kind == N_T_PTR) {
+				pcount += 1;
+				match (t_first(current)) {
+				case let inner_node: *tnode => current = inner_node;
+				case null => break;
+				};
+			};
+			inner_kind = current.kind;
+			if (pcount > 0 && inner_kind != N_T_ARR && inner_kind != N_T_SLICE &&
+				inner_kind != N_T_UARR) {
+				sycl_err(g, n.ref, "cannot index pointer to non-array type");
+			};
+		case null => void;
+		};
+		sycl_expr(g, arr);
+		e_c(&g.em, '[');
+		sycl_expr(g, idx);
+		e_c(&g.em, ']');
+		return;
+	};
+
+	// Field access
+	if (k == N_FLD) {
+		let base = t_first_nn(n);
+		// Disallow .x/.y/.z on SYCL index types (use indexing or helpers instead)
+		if (n.ref.length == 1) {
+			let field_char = g.t.src[n.ref.pos];
+			let index: i64 = -1;
+			if (field_char == 'x': u8) { index = 0; };
+			if (field_char == 'y': u8) { index = 1; };
+			if (field_char == 'z': u8) { index = 2; };
+			if (index >= 0) {
+				match (get_expr_type(g, base)) {
+				case let base_ty: *tnode =>
+					let stripped = base_ty;
+					match (type_strip_ptr(base_ty)) {
+					case let unwrapped: *tnode => stripped = unwrapped;
+					case null => void;
+					};
+					if (stripped.kind == N_T_ALIAS) {
+						if (sycl_is_id_type(stripped.ref, g.t.src) ||
+							sycl_is_range_type(stripped.ref, g.t.src)) {
+							sycl_err(g, n.ref,
+								"SYCL id/range types are indexed (use idx[0], idx[1], idx[2])");
+							return;
+						};
+						if (sycl_is_item_type(stripped.ref, g.t.src)) {
+							sycl_err(g, n.ref,
+								"SYCL item types use sycl::get_id(item)[0] (not .x/.y/.z)");
+							return;
+						};
+						if (sycl_is_nd_item_type(stripped.ref, g.t.src)) {
+							sycl_err(g, n.ref,
+								"SYCL nd_item types use sycl::get_global_id/item helpers (not .x/.y/.z)");
+							return;
+						};
+					};
+				case null => void;
+				};
+			};
+		};
+		// Pointer/nullable handling
+		match (get_expr_type(g, base)) {
+		case let field_ty: *tnode =>
+			let depth = ptr_depth(field_ty);
+			if (field_ty.kind == N_T_PTR && (field_ty.flags & F_NULLABLE) != 0) {
+				let field_narrowed = base.kind == N_ID && !bref_is_empty(g.nullable_narrowed) &&
+					bref_eq(base.ref, g.nullable_narrowed, g.t.src);
+				if (!field_narrowed) {
+					sycl_err(g, n.ref, "cannot autodereference nullable pointer (use match with let binding)");
+				};
+			};
+			if (depth > 0) {
+				if (depth > 1) {
+					e_c(&g.em, '(');
+					for (let i: i64 = 1; i < depth; i += 1) { e_c(&g.em, '*'); };
+				};
+				sycl_expr(g, base);
+				if (depth > 1) { e_c(&g.em, ')'); };
+				ef1_b(&g.em, "->%", n.ref);
+				return;
+			};
+		case null => void;
+		};
+
+		// Regular field access
+		sycl_expr(g, base);
+		e_c(&g.em, '.');
+		e_bref(&g.em, n.ref);
+		return;
+	};
+
+	// Casts
+	if (k == N_CAST) {
+		let cast_expr = t_first_nn(n);
+		let cast_ty = t_next_nn(cast_expr);
+		let cast_src_ty = get_expr_type(g, cast_expr);
+		if (cast_ty.kind == N_T_PRIM && bref_match(cast_ty.ref, "void", g.t.src)) {
+			let is_void_expr = cast_expr.kind == N_T_PRIM &&
+				bref_match(cast_expr.ref, "void", g.t.src);
+			if (!is_void_expr) {
+				sycl_err(g, n.ref, "cannot cast to void; use 'void;' instead");
+			};
+		};
+		if (cast_ty.kind == N_T_PTR && (cast_ty.flags & F_NULLABLE) == 0) {
+			match (get_expr_type(g, cast_expr)) {
+			case let et: *tnode =>
+				if (et.kind == N_T_PTR && (et.flags & F_NULLABLE) != 0) {
+					sycl_err(g, n.ref, "cannot cast nullable pointer to non-nullable (use match instead)");
+				};
+			case null => void;
+			};
+		};
+		if (sycl_type_is_slice(g, cast_ty)) {
+			match (cast_src_ty) {
+			case let src_ty: *tnode =>
+				if (sycl_type_is_ptr_to_uarr(g, src_ty)) {
+					sycl_err(g, n.ref, "cannot cast *[*] to [] (use slicing instead)");
+				};
+			case null => void;
+			};
+		};
+		if (sycl_type_is_ptr_to_uarr(g, cast_ty)) {
+			match (cast_src_ty) {
+			case let src_ty: *tnode =>
+				if (sycl_type_is_slice(g, src_ty)) {
+					e_c(&g.em, '(');
+					sycl_emit_type(g, cast_ty);
+					emit_s(&g.em, ")(psycl_slice_data(");
+					sycl_expr(g, cast_expr);
+					e_c(&g.em, ')');
+					e_c(&g.em, ')');
+					return;
+				};
+			case null => void;
+			};
+		};
+		e_c(&g.em, '(');
+		sycl_emit_type(g, cast_ty);
+		emit_s(&g.em, ")(");
+		sycl_expr(g, cast_expr);
+		e_c(&g.em, ')');
+		return;
+	};
+
+	// Ternary conditional
+	if (k == N_IF) {
+		let cond = t_first_nn(n);
+		let then_expr = t_next_nn(cond);
+		let else_opt = then_expr.next;
+		let then_ty = get_expr_type(g, then_expr);
+		let else_ty: nullable *tnode = null;
+		if (else_opt != null) { else_ty = get_expr_type(g, unwrap(else_opt)); };
+		if (then_ty != null && else_opt != null) {
+			sycl_check_expr_match(g, then_ty, unwrap(else_opt));
+		};
+		if (else_ty != null) {
+			sycl_check_expr_match(g, else_ty, then_expr);
+		};
+		e_c(&g.em, '(');
+		sycl_expr(g, cond);
+		emit_s(&g.em, " ? ");
+		sycl_expr_expected(g, then_expr, then_ty);
+		emit_s(&g.em, " : ");
+		if (else_opt != null) {
+			sycl_expr_expected(g, unwrap(else_opt), then_ty);
+		} else {
+			emit_s(&g.em, "0");
+		};
+		e_c(&g.em, ')');
+		return;
+	};
+
+	// Unsupported
+	emit_s(&g.em, "/* unsupported expr */");
+};
+
+fn sycl_stmt(g: *codegen, n: *tnode) void = {
+	let k = n.kind;
+
+	// Let/variable declaration
+	if (k == N_LET) {
+		let child = t_first(n);
+		let ty: nullable *tnode = null;
+		let init: nullable *tnode = null;
+		match (child) {
+		case let c: *tnode =>
+			if (is_type_kind(c.kind)) {
+				ty = c;
+				init = c.next;
+			} else {
+				init = c;
+			};
+		case null => void;
+		};
+
+		// Register variable for type checking
+		if (ty != null) {
+			vars_register(g, n.ref, unwrap(ty): uintptr: u64);
+		} else if (init != null) {
+			let inferred = get_expr_type(g, unwrap(init));
+			if (inferred != null) {
+				vars_register(g, n.ref, unwrap(inferred): uintptr: u64);
+			} else {
+				vars_register(g, n.ref, 0);
+			};
+		} else {
+			vars_register(g, n.ref, 0);
+		};
+
+		if (ty == null && init != null && expr_is_void_literal(unwrap(init), g.t.src)) {
+			sycl_err(g, n.ref, "cannot declare variable of type void");
+		};
+
+		if (ty != null) {
+			sycl_emit_var_decl(g, unwrap(ty), n.ref);
+		} else {
+			ef1_b(&g.em, "auto %", n.ref);
+		};
+		if (init != null) {
+			if (ty != null) {
+				let check_ty: *tnode = unwrap(ty);
+				let init_nn: *tnode = unwrap(init);
+				if (check_ty.kind == N_T_PTR && (check_ty.flags & F_NULLABLE) == 0) {
+					if (init_nn.kind == N_NULL) {
+						sycl_err(g, init_nn.ref, "cannot assign null to non-nullable pointer");
+					};
+					let init_ty = get_expr_type(g, init_nn);
+					match (init_ty) {
+					case let it: *tnode =>
+						if (it.kind == N_T_PTR && (it.flags & F_NULLABLE) != 0) {
+							sycl_err(g, init_nn.ref, "cannot assign nullable pointer to non-nullable");
+						};
+					case null => void;
+					};
+				};
+				if (!(check_ty.kind == N_T_ARR && init_nn.kind == N_ARR_LIT)) {
+					sycl_check_expr_match(g, ty, init_nn);
+				};
+			};
+			emit_s(&g.em, " = ");
+			sycl_expr_expected(g, unwrap(init), ty);
+		};
+		e_stmt_end(&g.em);
+		return;
+	};
+
+	// Assignment
+	if (k == N_ASGN) {
+		let target = t_first_nn(n);
+		let val = t_next_nn(target);
+		let expected = sycl_expected_from_target(g, target);
+		if (expected != null) {
+			let typ = unwrap(expected);
+			if (typ.kind == N_T_PTR && (typ.flags & F_NULLABLE) == 0) {
+				if (val.kind == N_NULL) {
+					sycl_err(g, val.ref, "cannot assign null to non-nullable pointer");
+				};
+				let val_ty = get_expr_type(g, val);
+				match (val_ty) {
+				case let vt: *tnode =>
+					if (vt.kind == N_T_PTR && (vt.flags & F_NULLABLE) != 0) {
+						sycl_err(g, val.ref, "cannot assign nullable pointer to non-nullable");
+					};
+				case null => void;
+				};
+			};
+			sycl_check_expr_match(g, expected, val);
+		};
+		if (sycl_emit_slice_assign(g, target, val, expected, n.ival: u16)) {
+			return;
+		};
+
+		sycl_expr(g, target);
+		sycl_emit_asgn_op(g, n.ival: u16);
+		sycl_expr_expected(g, val, expected);
+		e_stmt_end(&g.em);
+		return;
+	};
+
+	// Return
+	if (k == N_RET) {
+		emit_s(&g.em, "return");
+		let expr_opt = t_first(n);
+		if (expr_opt != null) {
+			let ret_expr = unwrap(expr_opt);
+			sycl_check_expr_match(g, g.cur_ret_type, ret_expr);
+			e_sp(&g.em);
+			sycl_expr_expected(g, ret_expr, g.cur_ret_type);
+		};
+		e_stmt_end(&g.em);
+		return;
+	};
+
+	// If statement
+	if (k == N_IF) {
+		emit_s(&g.em, "if");
+		emit_s(&g.em, " (");
+		let cond = t_first_nn(n);
+		sycl_expr(g, cond);
+		e_c(&g.em, ')');
+		e_sp(&g.em);
+		let then_block = t_next_nn(cond);
+		sycl_block(g, then_block);
+		let else_opt = then_block.next;
+		if (else_opt != null) {
+			e_sp(&g.em);
+			emit_s(&g.em, "else");
+			e_sp(&g.em);
+			sycl_block(g, unwrap(else_opt));
+		};
+		e_nl(&g.em);
+		return;
+	};
+
+	// For loop
+	if (k == N_FOR) {
+		let init_opt = t_first(n);
+		let cond_opt: nullable *tnode = null;
+		let after_opt: nullable *tnode = null;
+		let body_opt: nullable *tnode = null;
+
+		// Determine loop structure by counting children
+		// Structure 1: for (cond) { body } -> 2 children (cond, body)
+		// Structure 2: for (init; cond; after) { body } -> 4 children
+		if (init_opt != null) {
+			cond_opt = unwrap(init_opt).next;
+			if (cond_opt != null) {
+				after_opt = unwrap(cond_opt).next;
+				if (after_opt != null) {
+					body_opt = unwrap(after_opt).next;
+				} else {
+					// Only 2 children: init is actually the condition, cond is body
+					body_opt = cond_opt;
+					cond_opt = init_opt;
+					init_opt = null;
+				};
+			};
+		};
+
+		emit_s(&g.em, "for");
+		emit_s(&g.em, " (");
+
+		// Init part
+		if (init_opt != null) {
+			sycl_expr(g, unwrap(init_opt));
+		};
+		emit_s(&g.em, "; ");
+
+		// Condition part
+		if (cond_opt != null) {
+			sycl_expr(g, unwrap(cond_opt));
+		};
+		emit_s(&g.em, "; ");
+
+		// After part
+		if (after_opt != null) {
+			sycl_expr(g, unwrap(after_opt));
+		};
+
+		e_c(&g.em, ')');
+		e_sp(&g.em);
+
+		// Body
+		if (body_opt != null) {
+			sycl_block(g, unwrap(body_opt));
+		} else {
+			e_block_start(&g.em);
+			e_block_end(&g.em);
+		};
+
+		e_nl(&g.em);
+		return;
+	};
+
+	// Match
+	if (k == N_MATCH) {
+		sycl_match(g, n);
+		return;
+	};
+
+	// Break/Continue
+	if (k == N_BREAK) {
+		emit_s(&g.em, "break");
+		e_stmt_end(&g.em);
+		return;
+	};
+	if (k == N_CONTINUE) {
+		emit_s(&g.em, "continue");
+		e_stmt_end(&g.em);
+		return;
+	};
+
+	// Assert/Abort
+	if (k == N_ASSERT) {
+		let assert_cond_expr = t_first_nn(n);
+		emit_s(&g.em, "if");
+		emit_s(&g.em, " (!(");
+		sycl_expr(g, assert_cond_expr);
+		emit_s(&g.em, "))");
+		e_sp(&g.em);
+		e_block_start(&g.em);
+		sycl_emit_fail_return(g, 1u32, n.ref.pos);
+		e_nl(&g.em);
+		e_block_end(&g.em);
+		e_nl(&g.em);
+		return;
+	};
+	if (k == N_ABORT) {
+		e_block_start(&g.em);
+		sycl_emit_fail_return(g, 2u32, n.ref.pos);
+		e_nl(&g.em);
+		e_block_end(&g.em);
+		e_nl(&g.em);
+		return;
+	};
+
+	// Yield (match expression)
+	if (k == N_YIELD) {
+		let yield_expr: *tnode = t_first_nn(n);
+		check_yield_never(g, yield_expr);
+		sycl_check_expr_match(g, g.match_expected, yield_expr);
+		emit_s(&g.em, "__r = ");
+		sycl_expr_expected(g, yield_expr, g.match_expected);
+		e_stmt_end(&g.em);
+		return;
+	};
+
+	// Expression statement
+	if (k == N_EXPR_STMT) {
+		let stmt_expr = t_first_nn(n);
+		if (stmt_expr.kind == N_ASSERT) {
+			let stmt_assert_cond = t_first_nn(stmt_expr);
+			emit_s(&g.em, "if");
+			emit_s(&g.em, " (!(");
+			sycl_expr(g, stmt_assert_cond);
+			emit_s(&g.em, "))");
+			e_sp(&g.em);
+			e_block_start(&g.em);
+			sycl_emit_fail_return(g, 1u32, stmt_expr.ref.pos);
+			e_nl(&g.em);
+			e_block_end(&g.em);
+			e_nl(&g.em);
+			return;
+		};
+		if (stmt_expr.kind == N_ABORT) {
+			e_block_start(&g.em);
+			sycl_emit_fail_return(g, 2u32, stmt_expr.ref.pos);
+			e_nl(&g.em);
+			e_block_end(&g.em);
+			e_nl(&g.em);
+			return;
+		};
+		sycl_expr(g, stmt_expr);
+		e_stmt_end(&g.em);
+		return;
+	};
+
+	// Block
+	if (k == N_BLOCK) {
+		sycl_block(g, n);
+		return;
+	};
+
+	// Unsupported
+	emit_s(&g.em, "/* unsupported stmt */;");
+	e_nl(&g.em);
+};
+
+fn sycl_block(g: *codegen, n: *tnode) void = {
+	e_block_start(&g.em);
+
+	// Emit statements in block
+	let stmt_opt = t_first(n);
+	for (stmt_opt != null) {
+		let stmt = unwrap(stmt_opt);
+		sycl_stmt(g, stmt);
+		stmt_opt = stmt.next;
+	};
+
+	e_block_end(&g.em);
+};
+
+fn sycl_body(g: *codegen, body: *tnode) void = {
+	let cur = body_cursor_from(body);
+	for (true) {
+		let stmt = body_cursor_next(&cur);
+		match (stmt) {
+		case let s: *tnode => sycl_stmt(g, s);
+		case null => break;
+		};
+	};
+};
+
+fn sycl_case_body(g: *codegen, cn: *tnode) void = {
+	match (case_body_node(cn)) {
+	case let bd: *tnode => sycl_body(g, bd);
+	case null => void;
+	};
+};
+
+// ============================================================================
+// Match (nullable pointer only)
+// ============================================================================
+
+fn sycl_match_expr(g: *codegen, n: *tnode) void = {
+	let ty_opt = get_expr_type(g, n);
+	let prev_ret = g.cur_ret_type;
+	let prev_match_expected = g.match_expected;
+	if (ty_opt != null) { g.cur_ret_type = unwrap(ty_opt); };
+	g.match_expected = ty_opt;
+
+	emit_s(&g.em, "([&]() -> ");
+	match (ty_opt) {
+	case let ret_ty: *tnode => sycl_emit_type(g, ret_ty);
+	case null => emit_s(&g.em, "auto");
+	};
+	e_sp(&g.em);
+	e_block_start(&g.em);
+	match (ty_opt) {
+	case let match_ty: *tnode => sycl_emit_type(g, match_ty);
+	case null => emit_s(&g.em, "auto");
+	};
+	emit_s(&g.em, " __r{};");
+	e_nl(&g.em);
+	sycl_match(g, n);
+	emit_s(&g.em, "return __r;");
+	e_nl(&g.em);
+	e_block_end(&g.em);
+	emit_s(&g.em, ")()");
+
+	g.cur_ret_type = prev_ret;
+	g.match_expected = prev_match_expected;
+};
+
+fn sycl_match(g: *codegen, n: *tnode) void = {
+	let val: *tnode = t_first_nn(n);
+	let resolved: nullable *tnode = null;
+	match (get_expr_type(g, val)) {
+	case let ty: *tnode =>
+		resolved = resolve_alias_type(g, ty);
+	case null => void;
+	};
+	if (resolved != null) {
+		let r: *tnode = unwrap(resolved);
+		if (r.kind == N_T_PTR && (r.flags & F_NULLABLE) != 0) {
+			sycl_match_nullable(g, n, val);
+			return;
+		};
+	};
+	if (resolved == null && (n.flags & F_NULLABLE) != 0) {
+		sycl_match_nullable(g, n, val);
+		return;
+	};
+	sycl_err(g, n.ref, "match only supported on nullable pointers in SYCL");
+};
+
+fn sycl_match_nullable(g: *codegen, n: *tnode, val: *tnode) void = {
+	let cn: nullable *tnode = case_list_first(n);
+	let first = true;
+
+	let use_temp = val.kind != N_ID;
+	let temp_idx = g.match_tmp;
+	if (use_temp) {
+		ef1_i(&g.em, "{ auto __m% = (", temp_idx);
+		sycl_expr(g, val);
+		emit_s(&g.em, "); ");
+		g.match_tmp += 1;
+	};
+
+	for (cn != null) {
+		let case_n: *tnode = unwrap(cn);
+		let first_child = t_first(case_n);
+		let has_binding = case_has_binding(case_n);
+		let is_default = case_is_default(case_n);
+		let is_null = node_is_kind(first_child, N_NULL);
+
+		if (first) {
+			if (!is_default) {
+				emit_s(&g.em, "if");
+				emit_s(&g.em, " (");
+				if (use_temp) {
+					ef1_i(&g.em, "__m%", temp_idx);
+				} else {
+					sycl_expr(g, val);
+				};
+				if (is_null) { emit_s(&g.em, " == nullptr"); } else { emit_s(&g.em, " != nullptr"); };
+				e_c(&g.em, ')');
+			};
+			first = false;
+		} else {
+			e_sp(&g.em);
+			emit_s(&g.em, "else");
+			e_sp(&g.em);
+			if (!is_default) {
+				emit_s(&g.em, "if");
+				emit_s(&g.em, " (");
+				if (use_temp) {
+					ef1_i(&g.em, "__m%", temp_idx);
+				} else {
+					sycl_expr(g, val);
+				};
+				if (is_null) { emit_s(&g.em, " == nullptr"); } else { emit_s(&g.em, " != nullptr"); };
+				e_c(&g.em, ')');
+			};
+		};
+
+		let saved_narrowed = g.nullable_narrowed;
+		let saved_binding: u64 = 0;
+		let had_binding = false;
+		let binding_ref = bref_empty();
+
+		e_sp(&g.em);
+		e_block_start(&g.em);
+
+		if (has_binding && first_child != null) {
+			let binding: *tnode = unwrap(first_child);
+			binding_ref = binding.ref;
+			if (dict_has_bref(&g.globals, binding.ref)) {
+				sycl_err(g, binding.ref, "match binding shadows global/function name");
+			};
+			let bind_type: *tnode = t_first_nn(binding);
+			sycl_emit_type(g, bind_type);
+			ef1_b_raw(&g.em, " % = ", binding.ref);
+			if (use_temp) {
+				ef1_i(&g.em, "__m%", temp_idx);
+			} else {
+				sycl_expr(g, val);
+			};
+			e_stmt_end(&g.em);
+			had_binding = dict_has_bref(&g.vars, binding.ref);
+			if (had_binding) {
+				saved_binding = dict_get_bref(&g.vars, binding.ref);
+			};
+			dict_set_bref(&g.vars, binding.ref, bind_type: uintptr: u64);
+			g.nullable_narrowed = binding.ref;
+		};
+
+		sycl_case_body(g, case_n);
+
+		e_block_end(&g.em);
+		e_nl(&g.em);
+
+		if (has_binding && !bref_is_empty(binding_ref)) {
+			if (had_binding) {
+				dict_set_bref(&g.vars, binding_ref, saved_binding);
+			} else {
+				dict_remove_bref(&g.vars, binding_ref);
+			};
+		};
+		g.nullable_narrowed = saved_narrowed;
+
+		cn = case_n.next;
+	};
+	if (use_temp) {
+		emit_s(&g.em, " }");
+	};
+	e_nl(&g.em);
+};
+
+// ============================================================================
+// Kernel Code Generation
+// ============================================================================
+
+fn sycl_is_local_param(info: *sycl_kernel_info, param_name: bref, src: *[*]u8) bool = {
+	for (let i = 0z; i < info.local_count; i += 1) {
+		if (bref_eq(info.local_params[i], param_name, src)) {
+			return true;
+		};
+	};
+	return false;
+};
+
+fn sycl_param_is_local(param: *tnode) bool = {
+	return (param.flags & F_SYCL_LOCAL) != 0;
+};
+
+fn sycl_param_access_mode(param: *tnode) i64 = {
+	let read = (param.flags & F_SYCL_READ) != 0;
+	let write = (param.flags & F_SYCL_WRITE) != 0;
+	if (!read && !write) { return 2; };  // read_write (default)
+	if (read && !write) { return 0; };   // read
+	if (!read && write) { return 1; };   // write
+	return 2;                            // read_write
+};
+
+fn sycl_emit_access_mode(g: *codegen, param: *tnode) void = {
+	let mode = sycl_param_access_mode(param);
+	if (mode == 0) { emit_s(&g.em, "read"); return; };
+	if (mode == 1) { emit_s(&g.em, "write"); return; };
+	emit_s(&g.em, "read_write");
+};
+
+fn sycl_param_buffer_elem_type(g: *codegen, pty: *tnode) nullable *tnode = {
+	let resolved = sycl_resolve_type(g, pty);
+	if (resolved.kind != N_T_PTR) { return null; };
+	let inner_ptr = t_first(resolved);
+	if (inner_ptr == null) { return null; };
+	let inner = unwrap(inner_ptr);
+	if (inner.kind == N_T_ALIAS) {
+		inner = sycl_resolve_type(g, inner);
+	};
+	if (inner.kind != N_T_UARR) { return null; };
+	let elem_ptr = t_first(inner);
+	if (elem_ptr == null) { return null; };
+	return unwrap(elem_ptr);
+};
+
+fn sycl_param_buffer_elem_alias_struct(g: *codegen, pty: *tnode) bref = {
+	let resolved = sycl_resolve_type(g, pty);
+	if (resolved.kind != N_T_PTR) { return bref_empty(); };
+	let inner_ptr = t_first(resolved);
+	if (inner_ptr == null) { return bref_empty(); };
+	let inner = unwrap(inner_ptr);
+	if (inner.kind == N_T_ALIAS) {
+		let inner_def_ptr = dict_get_bref(&g.types, inner.ref);
+		if (inner_def_ptr != 0) {
+			inner = inner_def_ptr: uintptr: *tnode;
+		};
+	};
+	if (inner.kind != N_T_UARR) { return bref_empty(); };
+	let elem_ptr = t_first(inner);
+	if (elem_ptr == null) { return bref_empty(); };
+	let elem = unwrap(elem_ptr);
+	if (elem.kind == N_T_ALIAS) {
+		let elem_def_ptr = dict_get_bref(&g.types, elem.ref);
+		if (elem_def_ptr != 0) {
+			let elem_def = elem_def_ptr: uintptr: *tnode;
+			if (elem_def.kind == N_T_STRUCT) {
+				return elem.ref;
+			};
+		};
+	};
+	return bref_empty();
+};
+
+fn sycl_get_local_param_elem_type(g: *codegen, info: *sycl_kernel_info, param_name: bref) nullable *tnode = {
+	let fn_node = unwrap(info.fn_node);
+	let param_opt = sycl_find_param(fn_node, param_name, g.t.src);
+	if (param_opt == null) { return null; };
+	let param = unwrap(param_opt);
+	let pty_opt = t_first(param);
+	if (pty_opt == null) { return null; };
+	return sycl_param_buffer_elem_type(g, unwrap(pty_opt));
+};
+
+fn sycl_param_is_buffer(g: *codegen, pty: *tnode) bool = {
+	return sycl_param_buffer_elem_type(g, pty) != null;
+};
+
+fn sycl_emit_buffer_elem_type(g: *codegen, pty: *tnode) void = {
+	let alias_ref = sycl_param_buffer_elem_alias_struct(g, pty);
+	if (!bref_is_empty(alias_ref)) {
+		sycl_emit_type_name(g, alias_ref);
+		return;
+	};
+	match (sycl_param_buffer_elem_type(g, pty)) {
+	case let elem: *tnode =>
+		sycl_emit_type(g, elem);
+		return;
+	case null => void;
+	};
+	sycl_emit_type(g, pty);
+};
+
+fn sycl_emit_buffer_accessor_type(g: *codegen, param: *tnode, pty: *tnode) void = {
+	emit_s(&g.em, "sycl::accessor<");
+	sycl_emit_buffer_elem_type(g, pty);
+	emit_s(&g.em, ", 1, sycl::access::mode::");
+	sycl_emit_access_mode(g, param);
+	emit_s(&g.em, ">");
+};
+
+fn sycl_emit_buffer_param_type(g: *codegen, pty: *tnode) void = {
+	emit_s(&g.em, "sycl::buffer<");
+	sycl_emit_buffer_elem_type(g, pty);
+	emit_s(&g.em, ", 1>&");
+};
+
+def SYCL_PARAM_DECL_LAUNCH: u8 = 0;
+def SYCL_PARAM_DECL_C_API: u8 = 1;
+
+fn sycl_emit_local_size_params(g: *codegen, info: *sycl_kernel_info) void = {
+	for (let i = 0z; i < info.local_count; i += 1) {
+		ef1_b(&g.em, ", size_t local_size_%", info.local_params[i]);
+	};
+};
+
+fn sycl_emit_kernel_param_decls(g: *codegen, info: *sycl_kernel_info, mode: u8) void = {
+	let fn_node = unwrap(info.fn_node);
+	let param_opt = t_first(fn_node);
+	if (param_opt != null) { param_opt = unwrap(param_opt).next; };
+
+	for (param_opt != null) {
+		let param = unwrap(param_opt);
+		if (param.kind != N_PARAM) { break; };
+		if (!sycl_is_local_param(info, param.ref, g.t.src)) {
+			emit_s(&g.em, ", ");
+			let pty_opt = t_first(param);
+			if (pty_opt != null) {
+				let pty = unwrap(pty_opt);
+				if (sycl_param_is_buffer(g, pty)) {
+					if (mode == SYCL_PARAM_DECL_C_API) {
+						emit_s(&g.em, "psycl_buffer_handle_t");
+					} else {
+						sycl_emit_buffer_param_type(g, pty);
+					};
+				} else {
+					sycl_emit_type(g, pty);
+				};
+			};
+			e_sp(&g.em);
+			e_bref(&g.em, param.ref);
+		};
+		param_opt = param.next;
+	};
+};
+
+fn sycl_emit_kernel_launch_args(g: *codegen, info: *sycl_kernel_info) void = {
+	let fn_node = unwrap(info.fn_node);
+	let param_opt = t_first(fn_node);
+	if (param_opt != null) { param_opt = unwrap(param_opt).next; };
+
+	for (param_opt != null) {
+		let param = unwrap(param_opt);
+		if (param.kind != N_PARAM) { break; };
+		if (!sycl_is_local_param(info, param.ref, g.t.src)) {
+			emit_s(&g.em, ", ");
+			let pty_opt = t_first(param);
+			if (pty_opt != null && sycl_param_is_buffer(g, unwrap(pty_opt))) {
+				ef1_b(&g.em, "*buf_%", param.ref);
+			} else {
+				e_bref(&g.em, param.ref);
+			};
+		};
+		param_opt = param.next;
+	};
+};
+
+fn sycl_emit_kernel_param_names(g: *codegen, info: *sycl_kernel_info) void = {
+	let fn_node = unwrap(info.fn_node);
+	let param_opt = t_first(fn_node);
+	if (param_opt != null) { param_opt = unwrap(param_opt).next; };
+
+	for (param_opt != null) {
+		let param = unwrap(param_opt);
+		if (param.kind != N_PARAM) { break; };
+		if (!sycl_is_local_param(info, param.ref, g.t.src)) {
+			emit_s(&g.em, ", ");
+			e_bref(&g.em, param.ref);
+		};
+		param_opt = param.next;
+	};
+};
+
+fn sycl_emit_kernel_ctor_args(g: *codegen, info: *sycl_kernel_info, el: *emit_list) void = {
+	let fn_node = unwrap(info.fn_node);
+	let param_opt = t_first(fn_node);
+	if (param_opt != null) { param_opt = unwrap(param_opt).next; };
+
+	for (param_opt != null) {
+		let param = unwrap(param_opt);
+		if (param.kind != N_PARAM) { break; };
+		if (!sycl_is_local_param(info, param.ref, g.t.src)) {
+			el_sep(el);
+			let pty_opt = t_first(param);
+			if (pty_opt != null && sycl_param_is_buffer(g, unwrap(pty_opt))) {
+				ef1_b(&g.em, "acc_%", param.ref);
+			} else {
+				e_bref(&g.em, param.ref);
+			};
+		};
+		param_opt = param.next;
+	};
+};
+
+fn sycl_is_kernel_member_param(info: *sycl_kernel_info, name: bref, src: *[*]u8) bool = {
+	let fn_node = unwrap(info.fn_node);
+	// Check if this identifier is a non-first parameter of the kernel
+	// (those become member variables in the kernel class)
+	// BUT exclude local_* parameters - those are passed directly to operator()
+	let param_opt = t_first(fn_node);
+	if (param_opt == null) { return false; };
+
+	// Skip first parameter (idx/item - passed to operator())
+	param_opt = unwrap(param_opt).next;
+
+	for (param_opt != null) {
+		let param = unwrap(param_opt);
+		if (param.kind != N_PARAM) { break; };
+
+		if (bref_eq(param.ref, name, src)) {
+			// Found the parameter - but check if it's a local accessor
+			if (sycl_is_local_param(info, param.ref, src)) {
+				return false;  // Local accessors are NOT member variables
+			};
+			return true;
+		};
+
+		param_opt = param.next;
+	};
+
+	return false;
+};
+
+fn sycl_get_kernel_base_name(name: bref, src: *[*]u8) bref = {
+	if (sycl_name_has_kernel_prefix(name, src)) {
+		return bref { pos = name.pos + 7, length = name.length - 7 };
+	};
+	return name;
+};
+
+fn sycl_find_fn_body(fn_node: *tnode) nullable *tnode = {
+	// Find the body block (skip params and return type)
+	let child_opt = t_first(fn_node);
+	for (child_opt != null) {
+		let child = unwrap(child_opt);
+		if (child.kind == N_BLOCK) {
+			return child;
+		};
+		child_opt = child.next;
+	};
+	return null;
+};
+
+fn sycl_emit_kernel_members(g: *codegen, info: *sycl_kernel_info) void = {
+	let fn_node = unwrap(info.fn_node);
+	// Emit private member fields for non-local parameters (skip first param)
+	let param_opt = t_first(fn_node);
+	if (param_opt == null) { return; };
+
+	// Skip first parameter (idx/item)
+	param_opt = unwrap(param_opt).next;
+
+	for (param_opt != null) {
+		let param = unwrap(param_opt);
+		if (param.kind != N_PARAM) { break; };
+
+		// Skip local_* parameters (they become accessors)
+		if (!sycl_is_local_param(info, param.ref, g.t.src)) {
+			let pty_opt = t_first(param);
+			if (pty_opt != null) {
+				let pty = unwrap(pty_opt);
+				if (sycl_param_is_buffer(g, pty)) {
+					sycl_emit_buffer_accessor_type(g, param, pty);
+				} else {
+					sycl_emit_type(g, pty);
+				};
+			} else {
+				emit_s(&g.em, "auto");
+			};
+			e_sp(&g.em);
+			e_bref(&g.em, param.ref);
+			emit_s(&g.em, "_;");
+			e_nl(&g.em);
+		};
+
+		param_opt = param.next;
+	};
+
+	// Error flag accessor (always present)
+	emit_s(&g.em, "psycl_error_acc_t psycl_error_acc_");
+	e_stmt_end(&g.em);
+};
+
+fn sycl_emit_kernel_constructor(g: *codegen, info: *sycl_kernel_info) void = {
+	let fn_node = unwrap(info.fn_node);
+	let base_name = sycl_get_kernel_base_name(info.name, g.t.src);
+
+	// Constructor signature
+	ef1_b(&g.em, "%_kernel(", base_name);
+
+	// Constructor parameters (non-local)
+	let el = el_start(&g.em);
+	let param_opt = t_first(fn_node);
+	if (param_opt != null) { param_opt = unwrap(param_opt).next; };  // Skip first param
+
+	for (param_opt != null) {
+		let param_decl = unwrap(param_opt);
+		if (param_decl.kind != N_PARAM) { break; };
+
+		if (!sycl_is_local_param(info, param_decl.ref, g.t.src)) {
+			el_sep(&el);
+			let pty_opt = t_first(param_decl);
+			if (pty_opt != null) {
+				let pty = unwrap(pty_opt);
+				if (sycl_param_is_buffer(g, pty)) {
+					sycl_emit_buffer_accessor_type(g, param_decl, pty);
+				} else {
+					sycl_emit_type(g, pty);
+				};
+			};
+			e_sp(&g.em);
+			e_bref(&g.em, param_decl.ref);
+		};
+
+		param_opt = param_decl.next;
+	};
+
+	// Error accessor parameter
+	el_sep(&el);
+	emit_s(&g.em, "psycl_error_acc_t psycl_error_acc");
+
+	e_c(&g.em, ')');
+
+	// Initializer list (always include error accessor)
+	emit_s(&g.em, " : ");
+	el = el_start(&g.em);
+	param_opt = t_first(fn_node);
+	if (param_opt != null) { param_opt = unwrap(param_opt).next; };
+
+	for (param_opt != null) {
+		let param_init = unwrap(param_opt);
+		if (param_init.kind != N_PARAM) { break; };
+
+		if (!sycl_is_local_param(info, param_init.ref, g.t.src)) {
+			el_sep(&el);
+			ef2_b(&g.em, "%_(%)", param_init.ref, param_init.ref);
+		};
+
+		param_opt = param_init.next;
+	};
+	el_sep(&el);
+	emit_s(&g.em, "psycl_error_acc_(psycl_error_acc)");
+
+	emit_s(&g.em, " {}");
+	e_nl(&g.em);
+};
+
+fn sycl_emit_kernel_operator(g: *codegen, info: *sycl_kernel_info) void = {
+	let fn_node = unwrap(info.fn_node);
+	// operator() signature
+	emit_s(&g.em, "void operator()(");
+
+	// First parameter: id or nd_item (override to nd_item if local memory present)
+	let first_param_opt = t_first(fn_node);
+	if (first_param_opt != null) {
+		let first_param = unwrap(first_param_opt);
+
+		// If uses_nd_range is true, always emit nd_item regardless of source type
+		if (info.uses_nd_range) {
+			ef1_i(&g.em, "sycl::nd_item<%>", info.dim);
+		} else {
+			// Use the original type from source
+			let first_pty_opt = t_first(first_param);
+			if (first_pty_opt != null) {
+				sycl_emit_type(g, unwrap(first_pty_opt));
+			};
+		};
+		e_sp(&g.em);
+		e_bref(&g.em, first_param.ref);
+	};
+
+	// Local accessor parameters
+	for (let i = 0z; i < info.local_count; i += 1) {
+		emit_s(&g.em, ", ");
+		// Emit sycl::local_accessor<TYPE, 1>
+		match (sycl_get_local_param_elem_type(g, info, info.local_params[i])) {
+		case let elem_ty: *tnode =>
+			emit_s(&g.em, "sycl::local_accessor<");
+			sycl_emit_type(g, elem_ty);
+			emit_s(&g.em, ", 1> ");
+		case null =>
+			emit_s(&g.em, "auto ");
+		};
+		e_bref(&g.em, info.local_params[i]);
+	};
+
+	emit_s(&g.em, ") const ");
+
+	// Kernel body - set context so identifiers reference member variables
+	let prev_error_ref = sycl_current_error_ref;
+	let prev_ret_type = g.cur_ret_type;
+	let prev_fn = g.cur_fn;
+	let prev_match_expected = g.match_expected;
+	let prev_narrowed = g.nullable_narrowed;
+	vars_clear(g);
+	g.cur_fn = info.name;
+	let ret_opt = g_skip_to_ret(fn_node);
+	if (ret_opt != null) {
+		g.cur_ret_type = unwrap(ret_opt);
+	};
+	let param_opt = t_first(fn_node);
+	for (param_opt != null) {
+		let param = unwrap(param_opt);
+		if (param.kind != N_PARAM) { break; };
+		let param_type_opt = t_first(param);
+		if (param_type_opt != null) {
+			vars_register(g, param.ref, unwrap(param_type_opt): uintptr: u64);
+		} else {
+			vars_register(g, param.ref, 0);
+		};
+		param_opt = param.next;
+	};
+	sycl_current_error_ref = SYCL_ERROR_REF_MEMBER;
+	sycl_current_kernel = info;
+	let body_opt = sycl_find_fn_body(fn_node);
+	if (body_opt != null) {
+		sycl_block(g, unwrap(body_opt));
+	} else {
+		e_block_start(&g.em);
+		e_block_end(&g.em);
+	};
+	sycl_current_kernel = null;
+	sycl_current_error_ref = prev_error_ref;
+	g.cur_ret_type = prev_ret_type;
+	g.cur_fn = prev_fn;
+	g.match_expected = prev_match_expected;
+	g.nullable_narrowed = prev_narrowed;
+	e_nl(&g.em);
+};
+
+fn sycl_emit_kernel_class(g: *codegen, info: *sycl_kernel_info) void = {
+	let base_name = sycl_get_kernel_base_name(info.name, g.t.src);
+
+	// Class declaration
+	ef1_b(&g.em, "class %_kernel", base_name);
+	e_sp_block_start(&g.em);
+
+	// Private members
+	emit_s(&g.em, "private:");
+	e_nl(&g.em);
+	sycl_emit_kernel_members(g, info);
+	e_nl(&g.em);
+
+	// Public section
+	emit_s(&g.em, "public:");
+	e_nl(&g.em);
+
+	// Constructor
+	sycl_emit_kernel_constructor(g, info);
+	e_nl(&g.em);
+
+	// operator()
+	sycl_emit_kernel_operator(g, info);
+
+	e_block_end(&g.em);
+	emit_s(&g.em, ";");
+	e_nl(&g.em);
+};
+
+fn sycl_emit_launch_helper(g: *codegen, info: *sycl_kernel_info) void = {
+	let fn_node = unwrap(info.fn_node);
+	let base_name = sycl_get_kernel_base_name(info.name, g.t.src);
+
+	// Function signature: sycl::event launch_<name>_async(...)
+	ef1_b(&g.em, "inline sycl::event launch_%_async(", base_name);
+
+	// Parameters: queue, range/nd_range, local sizes (if needed), kernel args
+	emit_s(&g.em, "sycl::queue& q, ");
+
+	if (info.uses_nd_range) {
+		ef1_i(&g.em, "sycl::nd_range<%> ndr", info.dim);
+	} else {
+		ef1_i(&g.em, "sycl::range<%> r", info.dim);
+	};
+
+	// Local memory size parameters (for local_* params)
+	sycl_emit_local_size_params(g, info);
+
+	// Kernel data parameters (skip first param, skip local params)
+	sycl_emit_kernel_param_decls(g, info, SYCL_PARAM_DECL_LAUNCH);
+
+	// Error buffer (always present)
+	emit_s(&g.em, ", sycl::buffer<uint32_t, 1>& error");
+
+	emit_s(&g.em, ") ");
+	e_block_start(&g.em);
+
+	// Queue submit
+	emit_s(&g.em, "return q.submit([&](sycl::handler& h) ");
+	e_block_start(&g.em);
+
+	// Allocate local accessors
+	for (let local_idx_alloc = 0z; local_idx_alloc < info.local_count; local_idx_alloc += 1) {
+		emit_s(&g.em, "sycl::local_accessor<");
+		match (sycl_get_local_param_elem_type(g, info, info.local_params[local_idx_alloc])) {
+		case let elem_ty: *tnode => sycl_emit_type(g, elem_ty);
+		case null => emit_s(&g.em, "float");
+		};
+		emit_s(&g.em, ", 1> ");
+		e_bref(&g.em, info.local_params[local_idx_alloc]);
+		ef1_b(&g.em, "(sycl::range<1>{local_size_%}, h);", info.local_params[local_idx_alloc]);
+		e_nl(&g.em);
+	};
+
+	// Create accessors for global/constant buffers
+	let param_opt = t_first(fn_node);
+	if (param_opt != null) { param_opt = unwrap(param_opt).next; };
+	for (param_opt != null) {
+		let param_acc = unwrap(param_opt);
+		if (param_acc.kind != N_PARAM) { break; };
+			if (!sycl_is_local_param(info, param_acc.ref, g.t.src)) {
+				let param_type_opt_acc = t_first(param_acc);
+				if (param_type_opt_acc != null) {
+					let param_type_acc = unwrap(param_type_opt_acc);
+					if (sycl_param_is_buffer(g, param_type_acc)) {
+						ef2_b(
+							&g.em,
+							"auto acc_% = %.get_access<sycl::access::mode::",
+							param_acc.ref,
+							param_acc.ref
+						);
+						sycl_emit_access_mode(g, param_acc);
+						emit_s(&g.em, ">(h);");
+						e_nl(&g.em);
+					};
+				};
+			};
+		param_opt = param_acc.next;
+	};
+
+	// Error accessor (read_write)
+	emit_s(&g.em, "auto acc_error = error.get_access<sycl::access::mode::read_write>(h);");
+	e_nl(&g.em);
+
+	// parallel_for call
+	emit_s(&g.em, "h.parallel_for(");
+	if (info.uses_nd_range) {
+		emit_s(&g.em, "ndr");
+	} else {
+		emit_s(&g.em, "r");
+	};
+	emit_s(&g.em, ", ");
+
+	// If kernel uses local memory, wrap in lambda to pass local accessor
+	if (info.local_count > 0) {
+		// SYCL requires local accessors to be captured by value
+		emit_s(&g.em, "[=](");
+		if (info.uses_nd_range) {
+			ef1_i(&g.em, "sycl::nd_item<%>", info.dim);
+		} else {
+			ef1_i(&g.em, "sycl::item<%>", info.dim);
+		};
+		emit_s(&g.em, " item) ");
+		e_block_start(&g.em);
+
+		// Create kernel instance and call operator()
+		ef1_b(&g.em, "%_kernel kernel(", base_name);
+		let el_local = el_start(&g.em);
+		sycl_emit_kernel_ctor_args(g, info, &el_local);
+		el_sep(&el_local);
+		emit_s(&g.em, "acc_error");
+		emit_s(&g.em, ");");
+		e_nl(&g.em);
+
+		// Call kernel operator() with item and local accessors
+		emit_s(&g.em, "kernel(item");
+		for (let local_idx_call = 0z; local_idx_call < info.local_count; local_idx_call += 1) {
+			emit_s(&g.em, ", ");
+			e_bref(&g.em, info.local_params[local_idx_call]);
+		};
+		emit_s(&g.em, ");");
+		e_nl(&g.em);
+
+		e_block_end(&g.em);
+		emit_s(&g.em, ");");
+	} else {
+		// No local memory, direct functor instantiation
+		ef1_b(&g.em, "%_kernel(", base_name);
+
+		let el_direct = el_start(&g.em);
+		sycl_emit_kernel_ctor_args(g, info, &el_direct);
+
+		el_sep(&el_direct);
+		emit_s(&g.em, "acc_error));");
+	};
+	e_nl(&g.em);
+
+	e_block_end(&g.em);
+	emit_s(&g.em, ");");
+	e_nl(&g.em);
+
+	e_block_end(&g.em);
+	e_nl(&g.em);
+
+	// Function signature: void launch_<name>(...)
+	ef1_b(&g.em, "inline void launch_%(", base_name);
+
+	// Parameters: queue, range/nd_range, local sizes (if needed), kernel args
+	emit_s(&g.em, "sycl::queue& q, ");
+
+	if (info.uses_nd_range) {
+		ef1_i(&g.em, "sycl::nd_range<%> ndr", info.dim);
+	} else {
+		ef1_i(&g.em, "sycl::range<%> r", info.dim);
+	};
+
+	// Local memory size parameters (for local_* params)
+	sycl_emit_local_size_params(g, info);
+
+	// Kernel data parameters (skip first param, skip local params)
+	sycl_emit_kernel_param_decls(g, info, SYCL_PARAM_DECL_LAUNCH);
+
+	// Error buffer (always present)
+	emit_s(&g.em, ", sycl::buffer<uint32_t, 1>& error");
+
+	emit_s(&g.em, ") ");
+	e_block_start(&g.em);
+	emit_s(&g.em, "(void)launch_");
+	e_bref(&g.em, base_name);
+	emit_s(&g.em, "_async(q, ");
+	if (info.uses_nd_range) {
+		emit_s(&g.em, "ndr");
+	} else {
+		emit_s(&g.em, "r");
+	};
+	for (let launch_local_idx = 0z; launch_local_idx < info.local_count; launch_local_idx += 1) {
+		ef1_b(&g.em, ", local_size_%", info.local_params[launch_local_idx]);
+	};
+	sycl_emit_kernel_param_names(g, info);
+	emit_s(&g.em, ", error);");
+	e_nl(&g.em);
+	e_block_end(&g.em);
+	e_nl(&g.em);
+};
+
+// ============================================================================
+// C API Generation
+// ============================================================================
+
+fn sycl_emit_c_api_header(g: *codegen) void = {
+	emit_s(&g.em, `// C API for kernel launch functions
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Status codes
+#define PSYCL_SUCCESS 0
+#define PSYCL_ERROR_QUEUE_INIT -1
+#define PSYCL_ERROR_KERNEL_LAUNCH -2
+#define PSYCL_ERROR_MEMORY_ALLOC -3
+#define PSYCL_ERROR_INVALID_PARAM -4
+
+// Opaque queue handle
+typedef void* psycl_queue_handle_t;
+
+`);
+};
+
+fn sycl_emit_c_api_queue_functions(g: *codegen) void = {
+	emit_s(&g.em, `// Queue management
+int psycl_create_queue(psycl_queue_handle_t* handle);
+int psycl_destroy_queue(psycl_queue_handle_t handle);
+int psycl_queue_wait(psycl_queue_handle_t handle);
+
+`);
+};
+
+fn sycl_emit_c_api_signature(g: *codegen, info: *sycl_kernel_info) void = {
+	let base_name = sycl_get_kernel_base_name(info.name, g.t.src);
+
+	ef1_b(&g.em, "int psycl_%(", base_name);
+
+	// Parameters: queue handle, sizes, kernel args
+	emit_s(&g.em, "psycl_queue_handle_t queue");
+
+	// Dimension sizes
+	sycl_emit_dim_params(g, info.dim, "global_");
+
+	if (info.uses_nd_range) { sycl_emit_dim_params(g, info.dim, "local_"); };
+
+	// Local memory sizes
+	sycl_emit_local_size_params(g, info);
+
+	// Kernel data parameters (skip first param, skip local params)
+	sycl_emit_kernel_param_decls(g, info, SYCL_PARAM_DECL_C_API);
+
+	// Error buffer (always present)
+	emit_s(&g.em, ", psycl_buffer_handle_t error");
+};
+
+fn sycl_emit_c_api_async_signature(g: *codegen, info: *sycl_kernel_info) void = {
+	let base_name = sycl_get_kernel_base_name(info.name, g.t.src);
+
+	ef1_b(&g.em, "int psycl_%_async(", base_name);
+
+	// Parameters: queue handle, sizes, kernel args
+	emit_s(&g.em, "psycl_queue_handle_t queue");
+
+	// Dimension sizes
+	sycl_emit_dim_params(g, info.dim, "global_");
+
+	if (info.uses_nd_range) { sycl_emit_dim_params(g, info.dim, "local_"); };
+
+	// Local memory sizes
+	sycl_emit_local_size_params(g, info);
+
+	// Kernel data parameters (skip first param, skip local params)
+	sycl_emit_kernel_param_decls(g, info, SYCL_PARAM_DECL_C_API);
+
+	// Event out + Error buffer (always present)
+	emit_s(&g.em, ", psycl_event_handle_t* out_event, psycl_buffer_handle_t error");
+};
+
+fn sycl_emit_c_api_kernel_declaration(g: *codegen, info: *sycl_kernel_info) void = {
+	sycl_emit_c_api_signature(g, info);
+	emit_s(&g.em, ");");
+	e_nl(&g.em);
+};
+
+fn sycl_emit_c_api_kernel_async_declaration(g: *codegen, info: *sycl_kernel_info) void = {
+	sycl_emit_c_api_async_signature(g, info);
+	emit_s(&g.em, ");");
+	e_nl(&g.em);
+};
+
+fn sycl_emit_c_api_validate_queue(g: *codegen, needs_event: bool) void = {
+	emit_s(&g.em, "if (!queue) return PSYCL_ERROR_INVALID_PARAM;");
+	e_nl(&g.em);
+	if (needs_event) {
+		emit_s(&g.em, "if (!out_event) return PSYCL_ERROR_INVALID_PARAM;");
+		e_nl(&g.em);
+	};
+};
+
+fn sycl_emit_c_api_validate_buffers(g: *codegen, info: *sycl_kernel_info) void = {
+	let fn_node = unwrap(info.fn_node);
+	let param_opt = t_first(fn_node);
+	if (param_opt != null) { param_opt = unwrap(param_opt).next; };
+	for (param_opt != null) {
+		let param_check = unwrap(param_opt);
+		if (param_check.kind != N_PARAM) { break; };
+		if (!sycl_is_local_param(info, param_check.ref, g.t.src)) {
+			let param_type_opt_check = t_first(param_check);
+			if (param_type_opt_check != null) {
+				let param_type_check = unwrap(param_type_opt_check);
+				if (sycl_param_is_buffer(g, param_type_check)) {
+					ef1_b(
+						&g.em,
+						"if (!%) return PSYCL_ERROR_INVALID_PARAM;",
+						param_check.ref
+					);
+					e_nl(&g.em);
+				};
+			};
+		};
+		param_opt = param_check.next;
+	};
+};
+
+fn sycl_emit_c_api_cast_buffers(g: *codegen, info: *sycl_kernel_info) void = {
+	let fn_node = unwrap(info.fn_node);
+	let param_opt = t_first(fn_node);
+	if (param_opt != null) { param_opt = unwrap(param_opt).next; };
+	for (param_opt != null) {
+		let param_cast = unwrap(param_opt);
+		if (param_cast.kind != N_PARAM) { break; };
+		if (!sycl_is_local_param(info, param_cast.ref, g.t.src)) {
+			let param_type_opt_cast = t_first(param_cast);
+			if (param_type_opt_cast != null) {
+				let param_type_cast = unwrap(param_type_opt_cast);
+				if (sycl_param_is_buffer(g, param_type_cast)) {
+					ef1_b(
+						&g.em,
+						"auto* buf_% = reinterpret_cast<sycl::buffer<",
+						param_cast.ref
+					);
+					sycl_emit_buffer_elem_type(g, param_type_cast);
+					ef1_b(&g.em, ", 1>*> (%);", param_cast.ref);
+					e_nl(&g.em);
+				};
+			};
+		};
+		param_opt = param_cast.next;
+	};
+};
+
+fn sycl_emit_c_api_error_buffer_setup(g: *codegen) void = {
+	emit_s(&g.em,
+`sycl::buffer<uint32_t, 1>* buf_error = nullptr;
+	if (error) {
+		buf_error = reinterpret_cast<sycl::buffer<uint32_t, 1>*>(error);
+	} else {
+		static sycl::buffer<uint32_t, 1> psycl_default_error(sycl::range<1>(2));
+		buf_error = &psycl_default_error;
+	}`);
+	e_nl(&g.em);
+};
+
+fn sycl_emit_c_api_build_range(g: *codegen, info: *sycl_kernel_info) void = {
+	if (info.uses_nd_range) {
+		// Use braced initialization to avoid "most vexing parse" in extern "C" blocks
+		ef1_i(&g.em, "sycl::nd_range<%> ndr{", info.dim);
+		e_nl(&g.em);
+		sycl_emit_range_expr(g, info.dim, "global_");
+		emit_s(&g.em, ",");
+		e_nl(&g.em);
+		sycl_emit_range_expr(g, info.dim, "local_");
+		emit_s(&g.em, "};");
+		e_nl(&g.em);
+	} else {
+		ef1_i(&g.em, "sycl::range<%> r{", info.dim);
+		sycl_emit_dim_list(g, info.dim, "global_");
+		emit_s(&g.em, "};");
+		e_nl(&g.em);
+	};
+};
+
+fn sycl_emit_c_api_try_start(g: *codegen) void = {
+	emit_s(&g.em, "try ");
+	e_block_start(&g.em);
+	emit_s(&g.em, "auto* q = reinterpret_cast<sycl::queue*>(queue);");
+	e_nl(&g.em);
+};
+
+fn sycl_emit_c_api_catch(g: *codegen, base_name: bref, is_async: bool) void = {
+	e_dedent(&g.em);
+	emit_s(&g.em, "} catch (...) {");
+	e_nl(&g.em);
+	emit_s(&g.em, "return psycl_handle_exception(\"psycl_");
+	e_bref(&g.em, base_name);
+	if (is_async) { emit_s(&g.em, "_async"); };
+	emit_s(&g.em, "\", PSYCL_ERROR_KERNEL_LAUNCH);");
+	e_nl(&g.em);
+	emit_s(&g.em, "}");
+	e_nl(&g.em);
+};
+
+fn sycl_emit_c_api_kernel_implementation(g: *codegen, info: *sycl_kernel_info) void = {
+	sycl_emit_c_api_signature(g, info);
+	emit_s(&g.em, ") ");
+	e_block_start(&g.em);
+
+	let base_name = sycl_get_kernel_base_name(info.name, g.t.src);
+
+	// Validate queue handle
+	sycl_emit_c_api_validate_queue(g, false);
+	// Validate buffer handles
+	sycl_emit_c_api_validate_buffers(g, info);
+	emit_s(&g.em, "// error may be NULL (no error reporting)");
+	e_nl(&g.em);
+	e_nl(&g.em);
+
+	// Try-catch for exceptions
+	sycl_emit_c_api_try_start(g);
+	// Cast buffer handles to typed sycl::buffer pointers
+	sycl_emit_c_api_cast_buffers(g, info);
+	sycl_emit_c_api_error_buffer_setup(g);
+
+	// Build range/nd_range
+	sycl_emit_c_api_build_range(g, info);
+
+	// Use SYCL launch helper
+	ef1_b(&g.em, "launch_%(*q, ", base_name);
+	if (info.uses_nd_range) {
+		emit_s(&g.em, "ndr");
+	} else {
+		emit_s(&g.em, "r");
+	};
+
+	// Local memory sizes
+	for (let launch_local_idx = 0z; launch_local_idx < info.local_count; launch_local_idx += 1) {
+		ef1_b(&g.em, ", local_size_%", info.local_params[launch_local_idx]);
+	};
+
+	// Kernel data parameters
+	sycl_emit_kernel_launch_args(g, info);
+
+	emit_s(&g.em, `, *buf_error);
+		return PSYCL_SUCCESS;`);
+	e_nl(&g.em);
+
+	sycl_emit_c_api_catch(g, base_name, false);
+
+	e_block_end(&g.em);
+	e_nl(&g.em);
+};
+
+fn sycl_emit_c_api_kernel_async_implementation(g: *codegen, info: *sycl_kernel_info) void = {
+	sycl_emit_c_api_async_signature(g, info);
+	emit_s(&g.em, ") ");
+	e_block_start(&g.em);
+
+	let base_name = sycl_get_kernel_base_name(info.name, g.t.src);
+
+	// Validate queue handle
+	sycl_emit_c_api_validate_queue(g, true);
+	// Validate buffer handles
+	sycl_emit_c_api_validate_buffers(g, info);
+	emit_s(&g.em, "// error may be NULL (no error reporting)");
+	e_nl(&g.em);
+	e_nl(&g.em);
+
+	// Try-catch for exceptions
+	sycl_emit_c_api_try_start(g);
+	// Cast buffer handles to typed sycl::buffer pointers
+	sycl_emit_c_api_cast_buffers(g, info);
+	sycl_emit_c_api_error_buffer_setup(g);
+
+	// Build range/nd_range
+	sycl_emit_c_api_build_range(g, info);
+
+	// Use SYCL launch helper (async)
+	ef1_b(&g.em, "auto evt = launch_%_async(*q, ", base_name);
+	if (info.uses_nd_range) {
+		emit_s(&g.em, "ndr");
+	} else {
+		emit_s(&g.em, "r");
+	};
+
+	// Local memory sizes
+	for (let launch_local_idx = 0z; launch_local_idx < info.local_count; launch_local_idx += 1) {
+		ef1_b(&g.em, ", local_size_%", info.local_params[launch_local_idx]);
+	};
+
+	// Kernel data parameters
+	sycl_emit_kernel_launch_args(g, info);
+
+	emit_s(&g.em, `, *buf_error);
+		*out_event = reinterpret_cast<psycl_event_handle_t>(new sycl::event(evt));
+		return PSYCL_SUCCESS;`);
+	e_nl(&g.em);
+
+	sycl_emit_c_api_catch(g, base_name, true);
+
+	e_block_end(&g.em);
+	e_nl(&g.em);
+};
+
+
+fn sycl_emit_c_api_queue_implementations(g: *codegen) void = {
+	emit_s(&g.em, `// Create queue
+int psycl_create_queue(psycl_queue_handle_t* handle) {
+	if (!handle) return PSYCL_ERROR_INVALID_PARAM;
+	try {
+		auto* q = new sycl::queue();
+		*handle = reinterpret_cast<psycl_queue_handle_t>(q);
+		return PSYCL_SUCCESS;
+	} catch (...) {
+		return psycl_handle_exception("psycl_create_queue", PSYCL_ERROR_QUEUE_INIT);
+	}
+}
+
+// Destroy queue
+int psycl_destroy_queue(psycl_queue_handle_t handle) {
+	if (!handle) return PSYCL_ERROR_INVALID_PARAM;
+	auto* q = reinterpret_cast<sycl::queue*>(handle);
+	delete q;
+	return PSYCL_SUCCESS;
+}
+
+// Wait for queue
+int psycl_queue_wait(psycl_queue_handle_t handle) {
+	if (!handle) return PSYCL_ERROR_INVALID_PARAM;
+	try {
+		auto* q = reinterpret_cast<sycl::queue*>(handle);
+		q->wait();
+		return PSYCL_SUCCESS;
+	} catch (...) {
+		return psycl_handle_exception("psycl_queue_wait", PSYCL_ERROR_KERNEL_LAUNCH);
+	}
+}`);
+	e_nl(&g.em);
+};
+
+// ============================================================================
+// Main Generation Entry Point
+// ============================================================================
+
+// Check if 'use sycl;' is present in the unit
+fn sycl_check_use_sycl(g: *codegen, unit: *tnode) bool = {
+	let has_sycl = false;
+	let decl = t_first(unit);
+	for (decl != null) {
+		let d: *tnode = unwrap(decl);
+		if (d.kind == N_USE) {
+			// d.ref is the full path (e.g., "sycl")
+			register_use_alias(g, d);
+			if (bref_match(d.ref, "sycl", g.t.src)) { has_sycl = true; };
+		};
+		decl = t_next(d);
+	};
+	return has_sycl;
+};
+
+// Collect global symbols/types for SYCL codegen (type checking)
+fn sycl_collect_symbols(g: *codegen, unit: *tnode) void = {
+	let decl_opt = t_first(unit);
+	for (decl_opt != null) {
+		let decl = unwrap(decl_opt);
+		if (decl.kind == N_TYPEDEF) {
+			let typedef_ty: *tnode = t_first_nn(decl);
+			dict_set_bref(&g.types, decl.ref, typedef_ty: uintptr: u64);
+		} else if (decl.kind == N_DEF) {
+			if (dict_has_bref(&g.globals, decl.ref)) {
+				sycl_err(g, decl.ref, "duplicate define name (pika does not allow shadowing global names)");
+			};
+			dict_set_bref(&g.globals, decl.ref, 0);
+		} else if (decl.kind == N_GLOBAL) {
+			if (dict_has_bref(&g.globals, decl.ref)) {
+				sycl_err(g, decl.ref, "duplicate global name (pika does not allow shadowing global names)");
+			};
+			let child = t_first(decl);
+			let global_ty_opt: nullable *tnode = null;
+			if (child != null && is_type_kind(unwrap(child).kind)) {
+				global_ty_opt = child;
+			};
+			if (global_ty_opt != null) {
+				dict_set_bref(&g.globals, decl.ref, unwrap(global_ty_opt): uintptr: u64);
+			} else {
+				dict_set_bref(&g.globals, decl.ref, 0);
+			};
+		} else if (decl.kind == N_FN) {
+			if (dict_has_bref(&g.globals, decl.ref)) {
+				sycl_err(g, decl.ref, "duplicate function name (pika does not allow shadowing global names)");
+			};
+			dict_set_bref(&g.globals, decl.ref, decl: uintptr: u64);
+			let ret_type = g_skip_to_ret(decl);
+			if (ret_type != null) {
+				dict_set_bref(&g.funcs, decl.ref, unwrap(ret_type): uintptr: u64);
+			};
+		};
+		decl_opt = decl.next;
+	};
+};
+
+fn sycl_has_typedef(unit: *tnode, name: str, src: *[*]u8) bool = {
+	let decl_opt = t_first(unit);
+	for (decl_opt != null) {
+		let decl = unwrap(decl_opt);
+		if (decl.kind == N_TYPEDEF && bref_match(decl.ref, name, src)) {
+			return true;
+		};
+		decl_opt = decl.next;
+	};
+	return false;
+};
+
+fn sycl_emit_struct_typedefs(g: *codegen, unit: *tnode) void = {
+	let decl_opt = t_first(unit);
+	for (decl_opt != null) {
+		let decl = unwrap(decl_opt);
+		if (decl.kind == N_TYPEDEF) {
+			let ty = t_first_nn(decl);
+			if (ty.kind == N_T_STRUCT) {
+				emit_s(&g.em, "typedef struct ");
+				e_bref(&g.em, decl.ref);
+				e_sp(&g.em);
+				e_block_start(&g.em);
+				let field_opt = t_first(ty);
+				for (field_opt != null) {
+					let field = unwrap(field_opt);
+					let field_ty = t_first_nn(field);
+					if (field_ty.kind == N_T_ARR) {
+						sycl_err(g, field.ref, "array fields in struct not supported in SYCL");
+					} else {
+						sycl_emit_type(g, field_ty);
+						e_sp(&g.em);
+						e_bref(&g.em, field.ref);
+						e_stmt_end(&g.em);
+					};
+					field_opt = field.next;
+				};
+				e_block_end(&g.em);
+				e_sp(&g.em);
+				e_bref(&g.em, decl.ref);
+				e_stmt_end(&g.em);
+				e_nl(&g.em);
+			};
+		};
+		decl_opt = decl.next;
+	};
+};
+
+fn sycl_emit_global_const(g: *codegen, name: bref, ty: *tnode, init: *tnode) void = {
+	emit_s(&g.em, "static const ");
+	sycl_emit_var_decl(g, ty, name);
+	emit_s(&g.em, " = ");
+	sycl_expr(g, init);
+	e_stmt_end(&g.em);
+	e_nl(&g.em);
+};
+
+fn sycl_emit_globals(g: *codegen, unit: *tnode) void = {
+	let decl_opt = t_first(unit);
+	for (decl_opt != null) {
+		let decl = unwrap(decl_opt);
+		if (decl.kind != N_GLOBAL) {
+			decl_opt = decl.next;
+			continue;
+		};
+		if ((decl.flags & F_MUTABLE) != 0) {
+			sycl_err(g, decl.ref, "mutable globals are not supported in SYCL");
+			decl_opt = decl.next;
+			continue;
+		};
+		let child_opt = t_first(decl);
+		if (child_opt == null) {
+			decl_opt = decl.next;
+			continue;
+		};
+		let child = unwrap(child_opt);
+		if (is_type_kind(child.kind)) {
+			let init_node = t_next_nn(child);
+			sycl_emit_global_const(g, decl.ref, child, init_node);
+			decl_opt = decl.next;
+			continue;
+		};
+		let init_expr = child;
+		match (get_expr_type(g, init_expr)) {
+		case let inferred: *tnode =>
+			sycl_emit_global_const(g, decl.ref, inferred, init_expr);
+		case null =>
+			sycl_err(g, decl.ref, "global requires explicit type in SYCL");
+		};
+		decl_opt = decl.next;
+	};
+};
+
+fn pkgen_generate_sycl(g: *codegen) void = {
+	let unit_opt = t_first(g.t.root);
+	if (unit_opt == null) { return; };
+	let unit = unwrap(unit_opt);
+	sycl_check_use_sycl(g, unit);
+	let has_f16 = sycl_has_typedef(unit, "f16", g.t.src);
+
+	// Reset kernel registry
+	sycl_kernel_count = 0;
+	sycl_fn_reset();
+
+	// Collect symbols for type checking
+	sycl_collect_symbols(g, unit);
+
+	// === PASS 1: Collect metadata ===
+	sycl_collect_kernels(g, unit);
+	sycl_collect_device_functions(g, unit);
+
+	// === HEADER SECTION (always emitted) ===
+	// This allows the file to be used as a header for C code
+	sycl_emit_header_prelude(g);
+
+	sycl_emit_struct_typedefs(g, unit);
+
+	// C API declarations (always visible)
+	sycl_emit_extern_c_open(g);
+	e_nl(&g.em);
+
+	// Kernel launch declarations
+	for (let decl_idx = 0z; decl_idx < sycl_kernel_count; decl_idx += 1) {
+		sycl_emit_c_api_kernel_declaration(g, &sycl_kernels[decl_idx]);
+		sycl_emit_c_api_kernel_async_declaration(g, &sycl_kernels[decl_idx]);
+	};
+	e_nl(&g.em);
+
+	sycl_emit_extern_c_close(g);
+	e_nl(&g.em);
+
+	sycl_emit_header_guard_end(g);
+	e_nl(&g.em);
+
+	// === IMPLEMENTATION SECTION (only when PIKA_SYCL_IMPL is defined) ===
+	sycl_emit_impl_prelude(g);
+	sycl_emit_slice_structs(g);
+	sycl_emit_string_helpers(g);
+
+	if (has_f16) {
+		sycl_emit_f16_helpers(g);
+	};
+
+	sycl_emit_exception_helper(g);
+	e_nl(&g.em);
+
+	sycl_emit_fail_helper(g);
+	e_nl(&g.em);
+
+	sycl_emit_slice_helpers(g);
+
+	// === Emit global constants ===
+	sycl_emit_globals(g, unit);
+	e_nl(&g.em);
+
+	// === Emit device functions ===
+	sycl_emit_device_functions(g, unit);
+	e_nl(&g.em);
+
+	// === Emit kernel classes ===
+	for (let class_idx = 0z; class_idx < sycl_kernel_count; class_idx += 1) {
+		sycl_emit_kernel_class(g, &sycl_kernels[class_idx]);
+		e_nl(&g.em);
+	};
+
+	// === Emit launch helpers ===
+	for (let launch_idx = 0z; launch_idx < sycl_kernel_count; launch_idx += 1) {
+		sycl_emit_launch_helper(g, &sycl_kernels[launch_idx]);
+		e_nl(&g.em);
+	};
+
+	// === Emit C API implementations ===
+	sycl_emit_extern_c_open(g);
+	e_nl(&g.em);
+
+	for (let impl_idx = 0z; impl_idx < sycl_kernel_count; impl_idx += 1) {
+		sycl_emit_c_api_kernel_implementation(g, &sycl_kernels[impl_idx]);
+		sycl_emit_c_api_kernel_async_implementation(g, &sycl_kernels[impl_idx]);
+		e_nl(&g.em);
+	};
+
+	sycl_emit_extern_c_close(g);
+	e_nl(&g.em);
+
+	emit_s(&g.em, "#endif // PIKA_SYCL_IMPL\n");
+};

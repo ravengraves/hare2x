@@ -1,0 +1,4 @@
+// ERROR: cannot dereference nullable pointer (use match to narrow type)
+fn bad(p: nullable *i32) i32 = {
+	return *p;
+};

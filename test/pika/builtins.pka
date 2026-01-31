@@ -1,0 +1,27 @@
+// builtins.ha - Test assert, abort, and len builtins
+use rt;
+
+fn test_assert() void = {
+	assert(1 == 1);
+	assert(2 > 1, "two should be greater");
+	assert(true);
+	assert(5 != 3, "five not equal to three");
+};
+
+fn test_len() void = {
+	let arr: [5]i32 = [1, 2, 3, 4, 5];
+	let n = len(arr);
+	assert(n == 5);
+
+	let arr2: [3]u8 = [10, 20, 30];
+	assert(len(arr2) == 3);
+
+	// Test len in expression
+	let double_len = len(arr) * 2;
+	assert(double_len == 10);
+};
+
+export fn main() void = {
+	test_assert();
+	test_len();
+};

@@ -1,0 +1,5 @@
+// pikabad_numeric_underscores.pka - invalid numeric underscores
+
+export fn main() void = {
+	let bad: f64 = 1_00._00f64;
+};

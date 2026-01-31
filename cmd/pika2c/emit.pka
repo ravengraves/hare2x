@@ -1,0 +1,607 @@
+// emit.ha - Output utilities for code generation
+use strings;
+
+// ============================================================================
+// Emitter State
+// ============================================================================
+
+type emitter = struct {
+	buf: strbuf,
+	indent: size,
+	at_line_start: bool,
+	src: *[*]u8,
+	src_len: size,
+};
+
+fn emit_init(e: *emitter, src: *[*]u8, src_len: size) void = {
+	sb_init_static(&e.buf);
+	e.indent = 0;
+	e.at_line_start = true;
+	e.src = src;
+	e.src_len = src_len;
+};
+
+fn emit_get(e: *emitter) *[*]u8 = {
+	return sb_get(&e.buf);
+};
+
+fn emit_len(e: *emitter) size = {
+	return sb_len(&e.buf);
+};
+
+// ============================================================================
+// Auto-indent Helper
+// ============================================================================
+
+fn do_indent(e: *emitter) void = {
+	if (e.at_line_start) {
+		sb_repeat(&e.buf, '\t', e.indent);
+		e.at_line_start = false;
+	};
+};
+
+// ============================================================================
+// Basic Output
+// ============================================================================
+
+fn emit_s(em: *emitter, s: str) void = {
+	do_indent(em);
+	sb_s(&em.buf, s);
+};
+
+fn e_c(em: *emitter, c: u8) void = {
+	do_indent(em);
+	sb_char(&em.buf, c);
+};
+
+fn e_bref(em: *emitter, r: bref) void = {
+	do_indent(em);
+	sb_bref(&em.buf, r, em.src);
+};
+
+fn e_bref_no_underscore(em: *emitter, r: bref) void = {
+	do_indent(em);
+	let src = em.src;
+	for (let i = 0z; i < r.length; i += 1) {
+		let c = src[r.pos + i];
+		if (c == '_') { continue; };
+		sb_char(&em.buf, c);
+	};
+};
+
+fn e_node(em: *emitter, n: *tnode) void = {
+	do_indent(em);
+	sb_bref(&em.buf, n.ref, em.src);
+};
+
+fn e_i(em: *emitter, n: i64) void = {
+	do_indent(em);
+	sb_int(&em.buf, n);
+};
+
+fn e_u(em: *emitter, n: u64) void = {
+	do_indent(em);
+	sb_uint(&em.buf, n);
+};
+
+fn e_hex(em: *emitter, n: u64) void = {
+	do_indent(em);
+	sb_hex(&em.buf, n);
+};
+
+// ============================================================================
+// Whitespace & Indentation
+// ============================================================================
+
+fn e_sp(em: *emitter) void = {
+	sb_char(&em.buf, ' ');
+};
+
+fn e_nl(em: *emitter) void = {
+	sb_char(&em.buf, '\n');
+	em.at_line_start = true;
+};
+
+fn e_nl_indent(em: *emitter) void = {
+	e_nl(em);
+	e_indent(em);
+};
+
+fn e_indent(em: *emitter) void = {
+	em.indent += 1;
+};
+
+fn e_dedent(em: *emitter) void = {
+	if (em.indent > 0) {
+		em.indent -= 1;
+	};
+};
+
+fn e_blank(em: *emitter) void = {
+	sb_char(&em.buf, '\n');
+	sb_char(&em.buf, '\n');
+	em.at_line_start = true;
+};
+
+// ============================================================================
+// C Constructs
+// ============================================================================
+
+fn e_block_start(em: *emitter) void = {
+	do_indent(em);
+	sb_char(&em.buf, '{');
+	sb_char(&em.buf, '\n');
+	em.at_line_start = true;
+	em.indent += 1;
+};
+
+fn e_block_end(em: *emitter) void = {
+	if (em.indent > 0) {
+		em.indent -= 1;
+	};
+	do_indent(em);
+	sb_char(&em.buf, '}');
+};
+
+fn e_sp_block_start(em: *emitter) void = {
+	e_sp(em);
+	e_block_start(em);
+};
+
+fn e_stmt_end(em: *emitter) void = {
+	sb_char(&em.buf, ';');
+	sb_char(&em.buf, '\n');
+	em.at_line_start = true;
+};
+
+fn e_stmt_end_block_end(em: *emitter) void = {
+	e_stmt_end(em);
+	e_block_end(em);
+};
+
+fn e_stmt_end_dedent(em: *emitter) void = {
+	e_stmt_end(em);
+	e_dedent(em);
+};
+
+fn e_stmt_end_blank(em: *emitter) void = {
+	e_stmt_end(em);
+	e_nl(em);
+};
+
+fn e_comma(em: *emitter) void = {
+	sb_char(&em.buf, ',');
+	sb_char(&em.buf, ' ');
+};
+
+fn e_paren_open(em: *emitter) void = {
+	do_indent(em);
+	sb_char(&em.buf, '(');
+};
+
+fn e_paren_close(em: *emitter) void = {
+	sb_char(&em.buf, ')');
+};
+
+fn e_paren_close_sp(em: *emitter) void = {
+	e_paren_close(em);
+	e_sp(em);
+};
+
+fn e_paren_stmt_end(em: *emitter) void = {
+	e_paren_close(em);
+	e_stmt_end(em);
+};
+
+fn e_paren(em: *emitter) void = {
+	e_paren_open(em);
+};
+
+fn e_bracket_open(em: *emitter) void = {
+	do_indent(em);
+	sb_char(&em.buf, '[');
+};
+
+fn e_bracket_close(em: *emitter) void = {
+	sb_char(&em.buf, ']');
+};
+
+fn e_brac(em: *emitter) void = {
+	e_bracket_open(em);
+};
+
+// ============================================================================
+// Identifier Handling
+// ============================================================================
+
+fn e_id(em: *emitter, r: bref) void = {
+	do_indent(em);
+	sb_bref(&em.buf, r, em.src);
+};
+
+fn e_id_qualified(em: *emitter, module: bref, name: bref) void = {
+	do_indent(em);
+	sb_bref(&em.buf, module, em.src);
+	sb_char(&em.buf, '_');
+	sb_bref(&em.buf, name, em.src);
+};
+
+// ============================================================================
+// Type Emission Helpers
+// ============================================================================
+
+fn e_ptr(em: *emitter) void = {
+	sb_char(&em.buf, '*');
+};
+
+fn e_cast_open(em: *emitter) void = {
+	do_indent(em);
+	sb_char(&em.buf, '(');
+};
+
+fn e_cast_close(em: *emitter) void = {
+	sb_char(&em.buf, ')');
+};
+
+// ============================================================================
+// Operators
+// ============================================================================
+
+fn e_assign(em: *emitter) void = {
+	sb_s(&em.buf, " = ");
+};
+
+// ============================================================================
+// Control Flow Keywords
+// ============================================================================
+
+fn e_if(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "if (");
+};
+
+fn e_else(em: *emitter) void = {
+	sb_s(&em.buf, " else ");
+};
+
+fn e_while(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "while (");
+};
+
+fn e_for(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "for (");
+};
+
+fn e_switch(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "switch (");
+};
+
+fn e_case(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "case ");
+};
+
+fn e_default(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "default:");
+};
+
+fn e_colon_nl(em: *emitter) void = {
+	e_c(em, ':');
+	e_nl(em);
+};
+
+fn e_break(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "break");
+};
+
+fn e_break_stmt_end(em: *emitter) void = {
+	e_break(em);
+	e_stmt_end(em);
+};
+
+fn e_continue(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "continue");
+};
+
+fn e_return(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "return");
+};
+
+fn e_goto(em: *emitter) void = {
+	do_indent(em);
+	sb_s(&em.buf, "goto ");
+};
+
+// ============================================================================
+// Raw Output (no indent handling)
+// ============================================================================
+
+fn e_raw(em: *emitter, s: str) void = {
+	sb_s(&em.buf, s);
+};
+
+fn e_raw_c(em: *emitter, c: u8) void = {
+	sb_char(&em.buf, c);
+};
+
+fn e_raw_bref(em: *emitter, r: bref) void = {
+	sb_bref(&em.buf, r, em.src);
+};
+
+// ============================================================================
+// List Emission Helpers
+// ============================================================================
+
+type emit_list = struct {
+	em: *emitter,
+	first: bool,
+};
+
+fn el_start(em: *emitter) emit_list = {
+	return emit_list { em = em, first = true };
+};
+
+fn el_sep(el: *emit_list) void = {
+	if (!el.first) {
+		emit_s(el.em, ", ");
+	};
+	el.first = false;
+};
+
+// ============================================================================
+// Format String Helpers
+// ============================================================================
+
+fn e_field(em: *emitter, name: bref) void = {
+	e_c(em, '.');
+	e_bref(em, name);
+};
+
+fn e_idx_field(em: *emitter, idx: i64) void = {
+	emit_s(em, "._");
+	e_i(em, idx);
+};
+
+fn e_variant_name(em: *emitter, idx: i64) void = {
+	emit_s(em, " _");
+	e_i(em, idx);
+};
+
+fn e_tag_val(em: *emitter, idx: i64) void = {
+	emit_s(em, ".val._");
+	e_i(em, idx);
+};
+
+fn e_arrow(em: *emitter, name: bref) void = {
+	emit_s(em, "->");
+	e_bref(em, name);
+};
+
+// ============================================================================
+// Format String Emission (% = placeholder, %% = literal %)
+// ============================================================================
+
+// Helper: emit format string up to next % or end, return position after
+fn ef_seg(em: *emitter, fmt: str, start: size) size = {
+	let flen = len(fmt);
+	let bytes = strings::toutf8(fmt);
+	let i = start;
+	for (i < flen) {
+		if (bytes[i] == '%') {
+			if (i + 1 < flen && bytes[i + 1] == '%') {
+				// %% -> emit what we have so far, then %, skip both
+				if (i > start) { sb_bytes(&em.buf, bytes[start..i]); };
+				sb_char(&em.buf, '%');
+				return i + 2;
+			};
+			// Single % -> emit segment, return position of %
+			if (i > start) { sb_bytes(&em.buf, bytes[start..i]); };
+			return i;
+		};
+		i += 1;
+	};
+	if (i > start) { sb_bytes(&em.buf, bytes[start..i]); };
+	return i;
+};
+
+fn ef1(em: *emitter, fmt: str, a: str) void = {
+	do_indent(em);
+	let flen = len(fmt);
+	let bytes = strings::toutf8(fmt);
+	let pos = ef_seg(em, fmt, 0);
+	if (pos < flen && bytes[pos] == '%') { sb_s(&em.buf, a); pos += 1; };
+	for (pos < flen) {
+		pos = ef_seg(em, fmt, pos);
+		if (pos < flen && bytes[pos] == '%') { pos += 1; };
+	};
+};
+
+fn ef2(em: *emitter, fmt: str, a: str, b: str) void = {
+	do_indent(em);
+	let flen = len(fmt);
+	let bytes = strings::toutf8(fmt);
+	let args: [2]str = [a, b];
+	let arg_i = 0z;
+	let pos = 0z;
+	for (pos < flen) {
+		pos = ef_seg(em, fmt, pos);
+		if (pos < flen && bytes[pos] == '%') {
+			if (arg_i < 2) { sb_s(&em.buf, args[arg_i]); arg_i += 1; };
+			pos += 1;
+		};
+	};
+};
+
+fn ef3(em: *emitter, fmt: str, a: str, b: str, c: str) void = {
+	do_indent(em);
+	let flen = len(fmt);
+	let bytes = strings::toutf8(fmt);
+	let args: [3]str = [a, b, c];
+	let arg_i = 0z;
+	let pos = 0z;
+	for (pos < flen) {
+		pos = ef_seg(em, fmt, pos);
+		if (pos < flen && bytes[pos] == '%') {
+			if (arg_i < 3) { sb_s(&em.buf, args[arg_i]); arg_i += 1; };
+			pos += 1;
+		};
+	};
+};
+
+fn ef4(em: *emitter, fmt: str, a: str, b: str, c: str, d: str) void = {
+	do_indent(em);
+	let flen = len(fmt);
+	let bytes = strings::toutf8(fmt);
+	let args: [4]str = [a, b, c, d];
+	let arg_i = 0z;
+	let pos = 0z;
+	for (pos < flen) {
+		pos = ef_seg(em, fmt, pos);
+		if (pos < flen && bytes[pos] == '%') {
+			if (arg_i < 4) { sb_s(&em.buf, args[arg_i]); arg_i += 1; };
+			pos += 1;
+		};
+	};
+};
+
+// ============================================================================
+// Raw Format String Emission (no indent handling) - for mid-expression use
+// ============================================================================
+
+fn ef1_raw(em: *emitter, fmt: str, a: str) void = {
+	let flen = len(fmt);
+	let bytes = strings::toutf8(fmt);
+	let pos = ef_seg(em, fmt, 0);
+	if (pos < flen && bytes[pos] == '%') { sb_s(&em.buf, a); pos += 1; };
+	for (pos < flen) {
+		pos = ef_seg(em, fmt, pos);
+		if (pos < flen && bytes[pos] == '%') { pos += 1; };
+	};
+};
+
+fn ef2_raw(em: *emitter, fmt: str, a: str, b: str) void = {
+	let flen = len(fmt);
+	let bytes = strings::toutf8(fmt);
+	let args: [2]str = [a, b];
+	let arg_i = 0z;
+	let pos = 0z;
+	for (pos < flen) {
+		pos = ef_seg(em, fmt, pos);
+		if (pos < flen && bytes[pos] == '%') {
+			if (arg_i < 2) { sb_s(&em.buf, args[arg_i]); arg_i += 1; };
+			pos += 1;
+		};
+	};
+};
+
+fn ef3_raw(em: *emitter, fmt: str, a: str, b: str, c: str) void = {
+	let flen = len(fmt);
+	let bytes = strings::toutf8(fmt);
+	let args: [3]str = [a, b, c];
+	let arg_i = 0z;
+	let pos = 0z;
+	for (pos < flen) {
+		pos = ef_seg(em, fmt, pos);
+		if (pos < flen && bytes[pos] == '%') {
+			if (arg_i < 3) { sb_s(&em.buf, args[arg_i]); arg_i += 1; };
+			pos += 1;
+		};
+	};
+};
+
+fn ef4_raw(em: *emitter, fmt: str, a: str, b: str, c: str, d: str) void = {
+	let flen = len(fmt);
+	let bytes = strings::toutf8(fmt);
+	let args: [4]str = [a, b, c, d];
+	let arg_i = 0z;
+	let pos = 0z;
+	for (pos < flen) {
+		pos = ef_seg(em, fmt, pos);
+		if (pos < flen && bytes[pos] == '%') {
+			if (arg_i < 4) { sb_s(&em.buf, args[arg_i]); arg_i += 1; };
+			pos += 1;
+		};
+	};
+};
+
+fn ef1_i(em: *emitter, fmt: str, a: i64) void = {
+	ef1(em, fmt, i_to_s(a));
+};
+
+fn ef2_i(em: *emitter, fmt: str, a: i64, b: i64) void = {
+	ef2(em, fmt, i_to_s(a), i_to_s(b));
+};
+
+fn ef1_b(em: *emitter, fmt: str, a: bref) void = {
+	ef1(em, fmt, bref_to_str(a, em.src));
+};
+
+fn ef2_b(em: *emitter, fmt: str, a: bref, b: bref) void = {
+	ef2(em, fmt, bref_to_str(a, em.src), bref_to_str(b, em.src));
+};
+
+fn ef1_b_raw(em: *emitter, fmt: str, a: bref) void = {
+	ef1_raw(em, fmt, bref_to_str(a, em.src));
+};
+
+fn ef2_b_raw(em: *emitter, fmt: str, a: bref, b: bref) void = {
+	ef2_raw(em, fmt, bref_to_str(a, em.src), bref_to_str(b, em.src));
+};
+
+// ============================================================================
+// Integer to String Conversion
+// ============================================================================
+
+fn i_to_s(n: i64) str = {
+	static let bufs: [128]u8 = [0...];
+	static let idx: size = 0;
+
+	let base = idx * 32;
+	idx = (idx + 1) % 4;
+
+	let neg = n < 0;
+	let val: u64 = n: u64;
+	if (neg) { val = (0 - n): u64; };
+	let i = 32z;
+
+	for (true) {
+		i -= 1;
+		bufs[base + i] = '0': u8 + (val % 10): u8;
+		val /= 10;
+		if (val == 0) { break; };
+	};
+
+	if (neg) {
+		i -= 1;
+		bufs[base + i] = '-';
+	};
+
+	return strings::fromutf8_unsafe(bufs[base + i..base + 32]);
+};
+
+fn u_to_s(n: u64) str = {
+	static let bufs: [128]u8 = [0...];
+	static let idx: size = 0;
+
+	let base = idx * 32;
+	idx = (idx + 1) % 4;
+
+	let val: u64 = n;
+	let i = 32z;
+
+	for (true) {
+		i -= 1;
+		bufs[base + i] = '0': u8 + (val % 10): u8;
+		val /= 10;
+		if (val == 0) { break; };
+	};
+
+	return strings::fromutf8_unsafe(bufs[base + i..base + 32]);
+};

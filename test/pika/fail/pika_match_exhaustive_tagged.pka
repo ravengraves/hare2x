@@ -1,0 +1,10 @@
+// ERROR: match not exhaustive: missing cases
+type number = (i32 | f32);
+
+fn test() void = {
+	let n: number = 0: number;
+	match (n) {
+	case i32 => void;
+	// missing f32 variant
+	};
+};

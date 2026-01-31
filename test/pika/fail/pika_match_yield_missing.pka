@@ -1,0 +1,14 @@
+// ERROR: all paths must yield or abort
+fn main() void = {
+	let x: nullable *i32 = null;
+	let val: i32 = match (x) {
+	case let p: *i32 =>
+		if (true) {
+			yield *p;
+		};
+	case null =>
+		yield 0i32;
+	};
+
+	if (val == 0i32) { void; };
+};

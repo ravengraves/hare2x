@@ -1,0 +1,58 @@
+// Test slicing unbounded arrays (*[*]u8)
+// src[start..end] should produce a []u8 slice
+
+use strings;
+
+fn test_unbounded_slice(src: *[*]u8, start: size, end: size) []u8 = {
+	return src[start..end];
+};
+
+fn test_str_from_unbounded(src: *[*]u8, start: size, end: size) str = {
+	let slice = src[start..end];
+	return strings::fromutf8_unsafe(slice);
+};
+
+export fn main() void = {
+	// Create a test buffer
+	let buf: [12]u8 = ['H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd', '!'];
+	let src: *[*]u8 = &buf: *[*]u8;
+
+	// Test basic slicing
+	let slice = src[0..5];  // "Hello"
+	assert(len(slice) == 5);
+	assert(slice[0] == 'H');
+	assert(slice[4] == 'o');
+
+	// Test slicing with offset
+	let slice2 = src[6..11];  // "World"
+	assert(len(slice2) == 5);
+	assert(slice2[0] == 'W');
+
+	// Test converting to string and comparing
+	let s1 = strings::fromutf8_unsafe(src[0..5]);
+	let s2: str = "Hello";
+	assert(s1 == s2);
+
+	// Test via function
+	let s3 = test_str_from_unbounded(src, 6, 11);
+	assert(s3 == "World");
+
+	// Test empty slice
+	let empty = src[5..5];
+	assert(len(empty) == 0);
+
+	// Test [..end] slicing (from beginning)
+	let from_start = src[..5];  // "Hello"
+	assert(len(from_start) == 5);
+	assert(from_start[0] == 'H');
+
+	// Test function using [..rawlen] pattern
+	test_process(&buf: *[*]u8, 12);
+};
+
+fn test_process(raw: *[*]u8, rawlen: size) void = {
+	let buf = raw[..rawlen];  // slice from beginning
+	assert(len(buf) == rawlen);
+	assert(buf[0] == 'H');
+	assert(buf[rawlen - 1] == '!');
+};

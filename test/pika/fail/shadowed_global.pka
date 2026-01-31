@@ -1,0 +1,6 @@
+// ERROR: variable shadowing is not allowed in pika
+let x: i32 = 1;
+
+fn test() void = {
+	let x: i32 = 2;  // shadows global
+};

@@ -1,0 +1,4 @@
+// Should fail: cannot cast str to *[*]u8
+export fn _main() void = {
+	let s = "hello": *[*]u8;
+};

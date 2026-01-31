@@ -1,0 +1,9 @@
+// RUNTIME ERROR: index out of bounds (negative via underflow)
+use rt;
+
+export fn _main() void = {
+	let arr: [3]i32 = [1, 2, 3];
+	let i: size = 0;
+	i -= 1;  // underflows to large positive
+	let x = arr[i];  // out of bounds
+};

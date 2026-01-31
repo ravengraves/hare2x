@@ -1,0 +1,100 @@
+// strings.ha - String and character literal tests
+// Note: In Pika, strings become u8 arrays
+
+// Character literal
+export fn get_newline() u8 = {
+	return '\n';
+};
+
+// Character literal with escape
+export fn get_tab() u8 = {
+	return '\t';
+};
+
+// String length (manual, no recursion)
+export fn str_len(s: *u8) size = {
+	let p = s: *[*]u8;
+	let i = 0z;
+	// ERROR on next line: Empty for loop initializer not allowed in Hare
+	// Expected: "/tmp/strings.ha:18:14: syntax error: expected literal, name, '[', 'struct', '(', found ';'"
+	// Fix: Use while-style loop: for (p[i] != 0) { i += 1; };
+	for (; p[i] != 0; i += 1) {
+	};
+	return i;
+};
+
+// String compare (returns true if equal)
+export fn str_eq(a: *u8, b: *u8) bool = {
+	let pa = a: *[*]u8;
+	let pb = b: *[*]u8;
+	let i = 0z;
+	for (; pa[i] != 0 && pb[i] != 0; i += 1) {
+		if (pa[i] != pb[i]) {
+			return false;
+		};
+	};
+	return pa[i] == pb[i];
+};
+
+// Copy string (iterative)
+export fn str_copy(dst: *u8, src: *u8) void = {
+	let pd = dst: *[*]u8;
+	let ps = src: *[*]u8;
+	let i = 0z;
+	for (; ps[i] != 0; i += 1) {
+		pd[i] = ps[i];
+	};
+	pd[i] = 0;
+};
+
+// Character class checks
+export fn is_digit(c: u8) bool = {
+	return c >= '0' && c <= '9';
+};
+
+export fn is_alpha(c: u8) bool = {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+};
+
+export fn is_space(c: u8) bool = {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+};
+
+// Parse simple integer from string
+export fn parse_int(s: *u8) i32 = {
+	let p = s: *[*]u8;
+	let result: i32 = 0;
+	let neg = false;
+	let i = 0z;
+
+	// Handle sign
+	if (p[i] == '-') {
+		neg = true;
+		i += 1;
+	};
+
+	// Parse digits
+	for (; p[i] != 0 && is_digit(p[i]); i += 1) {
+		result = result * 10 + (p[i] - '0'): i32;
+	};
+
+	if (neg) {
+		return -result;
+	};
+	return result;
+};
+
+export fn _main() void = {
+	let nl = get_newline();
+	let tab = get_tab();
+
+	let hello: [6]u8 = ['H', 'e', 'l', 'l', 'o', 0];
+	let hlen = str_len(&hello[0]);
+
+	let d = is_digit('5');
+	let a = is_alpha('x');
+	let s = is_space(' ');
+
+	let num: [4]u8 = ['-', '4', '2', 0];
+	let val = parse_int(&num[0]);
+};

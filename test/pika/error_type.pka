@@ -1,0 +1,29 @@
+type err = !void;
+type err2 = !void;
+type u32_box = struct {
+	v: u32,
+};
+
+type number = (i32 | f32 | u32_box | err);
+
+fn to_i32(n: number) i32 = {
+	match (n) {
+	case i32 => return n: i32;
+	case f32 => return (n: f32): i32;
+	case u32_box => return (n: u32_box).v: i32;
+	case err => return -1;
+	// also works: case let x: err => return -1;
+	};
+};
+
+export fn main() void = {
+	let a: number = 42: number;
+	let b: number = (3.5: f32): number;
+	let c = u32_box { v = 7u32 }: number;
+	let d: err = err;
+
+	assert(to_i32(a) == 42);
+	assert(to_i32(b) == 3);
+	assert(to_i32(c) == 7);
+	assert(to_i32(d) == -1);
+};
