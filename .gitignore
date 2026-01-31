@@ -1,0 +1,32 @@
+# Build artifacts
+build/
+*.o
+*.out
+*.so
+
+# Python
+__pycache__/
+*.pyc
+
+# Test temporary files
+test/tmp/
+test/hare/*.c
+test/hare/fail/*.c
+test/pika/*.c
+test/pika/fail/*.c
+test/**/*.o
+test/**/*.out
+test/sycl/*.hpp
+test/sycl/*.o
+test/sycl/*
+!test/sycl/*.*
+test/sycl/*.o
+test/sycl/*.so
+test/sycl/*.hpp
+
+
+# Generated files in old locations
+examples/*.c
+
+# Editor files
+hi

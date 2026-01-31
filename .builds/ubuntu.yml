@@ -1,0 +1,45 @@
+image: ubuntu/24.04
+packages:
+  - build-essential
+  - clang
+  - lld
+  - llvm
+  - make
+  - sudo
+  - git
+  - pkg-config
+  - python3
+  - python3-pip
+sources:
+  - https://git.sr.ht/~alecgraves/hare2c
+  - git://c9x.me/qbe.git
+  - https://git.sr.ht/~sircmpwn/harec
+  - https://git.sr.ht/~sircmpwn/hare
+  - https://git.sr.ht/~sircmpwn/scdoc
+tasks:
+  - setup: |
+      # Pin toolchain dependencies
+      #git -C qbe checkout 120f316162879b6165deba77815cd4193fb2fb59
+      #git -C harec checkout 350a6bf68a8eed2a3a7bb490e91d5331a9a79915
+      #git -C hare checkout 41a5ecd2e905e85a860ac57adcf7c81852a7cc04
+
+      # Build scdoc (manpage generator)
+      sudo make -j"$(nproc)" -C scdoc install
+
+      # Build qbe
+      sudo make -j"$(nproc)" -C qbe install
+
+      # Build harec (use clang/lld)
+      cp harec/configs/linux.mk harec/config.mk
+      sed -i 's/^cc[[:space:]]*=.*/cc = clang/' harec/config.mk
+      sed -i 's/^ld[[:space:]]*=.*/ld = ld.lld/' harec/config.mk
+      sudo make -j"$(nproc)" -C harec install
+
+      # Build hare (use clang/lld)
+      cp hare/configs/linux.mk hare/config.mk
+      sed -i 's/^cc[[:space:]]*=.*/cc = clang/' hare/config.mk
+      sed -i 's/^ld[[:space:]]*=.*/ld = ld.lld/' hare/config.mk
+      sudo make -j"$(nproc)" -C hare install
+  - test: |
+      cd hare2c
+      make check
