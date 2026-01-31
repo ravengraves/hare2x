@@ -1,15 +1,17 @@
-# Hare2C: A Hare-to-C11 Transpiler
-[![builds.sr.ht status](https://builds.sr.ht/~alecgraves/hare2c/commits/master/ubuntu.yml.svg)](https://builds.sr.ht/~alecgraves/hare2c/commits/master/ubuntu.yml?)
+# Hare2X: A Hare-to-X Transpiler
+[![builds.sr.ht status](https://builds.sr.ht/~alecgraves/hare2x/commits/master/ubuntu.yml.svg)](https://builds.sr.ht/~alecgraves/hare2x/commits/master/ubuntu.yml?)
 
-A family of Hare-to-GNU-C11 transpilers with three working implementations:
-- **hare2c.py** - Python reference/bootstrap implementation (~3,000 lines)
-- **hare2c** - Self-hosted Hare metatranspiler (11 .ha files, ~15,000 lines)
-- **pika2c** - Self-hosted Pika metatranspiler (10 .pka files, ~8,000 lines)
+A family of Hare-Subset-to-GNU-C11/SYCL/JS/x86_64_AT&T_ASM transpilers with three working implementations:
+- **hare2c.py** - Python hare/pika to GNU-C11 reference/bootstrap implementation (~3,000 lines)
+- **hare2c** - Self-hosted Hare2C metatranspiler (11 .ha files, ~15,000 lines)
+- **pika2c** - Self-hosted Pika2X metatranspiler (10 .pka files, ~8,000 lines)
 
 hare2c and pika2c share the same standard runtime, though memory allocation features are not exposed by pika2c. Hare2c is about 200KB compiled with `clang -O3`, while pika2c is about 100KB.
 
 - Hare2C online WASM demo: https://alecgraves.net/hare2c.html
 - Pika2C online WASM demo: https://alecgraves.net/pika2c.html
+- Pika2JS online WASM demo: https://alecgraves.net/pika2js.html
+- Pika2GLSL online WASM demo: https://alecgraves.net/pika2glsl.html
 
 ## Project Goals
 
@@ -107,7 +109,7 @@ make wasm
 make clean
 ```
 
-## SYCL Backend Notes
+## Pika SYCL Backend Notes
 
 - SYCL kernel error reporting packs line/column into 16-bit fields. Kernel sources
   with a line or column >= 65536 will have the location truncated.
