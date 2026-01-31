@@ -391,7 +391,10 @@ fn p_struct_lit(p: *parser, ref: bref) *tnode = {
 	};
 	for (!m_peek_is(&p.c, TK_RBRACE) && !cur_eof(&p.c)) {
 		if (m_peek_is(&p.c, TK_ELLIPSIS)) {
-			err_cursor(&p.c, "struct literal fill must be the only entry");
+			// Trailing fill: Type{field=val, ...} - zero-fills remaining fields
+			m_kind(&p.c, TK_ELLIPSIS);
+			result_node.flags |= F_VARIADIC;
+			break;
 		};
 		let fname_nn = m_need_ident(&p.c, TK_IDENT);
 		m_need(&p.c, TK_EQ);

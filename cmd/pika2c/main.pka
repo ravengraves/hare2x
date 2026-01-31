@@ -234,6 +234,7 @@ export fn main() void = {
 		in_global_init = false,
 		use_rt = false,
 		use_strings = false,
+		target_x86_64 = false,
 		prefix = bref { pos = 0, length = 0 },
 		prefix_src = (&placeholder_byte): *[*]u8,
 		match_tmp = 0,
@@ -244,15 +245,8 @@ export fn main() void = {
 		g.prefix = prefix;
 		g.prefix_src = src;  // prefix_src points to original srcbuf
 	};
+	g.target_x86_64 = use_x86_64;
 	if (use_x86_64) {
-		// Run the C-backend pass to reuse its semantic checks, then reset state
-		// before emitting x86_64 asm.
-		pkgen_generate_gnuc11(&g);
-		gen_init(&g, &t);
-		if (prefix.length > 0) {
-			g.prefix = prefix;
-			g.prefix_src = src;
-		};
 		pkgen_generate_x86_64(&g);
 	} else if (use_sycl) {
 		pkgen_generate_sycl(&g);

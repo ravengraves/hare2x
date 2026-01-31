@@ -80,30 +80,29 @@ type virt_func_sched = struct {
 // Allocation context
 
 type virt_ctx = struct {
-	allocs: [8192]virt_alloc,
+	allocs: [IR_MAX_VREGS]virt_alloc,
 	count: size,
-	ops: [65536]virt_op,
+	ops: [IR_MAX_OPS]virt_op,
 	op_count: size,
-	order: [65536]u32,
+	order: [IR_MAX_OPS]u32,
 	order_count: size,
-	windows: [2048]virt_window,
+	windows: [IR_MAX_OPS]virt_window,
 	window_count: size,
-	func_sched: [256]virt_func_sched,
+	func_sched: [IR_MAX_FUNCS]virt_func_sched,
 	active_queue: [64]u32,
 	active_count: size,
 };
 
 let virt_ctx_global: virt_ctx = virt_ctx {
-	allocs = [virt_alloc { vreg_id = 0, phys = phys_reg { class = 0, index = 0, lane = 0 } }...],
+	allocs = [0...],
 	count = 0,
-	ops = [virt_op { op_index = 0, kind = 0, aux = 0, width = 0, lanes = 0, cost = 0, flags = 0, dep0 = VIRT_DEP_NONE, dep1 = VIRT_DEP_NONE }...],
+	ops = [0...],
 	op_count = 0,
 	order = [0...],
 	order_count = 0,
-	windows = [virt_window { op_start = 0, op_count = 0, score = 0 }...],
+	windows = [0...],
 	window_count = 0,
-	func_sched = [virt_func_sched { op_start = 0, op_count = 0, window_start = 0, window_count = 0,
-		best_score = 0, alloc_start = 0, alloc_count = 0 }...],
+	func_sched = [0...],
 	active_queue = [0...],
 	active_count = 0,
 };
@@ -346,8 +345,8 @@ fn virt_build_op_queue(ctx: *ir_ctx, out: *virt_ctx) void = {
 	let i = 0z;
 	for (i < ctx.func_count) {
 		let f: *ir_func = &ctx.funcs[i];
-		let func_op_start = out.op_count;
-		let last_def: [8192]u32 = [VIRT_DEP_NONE...];
+			let func_op_start = out.op_count;
+			let last_def: [IR_MAX_VREGS]u32 = [VIRT_DEP_NONE...];
 		let v = 0u32;
 		for (v < f.next_vreg) {
 			let id: u32 = f.vreg_base + v;
@@ -450,11 +449,11 @@ fn virt_mark_seen(first: *[*]u32, last: *[*]u32, v: ir_vreg, pos: u32) void = {
 };
 
 fn virtreg_alloc_linear_scan(ctx: *ir_ctx, out: *virt_ctx, f: *ir_func, order_start: size, order_count: size) void = {
-	let first_seen: [8192]u32 = [VIRT_DEP_NONE...];
-	let last_seen: [8192]u32 = [0...];
-	let vreg_pri: [8192]u8 = [0...];
-	let alloc_class: [8192]u16 = [REG_SPILL...];
-	let alloc_index: [8192]u8 = [0...];
+	let first_seen: [IR_MAX_VREGS]u32 = [VIRT_DEP_NONE...];
+	let last_seen: [IR_MAX_VREGS]u32 = [0...];
+	let vreg_pri: [IR_MAX_VREGS]u8 = [0...];
+	let alloc_class: [IR_MAX_VREGS]u16 = [REG_SPILL...];
+	let alloc_index: [IR_MAX_VREGS]u8 = [0...];
 	let v = 0u32;
 	for (v < f.next_vreg) {
 		let vreg_id0 = f.vreg_base + v;
@@ -489,7 +488,7 @@ fn virtreg_alloc_linear_scan(ctx: *ir_ctx, out: *virt_ctx, f: *ir_func, order_st
 		};
 		pi += 1;
 	};
-	let order_ids: [8192]u32 = [0...];
+	let order_ids: [IR_MAX_VREGS]u32 = [0...];
 	let order_len: size = 0;
 	let v2 = 0u32;
 	for (v2 < f.next_vreg) {
@@ -518,9 +517,9 @@ fn virtreg_alloc_linear_scan(ctx: *ir_ctx, out: *virt_ctx, f: *ir_func, order_st
 	let gpr_free_count: size = len(gpr_free);
 	let xmm_free: [15]u8 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
 	let xmm_free_count: size = len(xmm_free);
-	let active_gpr: [8192]u32 = [0...];
+	let active_gpr: [IR_MAX_VREGS]u32 = [0...];
 	let active_gpr_count: size = 0;
-	let active_xmm: [8192]u32 = [0...];
+	let active_xmm: [IR_MAX_VREGS]u32 = [0...];
 	let active_xmm_count: size = 0;
 	let oi = 0z;
 	for (oi < order_len) {

@@ -1,0 +1,13 @@
+// Small struct (<=16 bytes) returned in registers.
+
+type pair = struct { x: i32, y: i32 };
+
+fn make_pair(a: i32, b: i32) pair = {
+	return pair { x = a, y = b };
+};
+
+export fn main() void = {
+	let p = make_pair(10, 32);
+	assert(p.x == 10);
+	assert(p.y == 32);
+};

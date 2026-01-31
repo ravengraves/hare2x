@@ -421,7 +421,7 @@ fn c_str_content(em: *emitter, r: bref, src: *[*]u8) size = {
 					e_raw(em, "\"\"");
 				};
 			} else if (next == 'u' && i + 6 <= end) {
-				for (let j = 0z; j < 4; j += 1) { e_raw_c(em, src[r.pos + i + 2 + j]); };
+				for (let j4 = 0z; j4 < 4; j4 += 1) { e_raw_c(em, src[r.pos + i + 2 + j4]); };
 				slen += utf8_len(parse_hex(src, r.pos + i + 2, 4));
 				i += 6;
 				// Split string if next char is hex digit
@@ -429,7 +429,7 @@ fn c_str_content(em: *emitter, r: bref, src: *[*]u8) size = {
 					e_raw(em, "\"\"");
 				};
 			} else if (next == 'U' && i + 10 <= end) {
-				for (let j = 0z; j < 8; j += 1) { e_raw_c(em, src[r.pos + i + 2 + j]); };
+				for (let j8 = 0z; j8 < 8; j8 += 1) { e_raw_c(em, src[r.pos + i + 2 + j8]); };
 				slen += utf8_len(parse_hex(src, r.pos + i + 2, 8));
 				i += 10;
 				// Split string if next char is hex digit
@@ -560,7 +560,8 @@ fn pika_to_c_asgn(tk: u16) u8 = {
 };
 
 fn bref_str(g: *codegen, r: bref) str = {
-	return bref_to_str(r, g.t.src);
+	let t = g.t;
+	return bref_to_str(r, t.src);
 };
 
 fn g_type_wrapped(g: *codegen, n: *tnode, k: u16) bool = {
@@ -688,7 +689,8 @@ fn g_array_dims(g: *codegen, n: *tnode) void = {
 
 fn g_array_decl(g: *codegen, arr_type: *tnode, var_name: bref) void = {
 	g_type_arr(g, arr_type);
-	ef1(&g.em, " %", bref_to_str(var_name, g.t.src));
+	let t = g.t;
+	ef1(&g.em, " %", bref_to_str(var_name, t.src));
 	g_array_dims(g, arr_type);
 };
 

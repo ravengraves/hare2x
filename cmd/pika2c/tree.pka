@@ -17,11 +17,7 @@ type tnode = struct {
 };
 
 // Static node pool (size must match NODE_POOL_SIZE)
-let nodes: [524288]tnode = [tnode {
-	kind = 0, flags = 0, ref = bref { pos = 0, length = 0 },
-	parent = null, first_child = null, last_child = null,
-	prev = null, next = null, ival = 0
-}...];
+let nodes: [524288]tnode = [0...];
 
 // ============================================================================
 // Tree Container

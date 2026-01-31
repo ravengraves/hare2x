@@ -390,8 +390,9 @@ fn e_arrow(em: *emitter, name: bref) void = {
 
 // Helper: emit format string up to next % or end, return position after
 fn ef_seg(em: *emitter, fmt: str, start: size) size = {
-	let flen = len(fmt);
 	let bytes = strings::toutf8(fmt);
+	let flen = len(bytes);
+	if (start >= flen) { return flen; };
 	let i = start;
 	for (i < flen) {
 		if (bytes[i] == '%') {
@@ -413,8 +414,8 @@ fn ef_seg(em: *emitter, fmt: str, start: size) size = {
 
 fn ef1(em: *emitter, fmt: str, a: str) void = {
 	do_indent(em);
-	let flen = len(fmt);
 	let bytes = strings::toutf8(fmt);
+	let flen = len(bytes);
 	let pos = ef_seg(em, fmt, 0);
 	if (pos < flen && bytes[pos] == '%') { sb_s(&em.buf, a); pos += 1; };
 	for (pos < flen) {
@@ -425,8 +426,8 @@ fn ef1(em: *emitter, fmt: str, a: str) void = {
 
 fn ef2(em: *emitter, fmt: str, a: str, b: str) void = {
 	do_indent(em);
-	let flen = len(fmt);
 	let bytes = strings::toutf8(fmt);
+	let flen = len(bytes);
 	let args: [2]str = [a, b];
 	let arg_i = 0z;
 	let pos = 0z;
@@ -441,8 +442,8 @@ fn ef2(em: *emitter, fmt: str, a: str, b: str) void = {
 
 fn ef3(em: *emitter, fmt: str, a: str, b: str, c: str) void = {
 	do_indent(em);
-	let flen = len(fmt);
 	let bytes = strings::toutf8(fmt);
+	let flen = len(bytes);
 	let args: [3]str = [a, b, c];
 	let arg_i = 0z;
 	let pos = 0z;
@@ -457,8 +458,8 @@ fn ef3(em: *emitter, fmt: str, a: str, b: str, c: str) void = {
 
 fn ef4(em: *emitter, fmt: str, a: str, b: str, c: str, d: str) void = {
 	do_indent(em);
-	let flen = len(fmt);
 	let bytes = strings::toutf8(fmt);
+	let flen = len(bytes);
 	let args: [4]str = [a, b, c, d];
 	let arg_i = 0z;
 	let pos = 0z;

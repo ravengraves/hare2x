@@ -451,8 +451,8 @@ fn glsl_type_is_float(g: *codegen, ty: *tnode) bool = {
 		};
 	};
 	if (t.kind == N_T_ALIAS) {
-		let base = glsl_parse_qualifier(t.ref, g.t.src).base;
-		return bref_match(base, "f32", g.t.src) || bref_match(base, "float", g.t.src);
+		let qual = glsl_parse_qualifier(t.ref, g.t.src);
+		return bref_match(qual.base, "f32", g.t.src) || bref_match(qual.base, "float", g.t.src);
 	};
 	return false;
 };
@@ -466,8 +466,8 @@ fn glsl_type_is_int(g: *codegen, ty: *tnode) bool = {
 		};
 	};
 	if (t.kind == N_T_ALIAS) {
-		let base = glsl_parse_qualifier(t.ref, g.t.src).base;
-		return bref_match(base, "i32", g.t.src) || bref_match(base, "int", g.t.src);
+		let qual2 = glsl_parse_qualifier(t.ref, g.t.src);
+		return bref_match(qual2.base, "i32", g.t.src) || bref_match(qual2.base, "int", g.t.src);
 	};
 	return false;
 };
@@ -479,8 +479,8 @@ fn glsl_type_is_bool(g: *codegen, ty: *tnode) bool = {
 		if (bref_match(t.ref, "bool", g.t.src)) { return true; };
 	};
 	if (t.kind == N_T_ALIAS) {
-		let base = glsl_parse_qualifier(t.ref, g.t.src).base;
-		return bref_match(base, "bool", g.t.src);
+		let qual3 = glsl_parse_qualifier(t.ref, g.t.src);
+		return bref_match(qual3.base, "bool", g.t.src);
 	};
 	return false;
 };
@@ -591,7 +591,8 @@ fn glsl_bvec_from_type(g: *codegen, ty: *tnode) nullable *tnode = {
 	if (ty.kind != N_T_ALIAS && ty.kind != N_T_QUAL) { return null; };
 	let base = ty.ref;
 	if (ty.kind == N_T_ALIAS) {
-		base = glsl_parse_qualifier(ty.ref, g.t.src).base;
+		let qual4 = glsl_parse_qualifier(ty.ref, g.t.src);
+		base = qual4.base;
 	} else {
 		base = t_first_nn(ty).ref;
 	};
@@ -1259,7 +1260,7 @@ fn glsl_emit_zero_for_type(g: *codegen, ty: *tnode) void = {
 		if (base_ptr != 0) {
 			let base_ty = base_ptr: uintptr: *tnode;
 			match (resolve_alias_type(g, base_ty)) {
-			case let resolved: *tnode => base_ty = resolved;
+			case let resolved1: *tnode => base_ty = resolved1;
 			case null => void;
 			};
 			if (base_ty.kind == N_T_STRUCT) {
@@ -1270,7 +1271,7 @@ fn glsl_emit_zero_for_type(g: *codegen, ty: *tnode) void = {
 		glsl_err(g, t.ref, "unknown type in struct fill");
 	};
 	match (resolve_alias_type(g, t)) {
-	case let resolved: *tnode => t = resolved;
+	case let resolved2: *tnode => t = resolved2;
 	case null => void;
 	};
 	if (t.kind == N_T_PRIM) {
@@ -1396,8 +1397,8 @@ fn glsl_fld(g: *codegen, n: *tnode) void = {
 	if (base_ty != null) {
 		let ty = unwrap(base_ty);
 		if (ty.kind == N_T_ALIAS) {
-			let base_name = glsl_parse_qualifier(ty.ref, g.t.src).base;
-			if (glsl_is_mat_type(base_name, g.t.src)) {
+			let qual5 = glsl_parse_qualifier(ty.ref, g.t.src);
+			if (glsl_is_mat_type(qual5.base, g.t.src)) {
 				let col_idx = glsl_mat_col_index(n.ref, g.t.src);
 				if (col_idx >= 0) {
 					glsl_expr(g, base);

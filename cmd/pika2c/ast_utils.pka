@@ -9,10 +9,8 @@ fn kind_in4(k: u16, a: u16, b: u16, c: u16, d: u16) bool = {
 };
 
 fn node_is_kind(n: nullable *tnode, k: u16) bool = {
-	return match (n) {
-	case let p: *tnode => yield p.kind == k;
-	case null => yield false;
-	};
+	if (n == null) { return false; };
+	return unwrap(n).kind == k;
 };
 
 fn is_str_kind(k: u16) bool = {
@@ -42,17 +40,13 @@ fn tok_is_assign(k: u16) bool = {
 };
 
 fn node_is_lit(n: nullable *tnode) bool = {
-	return match (n) {
-	case let p: *tnode => yield is_lit_kind(p.kind);
-	case null => yield false;
-	};
+	if (n == null) { return false; };
+	return is_lit_kind(unwrap(n).kind);
 };
 
 fn node_is_str(n: nullable *tnode) bool = {
-	return match (n) {
-	case let p: *tnode => yield is_str_kind(p.kind);
-	case null => yield false;
-	};
+	if (n == null) { return false; };
+	return is_str_kind(unwrap(n).kind);
 };
 
 fn type_is_prim_name(ty: *tnode, name: str, src: *[*]u8) bool = {
@@ -198,16 +192,13 @@ fn tree_find_first_kind(root: *tnode, kind: u16) nullable *tnode = {
 };
 
 fn qual_id_matches(n: nullable *tnode, module: str, member: str, src: *[*]u8) bool = {
-	return match (n) {
-	case let q: *tnode =>
-		if (q.kind != N_QUAL_ID) { yield false; };
-		if (!bref_match(q.ref, module, src)) { yield false; };
-		yield match (t_first(q)) {
-		case let m: *tnode => yield bref_match(m.ref, member, src);
-		case null => yield false;
-		};
-	case null => yield false;
-	};
+	if (n == null) { return false; };
+	let q = unwrap(n);
+	if (q.kind != N_QUAL_ID) { return false; };
+	if (!bref_match(q.ref, module, src)) { return false; };
+	let first = t_first(q);
+	if (first == null) { return false; };
+	return bref_match(unwrap(first).ref, member, src);
 };
 
 // ============================================================================
@@ -301,7 +292,8 @@ fn arr_size_literal(arr_typ: *tnode, src: *[*]u8, out: *i64) bool = {
 		return true;
 	};
 	if (sn.kind == TK_INT) {
-		*out = parse_int_base(sn.ref, src).val;
+		let res = parse_int_base(sn.ref, src);
+		*out = res.val;
 		return true;
 	};
 	return false;

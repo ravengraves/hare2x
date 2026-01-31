@@ -23,6 +23,7 @@ type codegen = struct {
 	in_global_init: bool,
 	use_rt: bool,
 	use_strings: bool,
+	target_x86_64: bool,
 	prefix: bref,        // module prefix for exported functions (from -p arg)
 	prefix_src: *[*]u8,  // source buffer for prefix (may differ from t.src)
 	match_tmp: i64,      // counter for match temp variables
@@ -42,8 +43,8 @@ fn bref_eq_concat_qual(key: bref, mod: bref, member: bref, src: *[*]u8) bool = {
 		if (src[key.pos + i] != src[mod.pos + i]) { return false; };
 	};
 	if (src[key.pos + mlen] != '_') { return false; };
-	for (let i = 0z; i < nlen; i += 1) {
-		if (src[key.pos + mlen + 1 + i] != src[member.pos + i]) {
+	for (let j = 0z; j < nlen; j += 1) {
+		if (src[key.pos + mlen + 1 + j] != src[member.pos + j]) {
 			return false;
 		};
 	};
@@ -160,6 +161,7 @@ fn gen_init(g: *codegen, t: *tree) void = {
 	g.in_global_init = false;
 	g.use_rt = false;
 	g.use_strings = false;
+	g.target_x86_64 = false;
 	g.prefix = bref_empty();
 	g.match_tmp = 0;
 	g.prefix_src = t.src;  // default to tree source, main.pka will override if prefix present
@@ -354,19 +356,29 @@ fn check_arr_lit_nonnullable_struct_zero(g: *codegen, arr_ty: *tnode, arr_lit: *
 };
 
 fn find_variant_idx(g: *codegen, tagged: *tnode, src_ty: *tnode) i64 = {
+	let src_real: *tnode = src_ty;
+	let src_res = resolve_alias_type(g, src_ty);
+	if (src_res != null) { src_real = unwrap(src_res); };
 	let variant: nullable *tnode = t_first(tagged);
 	let idx: i64 = 0;
 	for (variant != null) {
 		let v: *tnode = unwrap(variant);
-		if (v.kind == src_ty.kind) {
-			if (v.kind == N_T_ALIAS) {
-				if (bref_eq(v.ref, src_ty.ref, g.t.src)) { return idx; };
-			} else if (v.kind == N_T_PRIM) {
-				if (prim_types_match(v, src_ty, g.t.src)) { return idx; };
-			} else {
+		let src_is_alias = src_ty.kind == N_ID || src_ty.kind == N_T_ALIAS;
+		let v_is_alias = v.kind == N_ID || v.kind == N_T_ALIAS;
+		if (src_is_alias && v_is_alias) {
+			if (bref_eq(v.ref, src_ty.ref, g.t.src)) {
 				return idx;
+			} else {
+				// Distinct aliases of the same underlying type should keep distinct tags.
+				variant = v.next;
+				idx += 1;
+				continue;
 			};
 		};
+		let v_real: *tnode = v;
+		let v_res = resolve_alias_type(g, v);
+		if (v_res != null) { v_real = unwrap(v_res); };
+		if (type_eq(g, v_real, src_real)) { return idx; };
 		variant = v.next;
 		idx += 1;
 	};
@@ -430,11 +442,11 @@ fn type_eq(g: *codegen, a: *tnode, b: *tnode) bool = {
 		let tb: *tnode = stack_b[top]: *tnode;
 
 		match (resolve_alias_type(g, ta)) {
-		case let resolved: *tnode => ta = resolved;
+		case let resolved_a: *tnode => ta = resolved_a;
 		case null => void;
 		};
 		match (resolve_alias_type(g, tb)) {
-		case let resolved: *tnode => tb = resolved;
+		case let resolved_b: *tnode => tb = resolved_b;
 		case null => void;
 		};
 
@@ -604,6 +616,14 @@ fn get_expr_type_call(g: *codegen, expr: *tnode) nullable *tnode = {
 	if (func == null) { return null; };
 	let call_fn: *tnode = unwrap(func);
 	if (call_fn.kind == N_ID) {
+		// Handle unwrap(expr) built-in: unwrap(nullable *T) -> *T
+		if (bref_match(call_fn.ref, "unwrap", g.t.src)) {
+			let arg = call_fn.next;
+			if (arg != null) {
+				return get_expr_type(g, unwrap(arg));
+			};
+			return null;
+		};
 		let ret_ty = dict_get_bref(&g.funcs, call_fn.ref);
 		if (ret_ty != 0) {
 			return ret_ty: uintptr: *tnode;
@@ -636,16 +656,27 @@ fn get_expr_type_eval(g: *codegen, expr: *tnode, k: u16) type_eval = {
 		let ty_ptr = dict_get_bref(&g.vars, expr.ref);
 		let ty: nullable *tnode = null;
 		if (ty_ptr != 0) {
-			ty = ty_ptr: uintptr: *tnode;
-			return type_eval { handled = true, ty = ty };
+			let maybe_ty: *tnode = ty_ptr: uintptr: *tnode;
+			// Check if this is actually a type node (not a global/def node copied to vars)
+			if (is_type_kind(maybe_ty.kind)) {
+				return type_eval { handled = true, ty = maybe_ty };
+			};
+			// If it's a global/def node in vars (x86_64 backend), extract type from it
+			if (maybe_ty.kind == N_GLOBAL || maybe_ty.kind == N_DEF) {
+				let child1 = t_first(maybe_ty);
+				if (child1 != null && is_type_kind(unwrap(child1).kind)) {
+					return type_eval { handled = true, ty = unwrap(child1) };
+				};
+			};
+			// Otherwise fall through to g.globals lookup
 		};
 		let glob_ptr = dict_get_bref(&g.globals, expr.ref);
 		if (glob_ptr != 0) {
 			let gnode: *tnode = glob_ptr: uintptr: *tnode;
 			if (gnode.kind == N_GLOBAL || gnode.kind == N_DEF) {
-				let child = t_first(gnode);
-				if (child != null && is_type_kind(unwrap(child).kind)) {
-					return type_eval { handled = true, ty = unwrap(child) };
+				let child2 = t_first(gnode);
+				if (child2 != null && is_type_kind(unwrap(child2).kind)) {
+					return type_eval { handled = true, ty = unwrap(child2) };
 				};
 			};
 		};
@@ -1217,9 +1248,10 @@ fn case_body_all_paths_terminate(g: *codegen, cn: *tnode) bool = {
 
 // Get type from a match expression and verify yield types are consistent
 fn get_match_type(g: *codegen, n: *tnode, expected_in: nullable *tnode) nullable *tnode = {
+	let require = expected_in == null && !g.target_x86_64;
 	let state = match_yield_state {
 		expected = expected_in,
-		require_explicit = expected_in == null,
+		require_explicit = require,
 		saw_untyped = false,
 		untyped_ref = bref_empty()
 	};

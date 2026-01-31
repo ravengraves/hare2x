@@ -205,7 +205,7 @@ fn sycl_str_content(em: *emitter, r: bref, src: *[*]u8) size = {
 					e_raw(em, "\"\"");
 				};
 			} else if (next == 'U' && i + 10 <= end) {
-				for (let j = 0z; j < 8; j += 1) { e_raw_c(em, src[r.pos + i + 2 + j]); };
+				for (let k = 0z; k < 8; k += 1) { e_raw_c(em, src[r.pos + i + 2 + k]); };
 				slen += sycl_utf8_len(sycl_parse_hex(src, r.pos + i + 2, 8));
 				i += 10;
 				if (i < end && sycl_is_hex_digit(src[r.pos + i])) {
@@ -880,7 +880,7 @@ fn sycl_emit_slice_expr(g: *codegen, n: *tnode) void = {
 	let slice_start = slice_arr.next;
 	let slice_end_opt: nullable *tnode = null;
 	match (slice_start) {
-	case let s: *tnode => slice_end_opt = s.next;
+	case let start_node: *tnode => slice_end_opt = start_node.next;
 	case null => void;
 	};
 
@@ -921,7 +921,7 @@ fn sycl_emit_slice_expr(g: *codegen, n: *tnode) void = {
 	};
 
 	let slice_elem: *tnode = match (slice_elem_ty) {
-	case let e: *tnode => yield e;
+	case let elem: *tnode => yield elem;
 	case null =>
 		sycl_err(g, n.ref, "invalid slice element type in SYCL");
 		return;
@@ -956,14 +956,14 @@ fn sycl_emit_slice_expr(g: *codegen, n: *tnode) void = {
 
 		emit_s(&g.em, ", ");
 		match (slice_start) {
-		case let s: *tnode => sycl_expr(g, s);
+		case let start1: *tnode => sycl_expr(g, start1);
 		case null => emit_s(&g.em, "0");
 		};
 
 		emit_s(&g.em, ", ");
 		match (slice_end_opt) {
-		case let e: *tnode =>
-			sycl_expr(g, e);
+		case let end1: *tnode =>
+			sycl_expr(g, end1);
 		case null =>
 			if (slice_ty != null) {
 				sycl_emit_slice_len(g, slice_arr, slice_make_is_ptr);
@@ -983,13 +983,13 @@ fn sycl_emit_slice_expr(g: *codegen, n: *tnode) void = {
 		sycl_expr(g, slice_arr);
 		emit_s(&g.em, ", ");
 		match (slice_start) {
-		case let s: *tnode => sycl_expr(g, s);
+		case let start2: *tnode => sycl_expr(g, start2);
 		case null => emit_s(&g.em, "0");
 		};
 		emit_s(&g.em, ", ");
 		match (slice_end_opt) {
-		case let e: *tnode =>
-			sycl_expr(g, e);
+		case let end2: *tnode =>
+			sycl_expr(g, end2);
 		case null =>
 			emit_s(&g.em, "psycl_acc_len(");
 			sycl_expr(g, slice_arr);

@@ -26,23 +26,11 @@ type sycl_fn_info = struct {
 };
 
 // Global device function registry (max 256 per file)
-let sycl_fn_list: [256]sycl_fn_info = [sycl_fn_info {
-	name = bref { pos = 0, length = 0 },
-	node = null,
-	may_fail = false,
-	needs_error = false,
-}...];
+let sycl_fn_list: [256]sycl_fn_info = [0...];
 let sycl_fn_count: size = 0;
 
 // Global kernel registry (max 64 kernels per file)
-let sycl_kernels: [64]sycl_kernel_info = [sycl_kernel_info {
-	name = bref { pos = 0, length = 0 },
-	dim = 0,
-	uses_nd_range = false,
-	local_params = [bref { pos = 0, length = 0 }...],
-	local_count = 0,
-	fn_node = null,
-}...];
+let sycl_kernels: [64]sycl_kernel_info = [0...];
 let sycl_kernel_count: size = 0;
 
 // Current kernel context (when emitting operator() body)
@@ -1691,8 +1679,8 @@ fn sycl_expr_impl(g: *codegen, n: *tnode) void = {
 		};
 		if (sycl_type_is_slice(g, cast_ty)) {
 			match (cast_src_ty) {
-			case let src_ty: *tnode =>
-				if (sycl_type_is_ptr_to_uarr(g, src_ty)) {
+			case let slice_src: *tnode =>
+				if (sycl_type_is_ptr_to_uarr(g, slice_src)) {
 					sycl_err(g, n.ref, "cannot cast *[*] to [] (use slicing instead)");
 				};
 			case null => void;
@@ -1700,8 +1688,8 @@ fn sycl_expr_impl(g: *codegen, n: *tnode) void = {
 		};
 		if (sycl_type_is_ptr_to_uarr(g, cast_ty)) {
 			match (cast_src_ty) {
-			case let src_ty: *tnode =>
-				if (sycl_type_is_slice(g, src_ty)) {
+			case let uarr_src: *tnode =>
+				if (sycl_type_is_slice(g, uarr_src)) {
 					e_c(&g.em, '(');
 					sycl_emit_type(g, cast_ty);
 					emit_s(&g.em, ")(psycl_slice_data(");

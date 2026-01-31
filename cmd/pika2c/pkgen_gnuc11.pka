@@ -11,8 +11,8 @@ fn bref_eq_concat(key: bref, mod: bref, member: bref, src: *[*]u8) bool = {
 		if (src[key.pos + i] != src[mod.pos + i]) { return false; };
 	};
 	if (src[key.pos + mlen] != '_') { return false; };
-	for (let i = 0z; i < nlen; i += 1) {
-		if (src[key.pos + mlen + 1 + i] != src[member.pos + i]) {
+	for (let j = 0z; j < nlen; j += 1) {
+		if (src[key.pos + mlen + 1 + j] != src[member.pos + j]) {
 			return false;
 		};
 	};
@@ -486,8 +486,8 @@ fn g_cast(g: *codegen, n: *tnode) void = {
 				if (target_ty.kind == N_T_TAGGED) {
 					let var_idx: i64 = 0;
 					match (get_expr_type(g, expr)) {
-					case let src_ty: *tnode =>
-						var_idx = find_variant_idx(g, target_ty, src_ty);
+					case let cast_src_ty: *tnode =>
+						var_idx = find_variant_idx(g, target_ty, cast_src_ty);
 				case null => void;
 				};
 				if (var_idx < 0) {
@@ -531,13 +531,13 @@ fn g_cast(g: *codegen, n: *tnode) void = {
 	// Reject *[*]T -> []T cast (use slicing instead)
 	if (ty.kind == N_T_SLICE) {
 		match (get_expr_type(g, expr)) {
-		case let src_ty: *tnode =>
-			let resolved = resolve_alias_type(g, src_ty);
-			if (resolved != null) { src_ty = unwrap(resolved); };
-			if (src_ty.kind == N_T_PTR) {
-				match (t_first(src_ty)) {
-				case let inner: *tnode =>
-					if (inner.kind == N_T_UARR) {
+		case let src_ty0: *tnode =>
+			let resolved0 = resolve_alias_type(g, src_ty0);
+			if (resolved0 != null) { src_ty0 = unwrap(resolved0); };
+			if (src_ty0.kind == N_T_PTR) {
+				match (t_first(src_ty0)) {
+				case let inner0: *tnode =>
+					if (inner0.kind == N_T_UARR) {
 						err_bref(n.ref, g.t.src, g.t.src_len,
 							"cannot cast *[*] to [] (use slicing instead)");
 					};
@@ -550,8 +550,8 @@ fn g_cast(g: *codegen, n: *tnode) void = {
 	// Reject str -> *[*]u8 cast
 	if (expr.kind == N_STR && ty.kind == N_T_PTR) {
 		match (t_first(ty)) {
-		case let inner: *tnode =>
-			if (inner.kind == N_T_UARR) {
+		case let inner1: *tnode =>
+			if (inner1.kind == N_T_UARR) {
 				err_bref(n.ref, g.t.src, g.t.src_len,
 					"cannot cast str to *[*]u8 (use strings::toutf8() to get []u8)");
 			};
@@ -561,8 +561,8 @@ fn g_cast(g: *codegen, n: *tnode) void = {
 	// Handle []T -> *[*]T cast: emit (target_type)(expr.data)
 	if (ty.kind == N_T_PTR) {
 		match (t_first(ty)) {
-		case let inner: *tnode =>
-			if (inner.kind == N_T_UARR) {
+		case let inner2: *tnode =>
+			if (inner2.kind == N_T_UARR) {
 				// Target is *[*]T, check if source is []T
 				match (get_expr_type(g, expr)) {
 				case let src_ty: *tnode =>
@@ -635,8 +635,8 @@ fn g_idx(g: *codegen, n: *tnode) void = {
 	let pcount: i64 = 0;
 	let inner_kind: u16 = 0;
 	match (ty_opt) {
-	case let ty: *tnode =>
-		let current: *tnode = ty;
+	case let ty2: *tnode =>
+		let current: *tnode = ty2;
 		for (current.kind == N_T_PTR) {
 			pcount += 1;
 			match (t_first(current)) {
@@ -762,8 +762,8 @@ fn g_slice(g: *codegen, n: *tnode) void = {
 	};
 
 	match (start) {
-	case let s: *tnode =>
-		g_emit_expr_paren(g, "+(", s);
+	case let start_node: *tnode =>
+		g_emit_expr_paren(g, "+(", start_node);
 	case null => void;
 	};
 
@@ -801,7 +801,7 @@ fn g_fld(g: *codegen, n: *tnode) void = {
 	case let ty: *tnode =>
 		let depth = ptr_depth(ty);
 		// Check for nullable pointer field access (auto-dereference)
-		if (ty.kind == N_T_PTR && (ty.flags & F_NULLABLE) != 0) {
+		if (ty.kind == N_T_PTR && (ty.flags & F_NULLABLE) != 0 && !g.target_x86_64) {
 			let narrowed = base.kind == N_ID && !bref_is_empty(g.nullable_narrowed) &&
 				bref_eq(base.ref, g.nullable_narrowed, g.t.src);
 			if (!narrowed) {

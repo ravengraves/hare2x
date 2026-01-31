@@ -42,6 +42,9 @@ type x86_ctx = struct {
 	static_label: [256]i64,
 	static_ty: [256]uintptr,
 	static_init: [256]uintptr,
+	arr_len_names: [256]bref,
+	arr_len_value: [256]i64,
+	arr_len_count: size,
 };
 
 type x86_eval_frame = struct {
@@ -138,6 +141,7 @@ def X86_ARG_FLOAT: u8 = 1;
 def X86_ARG_STR: u8 = 2;
 def X86_ARG_SLICE: u8 = 3;
 def X86_ARG_TAGGED: u8 = 4;
+def X86_ARG_STRUCT16: u8 = 5;  // Small struct (16 bytes, fits in 2 registers)
 def X86_SLICE_ARRAY: u8 = 1;
 def X86_SLICE_SLICE: u8 = 2;
 def X86_SLICE_UARR: u8 = 3;
@@ -2026,6 +2030,27 @@ fn x86_static_ty(ctx: *x86_ctx, name: bref, owner: bref) nullable *tnode = {
 	return null;
 };
 
+fn x86_arr_len_set(ctx: *x86_ctx, name: bref, arr_len: i64) void = {
+	if (ctx.arr_len_count >= len(ctx.arr_len_names)) { return; };
+	let idx = ctx.arr_len_count;
+	ctx.arr_len_names[idx] = name;
+	ctx.arr_len_value[idx] = arr_len;
+	ctx.arr_len_count += 1;
+};
+
+fn x86_arr_len_get(ctx: *x86_ctx, name: bref, out: *i64) bool = {
+	// Search from most-recent to oldest so inner-scope locals shadow earlier entries.
+	let i = ctx.arr_len_count;
+	for (i > 0) {
+		i -= 1;
+		if (bref_eq(ctx.arr_len_names[i], name, ctx.g.t.src)) {
+			*out = ctx.arr_len_value[i];
+			return true;
+		};
+	};
+	return false;
+};
+
 
 fn x86_is_float_ty(g: *codegen, ty: *tnode) bool = {
 	let resolved = resolve_alias_type(g, ty);
@@ -2060,6 +2085,20 @@ fn x86_type_is_array(g: *codegen, ty: *tnode) bool = {
 	return unwrap(resolved).kind == N_T_ARR;
 };
 
+// Check if a type should be kept as an address (not loaded by value).
+// Returns true for aggregates (str, slice, struct, array, tagged) or
+// unresolved aliases (which might be any of those).
+fn x86_type_is_aggregate(g: *codegen, ty: *tnode) bool = {
+	let resolved = resolve_alias_type(g, ty);
+	if (resolved == null) {
+		// Unresolved alias - assume it's an aggregate to be safe
+		return ty.kind == N_T_ALIAS;
+	};
+	let r: *tnode = unwrap(resolved);
+	return r.kind == N_T_STRUCT || r.kind == N_T_SLICE || r.kind == N_T_ARR ||
+		r.kind == N_T_TAGGED || type_is_str(r, g.t.src);
+};
+
 fn x86_type_is_slice(g: *codegen, ty: *tnode) bool = {
 	let resolved = resolve_alias_type(g, ty);
 	if (resolved == null) { return false; };
@@ -2085,6 +2124,10 @@ fn x86_arg_kind_from_expr(g: *codegen, n: *tnode) u8 = {
 	return X86_ARG_INT;
 };
 
+// Classify argument type for calling convention.
+// System V AMD64 ABI passes small aggregates (<=16 bytes) in registers:
+// - 16-byte structs: 2 integer registers (e.g., bref, str)
+// - Larger aggregates: passed by hidden pointer
 fn x86_arg_kind_from_type(g: *codegen, ty_in: *tnode) u8 = {
 	let ty: *tnode = ty_in;
 	let resolved = resolve_alias_type(g, ty);
@@ -2093,17 +2136,116 @@ fn x86_arg_kind_from_type(g: *codegen, ty_in: *tnode) u8 = {
 	if (ty.kind == N_T_SLICE) { return X86_ARG_SLICE; };
 	if (type_is_str(ty, g.t.src)) { return X86_ARG_STR; };
 	if (x86_is_float_ty(g, ty)) { return X86_ARG_FLOAT; };
+	// Check for small structs (16 bytes, fits in 2 registers)
+	if (x86_type_is_struct(g, ty) && x86_type_slot_size(g, ty) == 16) {
+		return X86_ARG_STRUCT16;
+	};
 	return X86_ARG_INT;
 };
 
-fn x86_array_len_from_base(g: *codegen, base_expr: *tnode, out_len: *i64) bool = {
+// Extract integer value from a node (handles N_INT, TK_INT, N_CAST)
+fn x86_extract_int_val(n: *tnode, src: *[*]u8, out_val: *i64) bool = {
+	let node = n;
+	// Unwrap N_CAST to get inner integer
+	if (node.kind == N_CAST) {
+		let inner_opt = t_first(node);
+		if (inner_opt == null) { return false; };
+		node = unwrap(inner_opt);
+	};
+	if (node.kind == N_INT) {
+		if (node.ref.length == 0) {
+			*out_val = node.ival;
+			return true;
+		};
+		let res1 = parse_int_base(node.ref, src);
+		*out_val = res1.val;
+		return true;
+	};
+	if (node.kind == TK_INT) {
+		let res2 = parse_int_base(node.ref, src);
+		*out_val = res2.val;
+		return true;
+	};
+	return false;
+};
+
+// Try to get array size, including constant identifiers
+fn x86_arr_size_with_const(g: *codegen, arr_ty: *tnode, out_len: *i64) bool = {
+	// First try literal
+	if (arr_size_literal(arr_ty, g.t.src, out_len)) { return true; };
+	// Try constant identifier (TK_ID from lexer, not N_ID from parser)
+	let size_node_opt = arr_size_node(arr_ty);
+	if (size_node_opt == null) { return false; };
+	let sn: *tnode = unwrap(size_node_opt);
+	// Array size tokens are TK_IDENT (lexer tokens), not N_ID (AST nodes)
+	if (sn.kind == TK_IDENT || sn.kind == N_ID) {
+		let glob_ptr = dict_get_bref(&g.globals, sn.ref);
+		if (glob_ptr != 0) {
+			let gnode: *tnode = glob_ptr: uintptr: *tnode;
+			if (gnode.kind == N_DEF) {
+				let def_val_opt = t_first(gnode);
+				if (def_val_opt != null) {
+					let def_val = unwrap(def_val_opt);
+					// Skip type child to get value
+					if (is_type_kind(def_val.kind)) {
+						def_val_opt = def_val.next;
+						if (def_val_opt != null) { def_val = unwrap(def_val_opt); };
+					};
+					if (x86_extract_int_val(def_val, g.t.src, out_len)) {
+						return true;
+					};
+				};
+			};
+		};
+	};
+	// Try direct extraction if size node is a literal or cast
+	if (x86_extract_int_val(sn, g.t.src, out_len)) {
+		return true;
+	};
+	return false;
+};
+
+fn x86_array_len_from_base(ctx: *x86_ctx, base_expr: *tnode, out_len: *i64) bool = {
+	let g = ctx.g;
+	if (base_expr.kind == N_ID) {
+		if (x86_arr_len_get(ctx, base_expr.ref, out_len)) { return true; };
+		// Check for global with inferred-size array
+		let glob_ptr = dict_get_bref(&g.globals, base_expr.ref);
+		if (glob_ptr != 0) {
+			let gnode: *tnode = glob_ptr: uintptr: *tnode;
+			if (gnode.kind == N_GLOBAL) {
+				// Global structure: N_GLOBAL -> type child -> init child
+				let type_child = t_first(gnode);
+				if (type_child != null) {
+					let type_node: *tnode = unwrap(type_child);
+					if (type_node.kind == N_T_ARR && (type_node.flags & F_INFERRED) != 0) {
+						// Inferred size array - count elements from initializer
+						let init_child = type_node.next;
+						if (init_child != null) {
+							let init_node: *tnode = unwrap(init_child);
+							if (init_node.kind == N_ARR_LIT) {
+								*out_len = arr_lit_count(init_node): i64;
+								return true;
+							};
+						};
+					};
+				};
+			};
+		};
+	};
 	let base_ty_opt = get_expr_type(g, base_expr);
 	if (base_ty_opt == null) { return false; };
 	let base_ty: *tnode = unwrap(base_ty_opt);
 	let resolved0 = resolve_alias_type(g, base_ty);
 	if (resolved0 != null) { base_ty = unwrap(resolved0); };
 	if (base_ty.kind == N_T_ARR) {
-		return arr_size_literal(base_ty, g.t.src, out_len);
+		// Check if it's an inferred-size array that we couldn't resolve
+		if ((base_ty.flags & F_INFERRED) != 0) {
+			// For inferred arrays, we need the initializer to count
+			// If we're here, we couldn't find it through the global lookup
+			return false;
+		};
+		return x86_arr_size_with_const(g, base_ty, out_len);
 	};
 	if (base_ty.kind == N_T_PTR) {
 		let walk_ty: *tnode = base_ty;
@@ -2114,7 +2256,7 @@ fn x86_array_len_from_base(g: *codegen, base_expr: *tnode, out_len: *i64) bool =
 			let resolved1 = resolve_alias_type(g, inner_ty);
 			if (resolved1 != null) { inner_ty = unwrap(resolved1); };
 			if (inner_ty.kind == N_T_ARR) {
-				return arr_size_literal(inner_ty, g.t.src, out_len);
+				return x86_arr_size_with_const(g, inner_ty, out_len);
 			};
 			walk_ty = inner_ty;
 		};
@@ -2125,7 +2267,7 @@ fn x86_array_len_from_base(g: *codegen, base_expr: *tnode, out_len: *i64) bool =
 fn x86_emit_bounds_check(ctx: *x86_ctx, base_expr: *tnode, ref: bref) void = {
 	let g = ctx.g;
 	let bound_len: i64 = 0;
-	let ok = x86_array_len_from_base(g, base_expr, &bound_len);
+	let ok = x86_array_len_from_base(ctx, base_expr, &bound_len);
 	if (!ok || bound_len <= 0) { return; };
 	x86_emit_bounds_check_core(ctx, "", bound_len, false, ref);
 };
@@ -2290,6 +2432,74 @@ fn x86_idx_setup(g: *codegen, fr: *x86_eval_frame, n: *tnode) void = {
 
 fn x86_field_setup(g: *codegen, fr: *x86_eval_frame, n: *tnode, base_expr: *tnode) void = {
 	let fld_base_ty_opt = get_expr_type(g, base_expr);
+	// Check if we got a valid struct type; if not, try fallbacks
+	if (fld_base_ty_opt != null) {
+		let chk_ty: *tnode = unwrap(fld_base_ty_opt);
+		let chk_resolved = resolve_alias_type(g, chk_ty);
+		if (chk_resolved != null) { chk_ty = unwrap(chk_resolved); };
+		// Strip pointers
+		for (chk_ty.kind == N_T_PTR) {
+			let chk_inner = t_first(chk_ty);
+			if (chk_inner == null) { break; };
+			chk_ty = unwrap(chk_inner);
+			let chk_inner_res = resolve_alias_type(g, chk_ty);
+			if (chk_inner_res != null) { chk_ty = unwrap(chk_inner_res); };
+		};
+		if (!x86_type_is_struct(g, chk_ty)) {
+			// get_expr_type returned something but it's not a struct; try fallback
+			fld_base_ty_opt = null;
+		};
+	};
+	// Handle indexed expression: arr[i].field - get element type of array
+	if (fld_base_ty_opt == null && base_expr.kind == N_IDX) {
+		let arr_base = t_first(base_expr);
+		if (arr_base != null) {
+			let arr_base_nn: *tnode = unwrap(arr_base);
+			let arr_ty = get_expr_type(g, arr_base_nn);
+			// If get_expr_type fails and this is a global ID, try looking up directly
+			if (arr_ty == null && arr_base_nn.kind == N_ID) {
+				let glob_ptr = dict_get_bref(&g.globals, arr_base_nn.ref);
+				if (glob_ptr != 0) {
+					let gnode: *tnode = glob_ptr: uintptr: *tnode;
+					if (gnode.kind == N_GLOBAL) {
+						let gty = t_first(gnode);
+						if (gty != null) { arr_ty = gty; };
+					};
+				};
+			};
+			if (arr_ty != null) {
+				let at: *tnode = unwrap(arr_ty);
+				let resolved_at = resolve_alias_type(g, at);
+				if (resolved_at != null) { at = unwrap(resolved_at); };
+				if (at.kind == N_T_ARR || at.kind == N_T_UARR || at.kind == N_T_SLICE) {
+					let elem_ty_opt = t_first(at);
+					if (elem_ty_opt != null) {
+						let elem_ty: *tnode = unwrap(elem_ty_opt);
+						// Resolve element type alias to get actual struct type
+						let elem_resolved = resolve_alias_type(g, elem_ty);
+						if (elem_resolved != null) {
+							fld_base_ty_opt = elem_resolved;
+						} else {
+							fld_base_ty_opt = elem_ty;
+						};
+					};
+				};
+			};
+		};
+	};
+	// Handle unwrap(expr) calls - get type of the argument
+	if (fld_base_ty_opt == null && base_expr.kind == N_CALL) {
+		let call_fn_opt = t_first(base_expr);
+		if (call_fn_opt != null) {
+			let call_fn = unwrap(call_fn_opt);
+			if (call_fn.kind == N_ID && bref_match(call_fn.ref, "unwrap", g.t.src)) {
+				let unwrap_arg = call_fn.next;
+				if (unwrap_arg != null) {
+					fld_base_ty_opt = get_expr_type(g, unwrap(unwrap_arg));
+				};
+			};
+		};
+	};
 	if (fld_base_ty_opt == null && base_expr.kind == N_ID) {
 		let gstruct = x86_global_struct_type(g, base_expr.ref);
 		if (gstruct != null) { fld_base_ty_opt = gstruct; };
@@ -2357,6 +2567,39 @@ fn x86_field_setup(g: *codegen, fr: *x86_eval_frame, n: *tnode, base_expr: *tnod
 				} else if (ginit2 != null && unwrap(ginit2).kind == N_STRUCT_LIT) {
 					let type_ptr2 = dict_get_bref(&g.types, unwrap(ginit2).ref);
 					if (type_ptr2 != 0) { fld_base_ty = type_ptr2: uintptr: *tnode; };
+				};
+			};
+		};
+	};
+	// Final fallback for N_IDX on global arrays
+	if (!x86_type_is_struct(g, fld_base_ty) && base_expr.kind == N_IDX) {
+		let idx_arr = t_first(base_expr);
+		if (idx_arr != null) {
+			let idx_arr_nn: *tnode = unwrap(idx_arr);
+			if (idx_arr_nn.kind == N_ID) {
+				let idx_glob_ptr = dict_get_bref(&g.globals, idx_arr_nn.ref);
+				if (idx_glob_ptr != 0) {
+					let idx_gnode: *tnode = idx_glob_ptr: uintptr: *tnode;
+					if (idx_gnode.kind == N_GLOBAL) {
+						let idx_gty: nullable *tnode = null;
+						let idx_ginit: nullable *tnode = null;
+						x86_global_parts(idx_gnode, &idx_gty, &idx_ginit);
+						if (idx_gty != null) {
+							let idx_arr_ty = resolve_alias_type(g, unwrap(idx_gty));
+							if (idx_arr_ty != null) {
+								let idx_at: *tnode = unwrap(idx_arr_ty);
+								if (idx_at.kind == N_T_ARR || idx_at.kind == N_T_UARR || idx_at.kind == N_T_SLICE) {
+									let idx_elem = t_first(idx_at);
+									if (idx_elem != null) {
+										let idx_elem_resolved = resolve_alias_type(g, unwrap(idx_elem));
+										if (idx_elem_resolved != null) {
+											fld_base_ty = unwrap(idx_elem_resolved);
+										};
+									};
+								};
+							};
+						};
+					};
 				};
 			};
 		};
@@ -2652,6 +2895,22 @@ fn x86_type_size_eval(g: *codegen, ty: *tnode, elem_mode: bool) i64 = {
 		if (resolved != null) { r = unwrap(resolved); };
 
 		if (r.kind == N_T_ALIAS) {
+			// Try to look up the type definition directly
+			let type_def_ptr = dict_get_bref(&g.types, r.ref);
+			if (type_def_ptr != 0) {
+				// Found the type - push it for evaluation
+				let resolved_ty: *tnode = type_def_ptr: uintptr: *tnode;
+				type_stack[idx] = resolved_ty: uintptr;
+				continue;  // Re-evaluate with the resolved type
+			};
+			// Debug: check for specific types that should have been found
+			if (bref_match(r.ref, "unop_entry", g.t.src) ||
+				bref_match(r.ref, "type_frame", g.t.src) ||
+				bref_match(r.ref, "cursor", g.t.src) ||
+				bref_match(r.ref, "bref", g.t.src)) {
+				abort("x86_type_size_eval: failed to resolve known struct type");
+			};
+			// Fallback: use 8 for str, or x86_alias_prim_size for primitives
 			let sz_alias: i64 = 8;
 			if (bref_match(r.ref, "str", g.t.src)) { sz_alias = 16; }
 			else if (prim_mode) { sz_alias = x86_alias_prim_size(g, r.ref); };
@@ -2684,6 +2943,23 @@ fn x86_type_size_eval(g: *codegen, ty: *tnode, elem_mode: bool) i64 = {
 			} else { return sz_prim * mult_stack[idx]; };
 			continue;
 		};
+		if (r.kind == N_T_ENUM) {
+			let enum_sz: i64 = 8;
+			let base_opt = t_first(r);
+			if (base_opt != null) {
+				let base_ty: *tnode = unwrap(base_opt);
+				let base_res = resolve_alias_type(g, base_ty);
+				if (base_res != null) { base_ty = unwrap(base_res); };
+				if (base_ty.kind == N_T_PRIM) { enum_sz = x86_type_prim_size(g, base_ty); };
+			};
+			sp -= 1;
+			if (sp > 0) {
+				let acc5b = acc_stack[sp - 1];
+				acc5b += enum_sz * mult_stack[idx];
+				acc_stack[sp - 1] = acc5b;
+			} else { return enum_sz * mult_stack[idx]; };
+			continue;
+		};
 		if (r.kind == N_T_TAGGED) {
 			sp -= 1;
 			if (sp > 0) {
@@ -2705,7 +2981,8 @@ fn x86_type_size_eval(g: *codegen, ty: *tnode, elem_mode: bool) i64 = {
 		if (r.kind == N_T_ARR) {
 			let elem_opt = t_first(r);
 			let arr_count: i64 = 0;
-			let ok = arr_size_literal(r, g.t.src, &arr_count);
+			// Use x86_arr_size_with_const to handle def constants like IR_MAX_VREGS
+			let ok = x86_arr_size_with_const(g, r, &arr_count);
 			if (elem_opt == null || !ok || arr_count <= 0) {
 				sp -= 1;
 				if (sp > 0) {
@@ -2764,8 +3041,81 @@ fn x86_type_slot_size(g: *codegen, ty: *tnode) i64 = {
 fn x86_expr_is_float(g: *codegen, n: *tnode) bool = {
 	let ty_opt = get_expr_type(g, n);
 	if (ty_opt != null && x86_is_float_ty(g, unwrap(ty_opt))) { return true; };
+	if (ty_opt == null && n.kind == N_IDX) {
+		let base = t_first_nn(n);
+		let base_ty_opt = get_expr_type(g, base);
+		if (base_ty_opt != null) {
+			let base_ty: *tnode = unwrap(base_ty_opt);
+			let base_res = resolve_alias_type(g, base_ty);
+			if (base_res != null) { base_ty = unwrap(base_res); };
+			let elem_ty_opt: nullable *tnode = null;
+			if (base_ty.kind == N_T_PTR || base_ty.kind == N_T_ARR || base_ty.kind == N_T_UARR || base_ty.kind == N_T_SLICE) {
+				elem_ty_opt = t_first(base_ty);
+			};
+			if (elem_ty_opt != null) {
+				let elem_ty: *tnode = unwrap(elem_ty_opt);
+				let elem_res = resolve_alias_type(g, elem_ty);
+				if (elem_res != null) { elem_ty = unwrap(elem_res); };
+				if (x86_is_float_ty(g, elem_ty)) { return true; };
+			};
+		};
+	};
+	if (ty_opt == null && n.kind == N_BIN) {
+		let bin_lhs = t_first_nn(n);
+		let bin_rhs = t_next_nn(bin_lhs);
+		let lhs_ty_opt = get_expr_type(g, bin_lhs);
+		let rhs_ty_opt = get_expr_type(g, bin_rhs);
+		if (lhs_ty_opt != null && x86_is_float_ty(g, unwrap(lhs_ty_opt))) { return true; };
+		if (rhs_ty_opt != null && x86_is_float_ty(g, unwrap(rhs_ty_opt))) { return true; };
+	};
 	if (n.kind == N_FLOAT) { return true; };
 	return false;
+};
+
+fn x86_expr_float_bits(g: *codegen, n: *tnode) i64 = {
+	let ty_opt = get_expr_type(g, n);
+	if (ty_opt != null && x86_is_float_ty(g, unwrap(ty_opt))) {
+		if (x86_type_prim_size(g, unwrap(ty_opt)) == 4) { return 32; }
+		else { return 64; };
+	};
+	if (ty_opt == null && n.kind == N_IDX) {
+		let base = t_first_nn(n);
+		let base_ty_opt = get_expr_type(g, base);
+		if (base_ty_opt != null) {
+			let base_ty: *tnode = unwrap(base_ty_opt);
+			let base_res = resolve_alias_type(g, base_ty);
+			if (base_res != null) { base_ty = unwrap(base_res); };
+			let elem_ty_opt: nullable *tnode = null;
+			if (base_ty.kind == N_T_PTR || base_ty.kind == N_T_ARR || base_ty.kind == N_T_UARR || base_ty.kind == N_T_SLICE) {
+				elem_ty_opt = t_first(base_ty);
+			};
+			if (elem_ty_opt != null) {
+				let elem_ty: *tnode = unwrap(elem_ty_opt);
+				let elem_res = resolve_alias_type(g, elem_ty);
+				if (elem_res != null) { elem_ty = unwrap(elem_res); };
+				if (x86_is_float_ty(g, elem_ty)) {
+					if (x86_type_prim_size(g, elem_ty) == 4) { return 32; }
+					else { return 64; };
+				};
+			};
+		};
+	};
+	if (ty_opt == null && n.kind == N_BIN) {
+		let bin_lhs = t_first_nn(n);
+		let bin_rhs = t_next_nn(bin_lhs);
+		let lhs_ty_opt = get_expr_type(g, bin_lhs);
+		let rhs_ty_opt = get_expr_type(g, bin_rhs);
+		if (lhs_ty_opt != null && x86_is_float_ty(g, unwrap(lhs_ty_opt))) {
+			if (x86_type_prim_size(g, unwrap(lhs_ty_opt)) == 4) { return 32; };
+			return 64;
+		};
+		if (rhs_ty_opt != null && x86_is_float_ty(g, unwrap(rhs_ty_opt))) {
+			if (x86_type_prim_size(g, unwrap(rhs_ty_opt)) == 4) { return 32; };
+			return 64;
+		};
+	};
+	if (n.kind == N_FLOAT) { return 64; };
+	return 0;
 };
 
 fn x86_push_result(ctx: *x86_ctx, is_float: bool, is_f32: bool) void = {
@@ -2883,13 +3233,28 @@ fn x86_emit_tagged_wrap(ctx: *x86_ctx, tagged_ty: *tnode, expr: *tnode) bool = {
 	if (resolved == null || unwrap(resolved).kind != N_T_TAGGED) {
 		return x86_eval(ctx, expr, false);
 	};
+	let tagged_real: *tnode = unwrap(resolved);
 	if (expr_is_void_literal(expr, g.t.src)) {
 		err_bref(expr.ref, g.t.src, g.t.src_len, "void does not match tagged union");
 	};
 	let expr_ty_opt = get_expr_type(g, expr);
-	let tag: i64 = 0;
-	if (expr_ty_opt != null) {
-		tag = find_variant_idx(g, unwrap(resolved), unwrap(expr_ty_opt));
+	let tag: i64 = -1;
+	if (expr.kind == N_ID) {
+		let scan = t_first(tagged_real);
+		let scan_idx: i64 = 0;
+		for (scan != null) {
+			let vscan: *tnode = unwrap(scan);
+			if ((vscan.kind == N_T_ALIAS || vscan.kind == N_ID) && bref_eq(vscan.ref, expr.ref, g.t.src)) {
+				tag = scan_idx;
+				break;
+			};
+			scan = vscan.next;
+			scan_idx += 1;
+		};
+		if (tag < 0) { tag = find_variant_idx(g, tagged_real, expr); };
+	};
+	if (tag < 0 && expr_ty_opt != null) {
+		tag = find_variant_idx(g, tagged_real, unwrap(expr_ty_opt));
 	};
 	if (tag < 0) { tag = 0; };
 	let expr_is_float = false;
@@ -2924,7 +3289,23 @@ fn x86_emit_tagged_wrap(ctx: *x86_ctx, tagged_ty: *tnode, expr: *tnode) bool = {
 	let scratch_off = x86_struct_scratch_alloc(ctx);
 	x86_emit_ins_pre_i_suf(&g.em, "leaq -", scratch_off, "(%rbp), %r11");
 	x86_emit_ins_pre_i_suf(&g.em, "movq $", tag, ", (%r11)");
-	if (expr_ty_opt != null) {
+	// Write payload
+	let payload_ty: nullable *tnode = null;
+	if (expr_ty_opt != null) { payload_ty = unwrap(expr_ty_opt); };
+	let payload_is_agg = false;
+	if (payload_ty != null) {
+		let pty: *tnode = unwrap(payload_ty);
+		let pty_res = resolve_alias_type(g, pty);
+		if (pty_res != null) { pty = unwrap(pty_res); };
+		if (pty.kind == N_T_STRUCT || pty.kind == N_T_SLICE || type_is_str(pty, g.t.src) || pty.kind == N_T_TAGGED) {
+			payload_is_agg = true;
+		};
+	};
+	if (payload_is_agg) {
+		let payload_sz = x86_type_slot_size(g, unwrap(expr_ty_opt));
+		x86_emit_ins(&g.em, "leaq 8(%r11), %rcx");
+		x86_copy_struct_addr(ctx, "rcx", "rax", payload_sz);
+	} else if (expr_ty_opt != null) {
 		let expr_ty = unwrap(expr_ty_opt);
 		let sz = x86_type_prim_size(g, expr_ty);
 		if (expr_is_float) {
@@ -3000,16 +3381,46 @@ fn x86_emit_array_init(ctx: *x86_ctx, name: bref, arr_ty: *tnode, lit: *tnode) v
 	let elem_ty: *tnode = unwrap(elem_opt);
 	let elem_sz = x86_type_elem_slot_size(g, elem_ty);
 	let total_count: i64 = 0;
-	let ok = arr_size_literal(arr_ty, g.t.src, &total_count);
 	let lit_count: i64 = arr_lit_count(lit): i64;
 	let is_variadic = (lit.flags & F_VARIADIC) != 0;
-	if (!ok || total_count <= 0) { total_count = lit_count; };
+
+	// Prefer explicit array size (including inferred [_]) for variadic fills.
+	// The previous logic sometimes fell back to the literal element count,
+	// which truncated variadic arrays and broke bounds checks (see array_fill).
+	let varr = analyze_variadic_array(arr_ty, lit, g.t.src);
+	if (varr.is_variadic && varr.size_is_literal) {
+		total_count = varr.size_literal;
+	} else {
+		// Use x86_arr_size_with_const to handle def constants like IR_MAX_VREGS
+		let ok = x86_arr_size_with_const(g, arr_ty, &total_count);
+		if (!ok || total_count <= 0) { total_count = lit_count; };
+	};
+
+	x86_arr_len_set(ctx, name, total_count);
 	x86_emit_ins_pre_i_suf(&g.em, "leaq -", base_off, "(%rbp), %r11");
 
 	// Zero-fill entire array (safe for variadic literals).
-	if (total_count > 0) {
-		let elem_is_float = x86_is_float_ty(g, elem_ty);
-		let elem_is_agg = x86_type_is_struct(g, elem_ty) || x86_type_is_slice(g, elem_ty) || x86_type_is_str(g, elem_ty);
+	// For large arrays, use rep stosq to avoid generating too many instructions.
+	let total_bytes: i64 = total_count * elem_sz;
+	let elem_is_float = x86_is_float_ty(g, elem_ty);
+	let elem_is_agg = x86_type_is_struct(g, elem_ty) || x86_type_is_slice(g, elem_ty) || x86_type_is_str(g, elem_ty);
+	let used_bulk_zero = false;
+	if (total_count > 64 && !elem_is_agg && !elem_is_float) {
+		// Large array with simple elements - use rep stosq for bulk zeroing
+		x86_emit_ins(&g.em, "movq %r11, %rdi");
+		x86_emit_ins(&g.em, "xorl %eax, %eax");
+		x86_emit_ins_pre_i_suf(&g.em, "movq $", total_bytes / 8, ", %rcx");
+		x86_emit_ins(&g.em, "rep stosq");
+		// Handle remaining bytes if not 8-aligned
+		let rem = total_bytes % 8;
+		if (rem > 0) {
+			// %rdi is already at end, fill remaining bytes
+			for (let rb = 0i64; rb < rem; rb += 1) {
+				x86_emit_ins(&g.em, "stosb");
+			};
+		};
+		used_bulk_zero = true;
+	} else if (total_count > 0) {
 		if (elem_is_float) { x86_emit_ins(&g.em, "xorpd %xmm0, %xmm0"); }
 		else if (!elem_is_agg) { x86_emit_ins(&g.em, "xorl %eax, %eax"); };
 		let i = 0i64;
@@ -3028,23 +3439,26 @@ fn x86_emit_array_init(ctx: *x86_ctx, name: bref, arr_ty: *tnode, lit: *tnode) v
 		};
 	};
 
-	// Fill explicit elements.
+	// Fill explicit elements (skip if we used bulk zero - it's all zeros already).
 	let elem = t_first(lit);
 	let idx: i64 = 0;
-	for (elem != null && idx < total_count) {
-		let elem_n: *tnode = unwrap(elem);
-		let is_float = x86_eval(ctx, elem_n, false);
-		let off_fill = idx * elem_sz;
-		emit_s(&g.em, "\tmovq %r11, %rcx");
-		e_nl(&g.em);
-		if (off_fill != 0) { x86_emit_ins_pre_i_suf(&g.em, "addq $", off_fill, ", %rcx"); };
-		x86_store_to_addr(ctx, elem_ty, "%rcx", is_float);
-		idx += 1;
-		elem = elem_n.next;
+	if (!used_bulk_zero) {
+		for (elem != null && idx < total_count) {
+			let elem_n: *tnode = unwrap(elem);
+			let is_float = x86_eval(ctx, elem_n, false);
+			let off_fill = idx * elem_sz;
+			emit_s(&g.em, "\tmovq %r11, %rcx");
+			e_nl(&g.em);
+			if (off_fill != 0) { x86_emit_ins_pre_i_suf(&g.em, "addq $", off_fill, ", %rcx"); };
+			x86_store_to_addr(ctx, elem_ty, "%rcx", is_float);
+			idx += 1;
+			elem = elem_n.next;
+		};
 	};
 
 	// Variadic array fill: repeat the last element for the remainder.
-	if (is_variadic && idx < total_count) {
+	// Skip if we used bulk zero - everything is already zero-filled.
+	if (is_variadic && idx < total_count && !used_bulk_zero) {
 		let last_opt = t_last(lit);
 		if (last_opt != null) {
 			let last_expr: *tnode = unwrap(last_opt);
@@ -3218,6 +3632,41 @@ fn x86_emit_float_data(ctx: *x86_ctx, lit: *tnode, is_f32: bool) void = {
 	e_nl(&ctx.g.em);
 };
 
+// Helper: extract the target ID from an address-of expression (possibly wrapped in a cast)
+fn x86_get_addr_of_target(init: *tnode) nullable *tnode = {
+	let cur = init;
+	// Unwrap cast if present
+	if (cur.kind == N_CAST) {
+		let child_opt = t_first(cur);
+		if (child_opt != null) { cur = unwrap(child_opt); };
+	};
+	// Check for address-of (N_UN with TK_AMP)
+	if (cur.kind == N_UN && cur.ival: u16 == TK_AMP) {
+		let operand_opt = t_first(cur);
+		if (operand_opt != null) {
+			let operand: *tnode = unwrap(operand_opt);
+			if (operand.kind == N_ID) { return operand; };
+		};
+	};
+	return null;
+};
+
+// Resolve N_ID to its def constant literal value, returns null if not resolvable
+fn x86_resolve_to_literal(g: *codegen, n: *tnode) nullable *tnode = {
+	if (n.kind != N_ID) { return n; };
+	let glob_ptr = dict_get_bref(&g.globals, n.ref);
+	if (glob_ptr == 0) { return null; };
+	let gnode: *tnode = glob_ptr: uintptr: *tnode;
+	if (gnode.kind != N_DEF) { return null; };
+	let def_child = t_first(gnode);
+	if (def_child == null) { return null; };
+	// Skip type node if present
+	if (is_type_kind(unwrap(def_child).kind)) {
+		return unwrap(def_child).next;
+	};
+	return def_child;
+};
+
 fn x86_emit_scalar_data(ctx: *x86_ctx, ty: nullable *tnode, init: *tnode) void = {
 	let g = ctx.g;
 	let is_float = false;
@@ -3230,17 +3679,72 @@ fn x86_emit_scalar_data(ctx: *x86_ctx, ty: nullable *tnode, init: *tnode) void =
 			else if (tok == TK_F64) { is_float = true; };
 		};
 	};
-	if (init.kind == N_FLOAT) {
-		x86_emit_float_data(ctx, init, is_f32);
+	// Handle address-of expressions (possibly wrapped in cast): (&foo): *T
+	let addr_target = x86_get_addr_of_target(init);
+	if (addr_target != null) {
+		let target: *tnode = unwrap(addr_target);
+		emit_s(&g.em, "\t.quad ");
+		e_prefixed_id(g, target.ref);
+		e_nl(&g.em);
+		return;
+	};
+	// Resolve N_ID to its def constant value if applicable
+	let resolved_init = init;
+	if (init.kind == N_ID) {
+		let glob_ptr = dict_get_bref(&g.globals, init.ref);
+		if (glob_ptr != 0) {
+			let gnode: *tnode = glob_ptr: uintptr: *tnode;
+			if (gnode.kind == N_DEF) {
+				let def_child = t_first(gnode);
+				let def_init: nullable *tnode = null;
+				if (def_child != null && is_type_kind(unwrap(def_child).kind)) {
+					def_init = unwrap(def_child).next;
+				} else {
+					def_init = def_child;
+				};
+				if (def_init != null) { resolved_init = unwrap(def_init); };
+			};
+		};
+	};
+	// Unwrap N_CAST (typed literals like 0xu32) to get inner literal
+	if (resolved_init.kind == N_CAST) {
+		let cast_inner = t_first(resolved_init);
+		if (cast_inner != null) { resolved_init = unwrap(cast_inner); };
+	};
+	if (resolved_init.kind == N_FLOAT) {
+		x86_emit_float_data(ctx, resolved_init, is_f32);
 		return;
 	};
 	if (is_float) {
-		x86_emit_float_data(ctx, init, is_f32);
+		x86_emit_float_data(ctx, resolved_init, is_f32);
+		return;
+	};
+	// Handle string literals
+	if (node_is_str(resolved_init)) {
+		let str_label = x86_new_label(ctx);
+		emit_s(&g.em, ".section .rodata\n.L");
+		e_i(&g.em, str_label);
+		e_c(&g.em, ':');
+		e_nl(&g.em);
+		let str_len = x86_emit_str_part_bytes(ctx, resolved_init);
+		let str_child = t_first(resolved_init);
+		for (str_child != null) {
+			let sc: *tnode = unwrap(str_child);
+			str_len += x86_emit_str_part_bytes(ctx, sc);
+			str_child = sc.next;
+		};
+		emit_s(&g.em, ".data\n\t.quad .L");
+		e_i(&g.em, str_label);
+		emit_s(&g.em, "\n\t.quad ");
+		e_i(&g.em, str_len: i64);
+		e_nl(&g.em);
 		return;
 	};
 	emit_s(&g.em, "\t.quad ");
-	if (init.kind == N_INT || init.kind == N_BOOL || init.kind == N_CHAR) {
-		e_i(&g.em, init.ival);
+	if (resolved_init.kind == N_INT || resolved_init.kind == N_BOOL || resolved_init.kind == N_CHAR) {
+		e_i(&g.em, resolved_init.ival);
+	} else if (resolved_init.kind == N_NULL) {
+		emit_s(&g.em, "0");
 	} else {
 		err_bref(init.ref, g.t.src, g.t.src_len, "unsupported global initializer (expected literal)");
 	};
@@ -3258,34 +3762,110 @@ fn x86_emit_array_data(ctx: *x86_ctx, ty: *tnode, init: *tnode) void = {
 		|| x86_type_is_tagged(g, elem_ty)) {
 		elem_val_sz = x86_type_slot_size(g, elem_ty);
 	};
-	if (elem_stride < 8 && elem_val_sz <= 8) { elem_stride = 8; };
+	// Use natural element size for array data - no forced 8-byte alignment
 	let varr = analyze_variadic_array(ty, init, g.t.src);
 	let total_count: i64 = 0;
 	if (varr.is_variadic && varr.size_is_literal) {
 		total_count = varr.size_literal;
 	} else {
-		let ok = arr_size_literal(ty, g.t.src, &total_count);
+		// Use x86_arr_size_with_const to handle def constants like DICT_SIZE
+		let ok = x86_arr_size_with_const(g, ty, &total_count);
 		if (!ok) { total_count = arr_lit_count(init): i64; };
 	};
 	let emitted: i64 = 0;
+	let fill_val: i64 = 0;
+	let has_fill_val = false;
 	let child = t_first(init);
 	for (child != null) {
 		let c = unwrap(child);
-		if (c.kind == N_INT || c.kind == N_BOOL || c.kind == N_CHAR) {
-			if (elem_val_sz == 1) { emit_s(&g.em, "\t.byte "); e_i(&g.em, c.ival); e_nl(&g.em); }
-			else if (elem_val_sz == 2) { emit_s(&g.em, "\t.word "); e_i(&g.em, c.ival); e_nl(&g.em); }
-			else if (elem_val_sz == 4) { emit_s(&g.em, "\t.long "); e_i(&g.em, c.ival); e_nl(&g.em); }
-			else { emit_s(&g.em, "\t.quad "); e_i(&g.em, c.ival); e_nl(&g.em); };
-		} else if (c.kind == N_FLOAT) {
-			if (elem_val_sz == 4) { x86_emit_float_data(ctx, c, true); }
-			else { x86_emit_float_data(ctx, c, false); };
+		// Resolve N_ID to literal if it's a constant reference
+		let resolved_c = c;
+		if (c.kind == N_ID) {
+			// Look up in globals dict for DEF constants
+			for (let gi = 0z; gi < g.globals.cap; gi += 1) {
+				if (g.globals.entries[gi].occupied) {
+					if (bref_eq(g.globals.entries[gi].key, c.ref, g.globals.src)) {
+						let glob_node: *tnode = g.globals.entries[gi].value: uintptr: *tnode;
+						if (glob_node.kind == N_DEF) {
+							let def_child_opt = t_first(glob_node);
+							if (def_child_opt != null) {
+								let dc: *tnode = unwrap(def_child_opt);
+								if (is_type_kind(dc.kind)) {
+									if (dc.next != null) {
+										resolved_c = unwrap(dc.next);
+									};
+								} else {
+									resolved_c = dc;
+								};
+							};
+						};
+						break;
+					};
+				};
+			};
+			// If resolved to N_CAST (typed literal like 0xu32), unwrap to get the inner literal
+			if (resolved_c.kind == N_CAST) {
+				let cast_inner = t_first(resolved_c);
+				if (cast_inner != null) {
+					resolved_c = unwrap(cast_inner);
+				};
+			};
+		};
+		if (resolved_c.kind == N_INT || resolved_c.kind == N_BOOL || resolved_c.kind == N_CHAR) {
+			// For struct/slice/str/tagged elements with zero literal, emit full zeroed struct
+			if ((x86_type_is_struct(g, elem_ty) || x86_type_is_slice(g, elem_ty) || x86_type_is_str(g, elem_ty)
+				|| x86_type_is_tagged(g, elem_ty)) && resolved_c.ival == 0) {
+				emit_s(&g.em, "\t.zero ");
+				e_i(&g.em, elem_stride);
+				e_nl(&g.em);
+			} else if (elem_val_sz == 1) { emit_s(&g.em, "\t.byte "); e_i(&g.em, resolved_c.ival); e_nl(&g.em); }
+			else if (elem_val_sz == 2) { emit_s(&g.em, "\t.word "); e_i(&g.em, resolved_c.ival); e_nl(&g.em); }
+			else if (elem_val_sz == 4) { emit_s(&g.em, "\t.long "); e_i(&g.em, resolved_c.ival); e_nl(&g.em); }
+			else { emit_s(&g.em, "\t.quad "); e_i(&g.em, resolved_c.ival); e_nl(&g.em); };
+			// Track fill value for variadic arrays (last element is the fill)
+			fill_val = resolved_c.ival;
+			has_fill_val = true;
+		} else if (resolved_c.kind == N_FLOAT) {
+			if (elem_val_sz == 4) { x86_emit_float_data(ctx, resolved_c, true); }
+			else { x86_emit_float_data(ctx, resolved_c, false); };
+		} else if (resolved_c.kind == N_STRUCT_LIT && x86_type_is_struct(g, elem_ty)) {
+			// Recursively emit struct literal for aggregate array element
+			x86_emit_struct_data(ctx, elem_ty, resolved_c);
+		} else if (node_is_str(resolved_c) && x86_type_is_str(g, elem_ty)) {
+			// For string elements in array, emit inline string data with label
+			let str_label = x86_new_label(ctx);
+			// Emit string data in rodata, then switch back
+			emit_s(&g.em, ".section .rodata\n.L");
+			e_i(&g.em, str_label);
+			e_c(&g.em, ':');
+			e_nl(&g.em);
+			let str_len = x86_emit_str_part_bytes(ctx, resolved_c);
+			// Emit children if any (for string concatenation)
+			let str_child = t_first(resolved_c);
+			for (str_child != null) {
+				let sc: *tnode = unwrap(str_child);
+				str_len += x86_emit_str_part_bytes(ctx, sc);
+				str_child = sc.next;
+			};
+			// Switch back to data section and emit hare_str struct
+			emit_s(&g.em, ".data\n\t.quad .L");
+			e_i(&g.em, str_label);
+			emit_s(&g.em, "\n\t.quad ");
+			e_i(&g.em, str_len: i64);
+			e_nl(&g.em);
+		} else if (resolved_c.kind == N_NULL) {
+			// Emit null as zero
+			emit_s(&g.em, "\t.quad 0");
+			e_nl(&g.em);
+			fill_val = 0;
+			has_fill_val = true;
 		} else {
 			err_bref(c.ref, g.t.src, g.t.src_len, "unsupported array element initializer");
 		};
-		if (elem_stride > elem_val_sz) {
-			let pad = elem_stride - elem_val_sz;
+		if (elem_stride > elem_val_sz && resolved_c.kind != N_STRUCT_LIT) {
+			let pad_elem = elem_stride - elem_val_sz;
 			emit_s(&g.em, "\t.zero ");
-			e_i(&g.em, pad);
+			e_i(&g.em, pad_elem);
 			e_nl(&g.em);
 		};
 		emitted += 1;
@@ -3293,10 +3873,28 @@ fn x86_emit_array_data(ctx: *x86_ctx, ty: *tnode, init: *tnode) void = {
 	};
 	if (total_count > emitted) {
 		let rem = total_count - emitted;
-		let zero_bytes = rem * elem_stride;
-		emit_s(&g.em, "\t.zero ");
-		e_i(&g.em, zero_bytes);
-		e_nl(&g.em);
+		// For variadic arrays with non-zero fill, emit the fill value repeated
+		if (has_fill_val && fill_val != 0 && varr.is_variadic) {
+			let i: i64 = 0;
+			for (i < rem) {
+				if (elem_val_sz == 1) { emit_s(&g.em, "\t.byte "); e_i(&g.em, fill_val); e_nl(&g.em); }
+				else if (elem_val_sz == 2) { emit_s(&g.em, "\t.word "); e_i(&g.em, fill_val); e_nl(&g.em); }
+				else if (elem_val_sz == 4) { emit_s(&g.em, "\t.long "); e_i(&g.em, fill_val); e_nl(&g.em); }
+				else { emit_s(&g.em, "\t.quad "); e_i(&g.em, fill_val); e_nl(&g.em); };
+				if (elem_stride > elem_val_sz) {
+					let pad = elem_stride - elem_val_sz;
+					emit_s(&g.em, "\t.zero ");
+					e_i(&g.em, pad);
+					e_nl(&g.em);
+				};
+				i += 1;
+			};
+		} else {
+			let zero_bytes = rem * elem_stride;
+			emit_s(&g.em, "\t.zero ");
+			e_i(&g.em, zero_bytes);
+			e_nl(&g.em);
+		};
 	};
 };
 
@@ -3355,6 +3953,11 @@ fn x86_emit_struct_data(ctx: *x86_ctx, struct_ty: *tnode, lit: *tnode) void = {
 					lit_stack[sp] = val_node: uintptr;
 					field_stack[sp] = t_first(field_ty): uintptr;
 					sp += 1;
+					continue;
+				};
+				// Handle array field with array literal
+				if (x86_type_is_array(g, field_ty) && val_node.kind == N_ARR_LIT) {
+					x86_emit_array_data(ctx, field_ty, val_node);
 					continue;
 				};
 				x86_emit_scalar_data(ctx, field_ty, val_node);
@@ -3524,6 +4127,9 @@ fn x86_emit_arr_lit_rodata(ctx: *x86_ctx, lit: *tnode, elem_ty: *tnode, out_coun
 			else { emit_s(&g.em, "\t.quad "); e_i(&g.em, en3.ival); e_nl(&g.em); };
 		} else if (node_is_str(en3) && x86_type_is_str(g, elem_ty)) {
 			void;
+		} else if (en3.kind == N_STRUCT_LIT) {
+			// For struct literals, emit the struct data
+			x86_emit_struct_data(ctx, elem_ty, en3);
 		} else {
 			err_bref(en3.ref, g.t.src, g.t.src_len, "unsupported literal in slice literal");
 		};
@@ -3693,20 +4299,35 @@ fn x86_collect_locals_stmt(g: *codegen, n: *tnode, next_off: *i64) void = {
 			case null => void;
 			};
 			let let_sz = 8i64;
+			let var_ty: nullable *tnode = null;
 			if (let_ty != null) {
 				let_sz = x86_type_slot_size(g, unwrap(let_ty));
+				var_ty = let_ty;
 			} else if (let_init != null) {
 				let let_init_kind = unwrap(let_init).kind;
 				if (let_init_kind == N_STRUCT_LIT) {
 					let_sz = x86_struct_slot_size(g, unwrap(let_init));
+					// Create alias type for struct literal
+					var_ty = t_new_ref(g.t, N_T_ALIAS, unwrap(let_init).ref);
 				} else if (let_init_kind == N_SLICE) {
 					let_sz = 24;
+					// Slice type - need to infer element type
+					let slice_ty = get_expr_type(g, unwrap(let_init));
+					if (slice_ty != null) { var_ty = slice_ty; };
 				} else if (let_init_kind == N_STR || let_init_kind == N_RAWSTR) {
 					let_sz = 16;
+					var_ty = type_prim_dummy(g.t, TK_STR);
 				} else {
 					let let_init_ty = get_expr_type(g, unwrap(let_init));
-					if (let_init_ty != null) { let_sz = x86_type_slot_size(g, unwrap(let_init_ty)); };
+					if (let_init_ty != null) {
+						let_sz = x86_type_slot_size(g, unwrap(let_init_ty));
+						var_ty = let_init_ty;
+					};
 				};
+			};
+			// Register local variable type in g.vars for get_expr_type lookups
+			if (var_ty != null) {
+				dict_set_bref(&g.vars, cur_node.ref, unwrap(var_ty): uintptr: u64);
 			};
 			x86_alloc_local(g, cur_node.ref, let_sz, next_off);
 			if (let_init != null) { x86_collect_match_exprs(g, unwrap(let_init), next_off); };
@@ -3736,13 +4357,22 @@ fn x86_collect_locals_stmt(g: *codegen, n: *tnode, next_off: *i64) void = {
 			continue;
 		};
 		if (cur_kind == N_BLOCK) {
+			// Collect children into temp array first, then push in reverse order
+			// so they're processed in source order (stack is LIFO)
+			let block_children: [256]uintptr = [0...];
+			let block_child_count: size = 0;
 			let block_child = t_first(cur_node);
-			for (block_child != null) {
+			for (block_child != null && block_child_count < len(block_children)) {
+				block_children[block_child_count] = block_child: uintptr;
+				block_child_count += 1;
+				block_child = unwrap(block_child).next;
+			};
+			// Push in reverse order (last child first)
+			for (let i = block_child_count; i > 0; i -= 1) {
 				if (stack_top < len(stack_nodes)) {
-					stack_nodes[stack_top] = block_child: uintptr;
+					stack_nodes[stack_top] = block_children[i - 1];
 					stack_top += 1;
 				};
-				block_child = unwrap(block_child).next;
 			};
 			continue;
 		};
@@ -4125,8 +4755,36 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					x86_eval_push(stack_ptr, &sp, fld_base_addr, fld_base_want_addr);
 					continue;
 				};
-				err_bref(n.ref, g.t.src, g.t.src_len, "unsupported lvalue in x86_64 backend");
-			} else {
+				if (k == N_CAST) {
+					// Address of cast expression
+					let cast_inner_addr = t_first_nn(n);
+					let cast_ty_addr = t_next_nn(cast_inner_addr);
+					fr.cast_from_tagged = false;
+					fr.cast_payload_ty = null;
+					let cast_src_ty_opt_addr = get_expr_type(g, cast_inner_addr);
+					if (cast_src_ty_opt_addr != null && x86_type_is_tagged(g, unwrap(cast_src_ty_opt_addr))) {
+						fr.cast_from_tagged = true;
+						fr.cast_payload_ty = cast_ty_addr;
+						fr.state = 1;
+						// Need value of tagged (not address) to compute payload address.
+						x86_eval_push(stack_ptr, &sp, cast_inner_addr, false);
+						continue;
+					};
+					// Otherwise just propagate address of inner.
+					fr.state = 1;
+					x86_eval_push(stack_ptr, &sp, cast_inner_addr, true);
+					continue;
+				};
+				// Handle function call result as lvalue (for field access on returned struct).
+				// For struct-returning functions, value mode already puts address in %rax.
+				if (k == N_CALL) {
+					fr.want_addr = false;
+					// Fall through to the value-mode N_CALL handler below.
+				} else {
+					err_bref(n.ref, g.t.src, g.t.src_len, "unsupported lvalue in x86_64 backend");
+				};
+			};
+			if (!fr.want_addr) {
 				if (k == N_NULL) {
 					x86_emit_ins(&g.em, "xorl %eax, %eax");
 					last_is_float = false;
@@ -4392,6 +5050,15 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					let bin_rhs_eval = t_next_nn(bin_lhs_eval);
 					fr.use_float = x86_expr_is_float(g, bin_lhs_eval) || x86_expr_is_float(g, bin_rhs_eval);
 					fr.float_is_f32 = false;
+					let lhs_bits = x86_expr_float_bits(g, bin_lhs_eval);
+					let rhs_bits = x86_expr_float_bits(g, bin_rhs_eval);
+					if (lhs_bits != 0 || rhs_bits != 0) { fr.use_float = true; };
+					if (lhs_bits == 32 || rhs_bits == 32) { fr.float_is_f32 = true; };
+					let bin_bits = x86_expr_float_bits(g, n);
+					if (bin_bits != 0) {
+						fr.use_float = true;
+						if (bin_bits == 32) { fr.float_is_f32 = true; };
+					};
 					if (fr.use_float) {
 						let lhs_ty_opt_f32 = get_expr_type(g, bin_lhs_eval);
 						if (lhs_ty_opt_f32 != null) {
@@ -4458,13 +5125,34 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					continue;
 				};
 				if (k == N_ARR_LIT) {
+					// Lower array literals to a packed slice in .rodata so they can be
+					// consumed by slice-typed expressions (and common implicit array->slice
+					// coercions used in tests like strings::fromutf8_unsafe and inferred arrays).
+					let elem_ty_opt2: nullable *tnode = null;
 					let arr_lit_ty_opt = get_expr_type(g, n);
-					if (arr_lit_ty_opt != null && x86_type_is_slice(g, unwrap(arr_lit_ty_opt))) {
-						let slice_ty: *tnode = unwrap(arr_lit_ty_opt);
-						let elem_opt = t_first(slice_ty);
-						if (elem_opt == null) { err_bref(n.ref, g.t.src, g.t.src_len, "slice literal missing element type"); };
-						let slice_label = x86_emit_slice_from_arr_lit(ctx, n, unwrap(elem_opt));
-						emit_s(&g.em, "\tleaq .L");
+					if (arr_lit_ty_opt != null) {
+						let arr_ty_lit: *tnode = unwrap(arr_lit_ty_opt);
+						let arr_res_lit = resolve_alias_type(g, arr_ty_lit);
+						if (arr_res_lit != null) { arr_ty_lit = unwrap(arr_res_lit); };
+						if (arr_ty_lit.kind == N_T_SLICE || arr_ty_lit.kind == N_T_ARR || arr_ty_lit.kind == N_T_UARR) {
+							elem_ty_opt2 = t_first(arr_ty_lit);
+						};
+					};
+				if (elem_ty_opt2 == null) {
+					// Fallback: infer element type from literal context by looking at first child.
+					let first_elem = t_first(n);
+					if (first_elem != null) {
+						elem_ty_opt2 = get_expr_type(g, unwrap(first_elem));
+						// If still unknown (e.g., bare byte/char literals feeding strings::fromutf8_unsafe),
+						// assume a byte array to allow lowering to rodata for str/slice paths.
+						if (elem_ty_opt2 == null) {
+							elem_ty_opt2 = type_prim_dummy(g.t, TK_U8);
+						};
+					};
+				};
+				if (elem_ty_opt2 != null) {
+					let slice_label = x86_emit_slice_from_arr_lit(ctx, n, unwrap(elem_ty_opt2));
+					emit_s(&g.em, "\tleaq .L");
 						e_i(&g.em, slice_label);
 						emit_s(&g.em, "(%rip), %rax");
 						e_nl(&g.em);
@@ -4473,6 +5161,35 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 						continue;
 					};
 					err_bref(n.ref, g.t.src, g.t.src_len, "array literal not supported in x86_64 backend");
+				};
+				if (k == N_SIZE) {
+					let size_ty_opt = t_first(n);
+					let sz_bytes: i64 = 0;
+					if (size_ty_opt != null) {
+						let ty_sz: *tnode = unwrap(size_ty_opt);
+						let ty_res = resolve_alias_type(g, ty_sz);
+						if (ty_res != null) { ty_sz = unwrap(ty_res); };
+						if (ty_sz.kind == N_T_PRIM) {
+							sz_bytes = x86_type_prim_size(g, ty_sz);
+						} else if (ty_sz.kind == N_T_ALIAS) {
+							sz_bytes = x86_alias_prim_size(g, ty_sz.ref);
+						} else if (ty_sz.kind == N_T_ARR) {
+							let elem_opt_sz = t_first(ty_sz);
+							let count_sz: i64 = 0;
+							if (elem_opt_sz != null && arr_size_literal(ty_sz, g.t.src, &count_sz)) {
+								let elem_ty_sz: *tnode = unwrap(elem_opt_sz);
+								sz_bytes = x86_type_elem_slot_size(g, elem_ty_sz) * count_sz;
+							} else {
+								sz_bytes = x86_type_slot_size(g, ty_sz);
+							};
+						} else {
+							sz_bytes = x86_type_slot_size(g, ty_sz);
+						};
+					};
+					x86_emit_ins_pre_i_suf(&g.em, "movq $", sz_bytes, ", %rax");
+					last_is_float = false;
+					sp -= 1;
+					continue;
 				};
 				if (k == N_FLD) {
 					let fld_base_eval = t_first_nn(n);
@@ -4509,7 +5226,7 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 						};
 					};
 					let arr_len: i64 = 0;
-					if (x86_array_len_from_base(g, len_expr, &arr_len)) {
+					if (x86_array_len_from_base(ctx, len_expr, &arr_len)) {
 						x86_emit_ins_pre_i_suf(&g.em, "movq $", arr_len, ", %rax");
 						last_is_float = false;
 						sp -= 1;
@@ -4593,7 +5310,7 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 						fr.arg_kind[arg_i] = kind;
 						fr.arg_is_float[arg_i] = kind == X86_ARG_FLOAT;
 						let slots: u8 = 1;
-						if (kind == X86_ARG_STR || kind == X86_ARG_TAGGED) { slots = 2; }
+						if (kind == X86_ARG_STR || kind == X86_ARG_STRUCT16) { slots = 2; }
 						else if (kind == X86_ARG_SLICE) { slots = 3; };
 						fr.arg_slots[arg_i] = slots;
 						fr.arg_scratch[arg_i] = fr.scratch_next;
@@ -4647,6 +5364,26 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					sp -= 1;
 					continue;
 				};
+				if (k == N_CAST) {
+					if (fr.cast_from_tagged && fr.cast_payload_ty != null) {
+						let payload_ty_addr = unwrap(fr.cast_payload_ty);
+						let payload_res_addr = resolve_alias_type(g, payload_ty_addr);
+						if (payload_res_addr != null) { payload_ty_addr = unwrap(payload_res_addr); };
+						// For aggregates, return address of payload; primitives are not addressable here.
+						x86_emit_ins(&g.em, "leaq 8(%rax), %rax");
+						last_is_float = false;
+						sp -= 1;
+						continue;
+					};
+					last_is_float = false;
+					sp -= 1;
+					continue;
+				};
+				if (k == N_CAST) {
+					last_is_float = false;
+					sp -= 1;
+					continue;
+				};
 			} else {
 				if (k == N_ID && fr.init_node != null) {
 					sp -= 1;
@@ -4659,9 +5396,12 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 						sp -= 1;
 						continue;
 					};
-					if (un_op_eval2 == TK_STAR) {
+										if (un_op_eval2 == TK_STAR) {
 						let un_ty_opt_eval2 = get_expr_type(g, n);
-						if (un_ty_opt_eval2 != null) { last_is_float = x86_load_from_addr(ctx, unwrap(un_ty_opt_eval2)); }
+						if (un_ty_opt_eval2 != null && x86_type_is_aggregate(g, unwrap(un_ty_opt_eval2))) {
+							// For aggregates, keep address in %rax after dereference
+							last_is_float = false;
+						} else if (un_ty_opt_eval2 != null) { last_is_float = x86_load_from_addr(ctx, unwrap(un_ty_opt_eval2)); }
 						else {
 							x86_emit_ins(&g.em, "movq (%rax), %rax");
 							last_is_float = false;
@@ -4716,6 +5456,15 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					let cast_ty_eval2 = t_next_nn(cast_inner_eval2);
 					if (fr.cast_from_tagged && fr.cast_payload_ty != null) {
 						let payload_ty = unwrap(fr.cast_payload_ty);
+						let payload_res = resolve_alias_type(g, payload_ty);
+						if (payload_res != null) { payload_ty = unwrap(payload_res); };
+						if (payload_ty.kind == N_T_STRUCT || payload_ty.kind == N_T_SLICE || type_is_str(payload_ty, g.t.src) || payload_ty.kind == N_T_TAGGED) {
+							// For aggregate payloads, yield pointer to payload region.
+							x86_emit_ins(&g.em, "leaq 8(%rax), %rax");
+							last_is_float = false;
+							sp -= 1;
+							continue;
+						};
 						if (x86_is_float_ty(g, payload_ty)) {
 							let psz_float = x86_type_prim_size(g, payload_ty);
 							if (psz_float == 4) { x86_emit_ins(&g.em, "movss 8(%rax), %xmm0"); }
@@ -4851,7 +5600,8 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					if (fr.field_off != 0) { x86_emit_ins_pre_i_suf(&g.em, "addq $", fr.field_off, ", %rax"); };
 					match (fr.field_ty) {
 					case let fld_ty: *tnode =>
-						if (x86_type_is_str(g, fld_ty) || x86_type_is_slice(g, fld_ty)) {
+						// For aggregates, keep address in %rax.
+						if (x86_type_is_aggregate(g, fld_ty)) {
 							last_is_float = false;
 						} else {
 							last_is_float = x86_load_from_addr(ctx, fld_ty);
@@ -4867,11 +5617,88 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					let arg_idx_eval = fr.arg_index: size;
 					let arg_kind_eval = fr.arg_kind[arg_idx_eval];
 					let scratch_idx_eval = fr.arg_scratch[arg_idx_eval];
-					let arg_off_eval = fr.call_scratch_base + (scratch_idx_eval: i64) * 8;
+						let arg_off_eval = fr.call_scratch_base + (scratch_idx_eval: i64) * 8;
+						if (arg_kind_eval == X86_ARG_TAGGED) {
+							let expected_ptr_call = fr.arg_expected[arg_idx_eval];
+							let expected_tagged: nullable *tnode = null;
+							if (expected_ptr_call != 0) { expected_tagged = expected_ptr_call: uintptr: *tnode; };
+						let src_ty_opt_call = get_expr_type(g, fr.arg_nodes[arg_idx_eval]: uintptr: *tnode);
+						let need_wrap = true;
+						if (src_ty_opt_call != null) {
+							let src_ty_call: *tnode = unwrap(src_ty_opt_call);
+							let src_res_call = resolve_alias_type(g, src_ty_call);
+							if (src_res_call != null) { src_ty_call = unwrap(src_res_call); };
+							if (x86_type_is_tagged(g, src_ty_call)) { need_wrap = false; };
+						};
+						if (need_wrap && expected_tagged != null) {
+							let tag_ty = unwrap(expected_tagged);
+							let tag_ty_res = resolve_alias_type(g, tag_ty);
+							if (tag_ty_res != null) { tag_ty = unwrap(tag_ty_res); };
+							let payload_ty_wrap: nullable *tnode = null;
+							if (src_ty_opt_call != null) {
+								let pty0: *tnode = unwrap(src_ty_opt_call);
+								let pres0 = resolve_alias_type(g, pty0);
+								if (pres0 != null) { pty0 = unwrap(pres0); };
+								payload_ty_wrap = pty0;
+							};
+							let tag_val_wrap: i64 = -1;
+							let arg_expr_wrap: *tnode = fr.arg_nodes[arg_idx_eval]: *tnode;
+							if (arg_expr_wrap.kind == N_ID) {
+								let scan_wrap = t_first(tag_ty);
+								let scan_idx_wrap: i64 = 0;
+								for (scan_wrap != null) {
+									let vscan_wrap: *tnode = unwrap(scan_wrap);
+									if ((vscan_wrap.kind == N_T_ALIAS || vscan_wrap.kind == N_ID) && bref_eq(vscan_wrap.ref, arg_expr_wrap.ref, g.t.src)) {
+										tag_val_wrap = scan_idx_wrap;
+										break;
+									};
+									scan_wrap = vscan_wrap.next;
+									scan_idx_wrap += 1;
+								};
+								if (tag_val_wrap < 0) { tag_val_wrap = find_variant_idx(g, tag_ty, arg_expr_wrap); };
+							};
+							if (tag_val_wrap < 0 && payload_ty_wrap != null) {
+								tag_val_wrap = find_variant_idx(g, tag_ty, unwrap(src_ty_opt_call));
+							};
+							if (tag_val_wrap < 0) { tag_val_wrap = 0; };
+							let scratch_off_wrap = x86_struct_scratch_alloc(ctx);
+							x86_emit_ins_pre_i_suf(&g.em, "leaq -", scratch_off_wrap, "(%rbp), %r11");
+							x86_emit_ins_pre_i_suf(&g.em, "movq $", tag_val_wrap, ", (%r11)");
+							let is_agg_wrap = false;
+							if (payload_ty_wrap != null) {
+								let ptyw = unwrap(payload_ty_wrap);
+								let ptyw_res = resolve_alias_type(g, ptyw);
+								if (ptyw_res != null) { ptyw = unwrap(ptyw_res); };
+								if (ptyw.kind == N_T_STRUCT || ptyw.kind == N_T_SLICE || type_is_str(ptyw, g.t.src) || ptyw.kind == N_T_TAGGED) {
+									is_agg_wrap = true;
+								};
+							};
+							if (payload_ty_wrap != null && is_agg_wrap) {
+								let payload_sz_wrap = x86_type_slot_size(g, unwrap(payload_ty_wrap));
+								x86_emit_ins(&g.em, "leaq 8(%r11), %rcx");
+								x86_copy_struct_addr(ctx, "rcx", "rax", payload_sz_wrap);
+							} else if (payload_ty_wrap != null) {
+								let sz_wrap = x86_type_prim_size(g, unwrap(payload_ty_wrap));
+								let is_float_wrap = last_is_float && x86_is_float_ty(g, unwrap(payload_ty_wrap));
+								if (is_float_wrap) {
+									if (sz_wrap == 4) { x86_emit_ins(&g.em, "movss %xmm0, 8(%r11)"); }
+									else { x86_emit_ins(&g.em, "movsd %xmm0, 8(%r11)"); };
+								} else {
+									if (sz_wrap == 1) { x86_emit_ins(&g.em, "movb %al, 8(%r11)"); }
+									else if (sz_wrap == 2) { x86_emit_ins(&g.em, "movw %ax, 8(%r11)"); }
+									else if (sz_wrap == 4) { x86_emit_ins(&g.em, "movl %eax, 8(%r11)"); }
+									else { x86_emit_ins(&g.em, "movq %rax, 8(%r11)"); };
+								};
+							};
+							x86_emit_ins_pre_i_suf(&g.em, "leaq -", scratch_off_wrap, "(%rbp), %rax");
+							last_is_float = false;
+						};
+					};
 					if (arg_kind_eval == X86_ARG_FLOAT) {
 						if (!last_is_float) { x86_emit_ins(&g.em, "cvtsi2sd %rax, %xmm0"); };
 						x86_emit_ins_pre_i_suf(&g.em, "movsd %xmm0, -", arg_off_eval, "(%rbp)");
-					} else if (arg_kind_eval == X86_ARG_STR) {
+					} else if (arg_kind_eval == X86_ARG_STR || arg_kind_eval == X86_ARG_STRUCT16) {
+						// 16-byte aggregates (str, small struct): copy both qwords from address in %rax
 						x86_emit_ins(&g.em, "movq %rax, %r11");
 						x86_emit_ins(&g.em, "movq (%r11), %r10");
 						x86_emit_ins_pre_i_suf(&g.em, "movq %r10, -", arg_off_eval, "(%rbp)");
@@ -4886,8 +5713,9 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 						x86_emit_ins(&g.em, "movq 16(%r11), %r10");
 						x86_emit_ins_pre_i_suf(&g.em, "movq %r10, -", arg_off_eval + 16, "(%rbp)");
 					} else if (arg_kind_eval == X86_ARG_TAGGED) {
-						x86_emit_ins_pre_i_suf(&g.em, "leaq -", arg_off_eval, "(%rbp), %r11");
-						x86_copy_struct_addr(ctx, "r11", "rax", 16);
+						// Pass tagged values as pointers; just stash the address.
+						x86_emit_ins_pre_i_suf(&g.em, "movq %rax, -", arg_off_eval, "(%rbp)");
+						last_is_float = false;
 					} else {
 						x86_emit_ins_pre_i_suf(&g.em, "movq %rax, -", arg_off_eval, "(%rbp)");
 					};
@@ -5093,7 +5921,9 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					};
 					x86_emit_ins(&g.em, "addq %rcx, %r11");
 					x86_emit_ins(&g.em, "movq %r11, %rax");
-					if (fr.idx_elem_ty != null && (x86_type_is_str(g, unwrap(fr.idx_elem_ty)) || x86_type_is_slice(g, unwrap(fr.idx_elem_ty)))) {
+					// For aggregates (str, slice, struct, array, tagged, unresolved aliases),
+					// keep address in %rax. These are passed by reference in the System V ABI.
+					if (fr.idx_elem_ty != null && x86_type_is_aggregate(g, unwrap(fr.idx_elem_ty))) {
 						last_is_float = false;
 					} else if (fr.idx_elem_ty != null) {
 						last_is_float = x86_load_from_addr(ctx, unwrap(fr.idx_elem_ty));
@@ -5130,17 +5960,31 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					let ret_is_str = false;
 					let ret_is_float = false;
 					let ret_is_tagged = false;
+					let ret_is_struct_small = false;
+					let ret_is_struct_big = false;
+					let ret_struct_sz: i64 = 0;
 					if (call_ret_ty_opt_eval != null) {
 						let ret_ty_eval: *tnode = unwrap(call_ret_ty_opt_eval);
 						let ret_res = resolve_alias_type(g, ret_ty_eval);
 						if (ret_res != null) { ret_ty_eval = unwrap(ret_res); };
 						if (ret_ty_eval.kind == N_T_SLICE) { ret_is_slice = true; }
 						else if (ret_ty_eval.kind == N_T_TAGGED) { ret_is_tagged = true; }
+						else if (ret_ty_eval.kind == N_T_STRUCT) {
+							ret_struct_sz = x86_type_slot_size(g, ret_ty_eval);
+							if (ret_struct_sz <= 16) { ret_is_struct_small = true; }
+							else { ret_is_struct_big = true; };
+						}
+						else if (x86_type_is_struct(g, ret_ty_eval)) {
+							ret_struct_sz = x86_type_slot_size(g, ret_ty_eval);
+							if (ret_struct_sz <= 16) { ret_is_struct_small = true; }
+							else { ret_is_struct_big = true; };
+						}
 						else if (type_is_str(ret_ty_eval, g.t.src)) { ret_is_str = true; }
 						else if (x86_is_float_ty(g, ret_ty_eval)) { ret_is_float = true; };
 					};
 					let int_start: i64 = 0;
-					if (ret_is_slice || ret_is_tagged) { int_start = 1; };
+					let ret_needs_sret = ret_is_slice || ret_is_tagged || ret_is_struct_big;
+					if (ret_needs_sret) { int_start = 1; };
 					let int_tmp: i64 = int_start;
 					let float_tmp: i64 = 0;
 					let stack_bytes: i64 = 0;
@@ -5151,7 +5995,7 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 						} else if (kind_i == X86_ARG_STR) {
 							if (int_tmp <= 4) { int_tmp += 2; } else { stack_bytes += 16; };
 						} else if (kind_i == X86_ARG_TAGGED) {
-							if (int_tmp <= 4) { int_tmp += 2; } else { stack_bytes += 16; };
+							if (int_tmp < 6) { int_tmp += 1; } else { stack_bytes += 8; };
 						} else if (kind_i == X86_ARG_SLICE) {
 							stack_bytes += 24;
 						} else {
@@ -5164,16 +6008,16 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 					if (need_pad) { total_sub += 8; };
 					if (total_sub > 0) { x86_emit_ins_pre_i_suf(&g.em, "subq $", total_sub, ", %rsp"); };
 					let ret_off: i64 = 0;
-					if (ret_is_slice || ret_is_tagged) {
+					if (ret_needs_sret) {
 						ret_off = x86_struct_scratch_alloc(ctx);
 						x86_emit_ins_pre_i_suf(&g.em, "leaq -", ret_off, "(%rbp), %rdi");
 					};
 					let call_int_idx_eval = int_start;
 					let call_float_idx_eval = 0i64;
 					let stack_off: i64 = 0;
-					for (let i2 = 0z; i2 < fr.arg_count: size; i2 += 1) {
-						let call_arg_kind_i2 = fr.arg_kind[i2];
-						let call_arg_scratch_i2 = fr.arg_scratch[i2];
+					for (let arg_call_idx = 0z; arg_call_idx < fr.arg_count: size; arg_call_idx += 1) {
+						let call_arg_kind_i2 = fr.arg_kind[arg_call_idx];
+						let call_arg_scratch_i2 = fr.arg_scratch[arg_call_idx];
 						let call_arg_off_i2 = fr.call_scratch_base + (call_arg_scratch_i2: i64) * 8;
 						if (call_arg_kind_i2 == X86_ARG_FLOAT) {
 							if (call_float_idx_eval == 0) { x86_emit_ins_pre_i_suf(&g.em, "movsd -", call_arg_off_i2, "(%rbp), %xmm0"); call_float_idx_eval += 1; }
@@ -5218,19 +6062,19 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 								e_nl(&g.em);
 								stack_off += 16;
 							};
-						} else if (call_arg_kind_i2 == X86_ARG_TAGGED) {
-							let payload_off = call_arg_off_i2 - 8;
+						} else if (call_arg_kind_i2 == X86_ARG_STRUCT16) {
+							// Small struct (16 bytes) - same as str, use 2 registers.
 							if (call_int_idx_eval <= 4) {
 								if (call_int_idx_eval == 0) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %rdi"); }
 								else if (call_int_idx_eval == 1) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %rsi"); }
 								else if (call_int_idx_eval == 2) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %rdx"); }
 								else if (call_int_idx_eval == 3) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %rcx"); }
 								else if (call_int_idx_eval == 4) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %r8"); };
-								if (call_int_idx_eval == 0) { x86_emit_ins_pre_i_suf(&g.em, "movq -", payload_off, "(%rbp), %rsi"); }
-								else if (call_int_idx_eval == 1) { x86_emit_ins_pre_i_suf(&g.em, "movq -", payload_off, "(%rbp), %rdx"); }
-								else if (call_int_idx_eval == 2) { x86_emit_ins_pre_i_suf(&g.em, "movq -", payload_off, "(%rbp), %rcx"); }
-								else if (call_int_idx_eval == 3) { x86_emit_ins_pre_i_suf(&g.em, "movq -", payload_off, "(%rbp), %r8"); }
-								else if (call_int_idx_eval == 4) { x86_emit_ins_pre_i_suf(&g.em, "movq -", payload_off, "(%rbp), %r9"); };
+								if (call_int_idx_eval == 0) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2 + 8, "(%rbp), %rsi"); }
+								else if (call_int_idx_eval == 1) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2 + 8, "(%rbp), %rdx"); }
+								else if (call_int_idx_eval == 2) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2 + 8, "(%rbp), %rcx"); }
+								else if (call_int_idx_eval == 3) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2 + 8, "(%rbp), %r8"); }
+								else if (call_int_idx_eval == 4) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2 + 8, "(%rbp), %r9"); };
 								call_int_idx_eval += 2;
 							} else {
 								x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %r10");
@@ -5238,12 +6082,28 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 								e_i(&g.em, stack_off);
 								emit_s(&g.em, "(%rsp)");
 								e_nl(&g.em);
-								x86_emit_ins_pre_i_suf(&g.em, "movq -", payload_off, "(%rbp), %r10");
+								x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2 + 8, "(%rbp), %r10");
 								emit_s(&g.em, "\tmovq %r10, ");
 								e_i(&g.em, stack_off + 8);
 								emit_s(&g.em, "(%rsp)");
 								e_nl(&g.em);
 								stack_off += 16;
+							};
+						} else if (call_arg_kind_i2 == X86_ARG_TAGGED) {
+							// Tagged args are passed by pointer (single int slot).
+							if (call_int_idx_eval == 0) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %rdi"); call_int_idx_eval += 1; }
+							else if (call_int_idx_eval == 1) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %rsi"); call_int_idx_eval += 1; }
+							else if (call_int_idx_eval == 2) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %rdx"); call_int_idx_eval += 1; }
+							else if (call_int_idx_eval == 3) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %rcx"); call_int_idx_eval += 1; }
+							else if (call_int_idx_eval == 4) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %r8"); call_int_idx_eval += 1; }
+							else if (call_int_idx_eval == 5) { x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %r9"); call_int_idx_eval += 1; }
+							else {
+								x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %r10");
+								emit_s(&g.em, "\tmovq %r10, ");
+								e_i(&g.em, stack_off);
+								emit_s(&g.em, "(%rsp)");
+								e_nl(&g.em);
+								stack_off += 8;
 							};
 						} else if (call_arg_kind_i2 == X86_ARG_SLICE) {
 							x86_emit_ins_pre_i_suf(&g.em, "movq -", call_arg_off_i2, "(%rbp), %r10");
@@ -5327,7 +6187,7 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 						err_bref(call_fn_eval2.ref, g.t.src, g.t.src_len, "unsupported call target");
 					};
 					if (total_sub > 0) { x86_emit_ins_pre_i_suf(&g.em, "addq $", total_sub, ", %rsp"); };
-					if (ret_is_slice || ret_is_tagged) {
+					if (ret_needs_sret) {
 						x86_emit_ins_pre_i_suf(&g.em, "leaq -", ret_off, "(%rbp), %rax");
 						last_is_float = false;
 					} else if (ret_is_str) {
@@ -5335,6 +6195,13 @@ fn x86_eval(ctx: *x86_ctx, root: *tnode, want_addr: bool) bool = {
 						x86_emit_ins_pre_i_suf(&g.em, "leaq -", str_off, "(%rbp), %r11");
 						x86_emit_ins(&g.em, "movq %rax, (%r11)");
 						x86_emit_ins(&g.em, "movq %rdx, 8(%r11)");
+						x86_emit_ins(&g.em, "movq %r11, %rax");
+						last_is_float = false;
+					} else if (ret_is_struct_small) {
+						let struct_off_ret = x86_struct_scratch_alloc(ctx);
+						x86_emit_ins_pre_i_suf(&g.em, "leaq -", struct_off_ret, "(%rbp), %r11");
+						x86_emit_ins(&g.em, "movq %rax, (%r11)");
+						if (ret_struct_sz > 8) { x86_emit_ins(&g.em, "movq %rdx, 8(%r11)"); };
 						x86_emit_ins(&g.em, "movq %r11, %rax");
 						last_is_float = false;
 					} else {
@@ -5404,17 +6271,20 @@ fn x86_emit_let(ctx: *x86_ctx, n: *tnode) void = {
 		};
 	case null => void;
 	};
-	if (let_has_type_emit) {
-		vars_register(g, n.ref, unwrap(let_ty_emit): uintptr: u64);
-	} else if (let_init_emit != null) {
-		let let_inferred_emit = get_expr_type(g, unwrap(let_init_emit));
-		if (let_inferred_emit != null) {
-			vars_register(g, n.ref, unwrap(let_inferred_emit): uintptr: u64);
+	// Register variable type in g.vars if not already registered during collection
+	if (!dict_has_bref(&g.vars, n.ref)) {
+		if (let_has_type_emit) {
+			vars_register(g, n.ref, unwrap(let_ty_emit): uintptr: u64);
+		} else if (let_init_emit != null) {
+			let let_inferred_emit = get_expr_type(g, unwrap(let_init_emit));
+			if (let_inferred_emit != null) {
+				vars_register(g, n.ref, unwrap(let_inferred_emit): uintptr: u64);
+			} else {
+				vars_register(g, n.ref, 0);
+			};
 		} else {
 			vars_register(g, n.ref, 0);
 		};
-	} else {
-		vars_register(g, n.ref, 0);
 	};
 	if (is_static) { return; };
 	if (let_init_emit != null) {
@@ -5872,12 +6742,35 @@ fn x86_stmt(ctx: *x86_ctx, root: *tnode) void = {
 			let ret_child_eval = t_first(n);
 			if (ret_child_eval != null) {
 				let ret_rv_eval: *tnode = unwrap(ret_child_eval);
-				if (ctx.sret_off != 0) {
+				let ret_sz_rt: i64 = 0;
+				let ret_is_struct_small_rt = false;
+				let ret_is_tagged_rt = false;
+				if (ctx.ret_ty != null && x86_type_is_tagged(g, unwrap(ctx.ret_ty))) { ret_is_tagged_rt = true; };
+				if (ctx.ret_ty != null && x86_type_is_struct(g, unwrap(ctx.ret_ty))) {
+					ret_sz_rt = x86_type_slot_size(g, unwrap(ctx.ret_ty));
+					if (ret_sz_rt <= 16) { ret_is_struct_small_rt = true; };
+				};
+				if (ret_is_tagged_rt) {
+					x86_emit_tagged_wrap(ctx, unwrap(ctx.ret_ty), ret_rv_eval);
+					if (ctx.sret_off != 0) {
+						x86_emit_ins_pre_i_suf(&g.em, "movq -", ctx.sret_off, "(%rbp), %r11");
+						x86_copy_struct_addr(ctx, "r11", "rax", 16);
+					};
+				} else if (ctx.sret_off != 0) {
 					x86_eval_with_expected(ctx, ret_rv_eval, ctx.ret_ty);
 					x86_emit_ins_pre_i_suf(&g.em, "movq -", ctx.sret_off, "(%rbp), %r11");
-					let ret_sz = 24i64;
-					if (ctx.ret_ty != null) { ret_sz = x86_type_slot_size(g, unwrap(ctx.ret_ty)); };
+					let ret_sz = ret_sz_rt;
+					if (ret_sz == 0) { ret_sz = 24; };
 					x86_copy_struct_addr(ctx, "r11", "rax", ret_sz);
+				} else if (ret_is_struct_small_rt) {
+					x86_eval_with_expected(ctx, ret_rv_eval, ctx.ret_ty);
+					if (ret_sz_rt <= 8) {
+						x86_emit_ins(&g.em, "movq (%rax), %rax");
+					} else {
+						x86_emit_ins(&g.em, "movq %rax, %r10");
+						x86_emit_ins(&g.em, "movq 0(%r10), %rax");
+						x86_emit_ins(&g.em, "movq 8(%r10), %rdx");
+					};
 				} else {
 					let ret_rty_eval = get_expr_type(g, ret_rv_eval);
 					if (ret_rty_eval != null && x86_type_is_str(g, unwrap(ret_rty_eval))) {
@@ -6190,32 +7083,45 @@ fn x86_stmt(ctx: *x86_ctx, root: *tnode) void = {
 					fr.match_is_tagged = false;
 					fr.match_tagged_ty = null;
 				};
-				if (fr.match_is_nullable) {
-					for (let i = 0z; i < fr.case_count: size; i += 1) {
-						let match_case_n_eval2: *tnode = fr.case_nodes[i]: *tnode;
-						let match_lbl_eval2 = fr.case_labels[i];
-						if (case_is_default(match_case_n_eval2)) { continue; };
-						let match_first_child_eval = t_first(match_case_n_eval2);
-						let match_is_null_eval = node_is_kind(match_first_child_eval, N_NULL);
-						x86_emit_ins_pre_i_suf(&g.em, "movq -", match_scratch_eval, "(%rbp), %rax");
-						x86_emit_ins(&g.em, "cmpq $0, %rax");
-						if (match_is_null_eval) { x86_emit_jmp(&g.em, "je", match_lbl_eval2); }
-						else { x86_emit_jmp(&g.em, "jne", match_lbl_eval2); };
-					};
-				} else if (fr.match_is_tagged && fr.match_tagged_ty != null) {
-					for (let i = 0z; i < fr.case_count: size; i += 1) {
-						let match_case_n_eval3: *tnode = fr.case_nodes[i]: *tnode;
-						let match_lbl_eval3 = fr.case_labels[i];
+					if (fr.match_is_nullable) {
+						for (let case_i = 0z; case_i < fr.case_count: size; case_i += 1) {
+							let match_case_n_eval2: *tnode = fr.case_nodes[case_i]: *tnode;
+							let match_lbl_eval2 = fr.case_labels[case_i];
+							if (case_is_default(match_case_n_eval2)) { continue; };
+							let match_first_child_eval = t_first(match_case_n_eval2);
+							let match_is_null_eval = node_is_kind(match_first_child_eval, N_NULL);
+							x86_emit_ins_pre_i_suf(&g.em, "movq -", match_scratch_eval, "(%rbp), %rax");
+							x86_emit_ins(&g.em, "cmpq $0, %rax");
+							if (match_is_null_eval) { x86_emit_jmp(&g.em, "je", match_lbl_eval2); }
+							else { x86_emit_jmp(&g.em, "jne", match_lbl_eval2); };
+						};
+					} else if (fr.match_is_tagged && fr.match_tagged_ty != null) {
+						for (let case_j = 0z; case_j < fr.case_count: size; case_j += 1) {
+							let match_case_n_eval3: *tnode = fr.case_nodes[case_j]: *tnode;
+							let match_lbl_eval3 = fr.case_labels[case_j];
 						if (case_is_default(match_case_n_eval3)) { continue; };
 						let match_case_type_eval = t_first(match_case_n_eval3);
 						if (case_has_binding(match_case_n_eval3) && match_case_type_eval != null) { match_case_type_eval = t_first(unwrap(match_case_type_eval)); };
 						if (match_case_type_eval == null) { continue; };
-					let match_tag_eval_val: i64 = 0;
+						let match_case_ty_nn: *tnode = unwrap(match_case_type_eval);
+					let match_tag_eval_val: i64 = -1;
 					match (fr.match_tagged_ty) {
 					case let tagged_ty: *tnode =>
-						match (match_case_type_eval) {
-						case let mty: *tnode => match_tag_eval_val = find_variant_idx(g, tagged_ty, mty);
-						case null => void;
+						if (match_case_ty_nn.kind == N_ID || match_case_ty_nn.kind == N_T_ALIAS) {
+							let scan_match = t_first(tagged_ty);
+							let scan_idx_match: i64 = 0;
+							for (scan_match != null) {
+								let vscan_match: *tnode = unwrap(scan_match);
+								if ((vscan_match.kind == N_T_ALIAS || vscan_match.kind == N_ID) && bref_eq(vscan_match.ref, match_case_ty_nn.ref, g.t.src)) {
+									match_tag_eval_val = scan_idx_match;
+									break;
+								};
+								scan_match = vscan_match.next;
+								scan_idx_match += 1;
+							};
+						};
+						if (match_tag_eval_val < 0) {
+							match_tag_eval_val = find_variant_idx(g, tagged_ty, match_case_ty_nn);
 						};
 					case null => void;
 					};
@@ -6400,13 +7306,19 @@ fn x86_emit_fn(ctx: *x86_ctx, n: *tnode) void = {
 	if (ret_type != null) { body = t_next_nn(unwrap(ret_type)); };
 	// Pre-scan locals
 	x86_collect_locals_stmt(g, body, &next_off);
-	// Reserve sret pointer slot if needed (slice return)
+	// Reserve sret pointer slot if needed (slice/tagged/large struct return)
 	let ret_is_slice = false;
 	let ret_is_tagged = false;
+	let ret_struct_sz: i64 = 0;
+	let ret_is_struct_big = false;
 	if (ret_type != null && x86_type_is_slice(g, unwrap(ret_type))) { ret_is_slice = true; };
 	if (ret_type != null && x86_type_is_tagged(g, unwrap(ret_type))) { ret_is_tagged = true; };
+	if (ret_type != null && x86_type_is_struct(g, unwrap(ret_type))) {
+		ret_struct_sz = x86_type_slot_size(g, unwrap(ret_type));
+		if (ret_struct_sz > 16) { ret_is_struct_big = true; };
+	};
 	ctx.sret_off = 0;
-	if (ret_is_slice || ret_is_tagged) {
+	if (ret_is_slice || ret_is_tagged || ret_is_struct_big) {
 		ctx.sret_off = x86_alloc_temp(&next_off, 8);
 	};
 	// Reserve scratch slots for call args and struct temps (rbp-relative)
@@ -6415,24 +7327,17 @@ fn x86_emit_fn(ctx: *x86_ctx, n: *tnode) void = {
 	ctx.call_scratch_slots = 8;
 	ctx.call_scratch_depth = 0;
 	ctx.struct_scratch_base = ctx.call_scratch_base + (ctx.call_scratch_stride * ctx.call_scratch_slots);
-	ctx.struct_scratch_slots = 32;
+	ctx.struct_scratch_slots = 4096;
 	ctx.struct_scratch_stride = 24;
 	ctx.struct_scratch_next = 0;
-	ctx.stack_size = ctx.struct_scratch_base + (32 * 24);
+	ctx.arr_len_count = 0;
+	ctx.stack_size = ctx.struct_scratch_base + (4096 * 24);
 	// Decide whether to emit via IR and reserve spill slots if needed.
 	let use_ir = false;
 	let ir_func_ptr: nullable *ir_func = null;
-	if (ctx.ir != null) {
-		x86_set_sched_by_name(ctx, n.ref);
-		let f_ir_ptr: *ir_func = &ctx.ir.funcs[ctx.fn_index];
-		ir_func_ptr = f_ir_ptr;
-		if (x86_ir_supported_func(ctx, f_ir_ptr)) {
-			use_ir = true;
-		};
-	};
 	if (use_ir) {
 		match (ir_func_ptr) {
-		case let f_emit: *ir_func => x86_ir_setup_spills(ctx, f_emit);
+		case let f_emit_spill: *ir_func => x86_ir_setup_spills(ctx, f_emit_spill);
 		case null => void;
 		};
 	};
@@ -6483,9 +7388,9 @@ fn x86_emit_fn(ctx: *x86_ctx, n: *tnode) void = {
 				let op_i = 0z;
 				if (ir_func_ptr != null) {
 					match (ir_func_ptr) {
-					case let f_dbg: *ir_func =>
-						for (op_i < f_dbg.ops_len) {
-							let op_dbg = ctx.ir.ops[f_dbg.ops_start + op_i];
+					case let f_dbg2: *ir_func =>
+						for (op_i < f_dbg2.ops_len) {
+							let op_dbg = ctx.ir.ops[f_dbg2.ops_start + op_i];
 							if (op_dbg.kind == IR_OP_BIN) { bin_count += 1; };
 							op_i += 1;
 						};
@@ -6572,32 +7477,34 @@ fn x86_emit_fn(ctx: *x86_ctx, n: *tnode) void = {
 				stack_off += 16;
 			};
 		} else if (x86_type_is_tagged(g, param_type_move)) {
-			let payload_off = param_off_move - 8;
-			if (int_idx <= 4) {
-				if (int_idx == 0) { x86_emit_ins_pre_i_suf(&g.em, "movq %rdi, -", param_off_move, "(%rbp)"); }
-				else if (int_idx == 1) { x86_emit_ins_pre_i_suf(&g.em, "movq %rsi, -", param_off_move, "(%rbp)"); }
-				else if (int_idx == 2) { x86_emit_ins_pre_i_suf(&g.em, "movq %rdx, -", param_off_move, "(%rbp)"); }
-				else if (int_idx == 3) { x86_emit_ins_pre_i_suf(&g.em, "movq %rcx, -", param_off_move, "(%rbp)"); }
-				else if (int_idx == 4) { x86_emit_ins_pre_i_suf(&g.em, "movq %r8, -", param_off_move, "(%rbp)"); };
-				if (int_idx == 0) { x86_emit_ins_pre_i_suf(&g.em, "movq %rsi, -", payload_off, "(%rbp)"); }
-				else if (int_idx == 1) { x86_emit_ins_pre_i_suf(&g.em, "movq %rdx, -", payload_off, "(%rbp)"); }
-				else if (int_idx == 2) { x86_emit_ins_pre_i_suf(&g.em, "movq %rcx, -", payload_off, "(%rbp)"); }
-				else if (int_idx == 3) { x86_emit_ins_pre_i_suf(&g.em, "movq %r8, -", payload_off, "(%rbp)"); }
-				else if (int_idx == 4) { x86_emit_ins_pre_i_suf(&g.em, "movq %r9, -", payload_off, "(%rbp)"); };
-				int_idx += 2;
-			} else {
+			// Tagged params are passed as pointers; copy the tag/payload into the local slot.
+			let src_reg_idx = int_idx;
+			let ptr_reg = "%r10";
+			if (src_reg_idx == 0) { ptr_reg = "%rdi"; }
+			else if (src_reg_idx == 1) { ptr_reg = "%rsi"; }
+			else if (src_reg_idx == 2) { ptr_reg = "%rdx"; }
+			else if (src_reg_idx == 3) { ptr_reg = "%rcx"; }
+			else if (src_reg_idx == 4) { ptr_reg = "%r8"; }
+			else if (src_reg_idx == 5) { ptr_reg = "%r9"; }
+			else {
 				emit_s(&g.em, "\tmovq ");
 				e_i(&g.em, stack_off);
 				emit_s(&g.em, "(%rbp), %r10");
 				e_nl(&g.em);
-				x86_emit_ins_pre_i_suf(&g.em, "movq %r10, -", param_off_move, "(%rbp)");
-				emit_s(&g.em, "\tmovq ");
-				e_i(&g.em, stack_off + 8);
-				emit_s(&g.em, "(%rbp), %r10");
-				e_nl(&g.em);
-				x86_emit_ins_pre_i_suf(&g.em, "movq %r10, -", payload_off, "(%rbp)");
-				stack_off += 16;
+				ptr_reg = "%r10";
+				stack_off += 8;
 			};
+			emit_s(&g.em, "\tmovq 0(");
+			emit_s(&g.em, ptr_reg);
+			emit_s(&g.em, "), %r11");
+			e_nl(&g.em);
+			x86_emit_ins_pre_i_suf(&g.em, "movq %r11, -", param_off_move, "(%rbp)");
+			emit_s(&g.em, "\tmovq 8(");
+			emit_s(&g.em, ptr_reg);
+			emit_s(&g.em, "), %r11");
+			e_nl(&g.em);
+			x86_emit_ins_pre_i_suf(&g.em, "movq %r11, -", param_off_move - 8, "(%rbp)");
+			if (int_idx < 6) { int_idx += 1; };
 		} else if (x86_is_float_ty(g, param_type_move)) {
 			if (float_idx == 0) { x86_emit_ins_pre_i_suf(&g.em, "movsd %xmm0, -", param_off_move, "(%rbp)"); }
 			else if (float_idx == 1) { x86_emit_ins_pre_i_suf(&g.em, "movsd %xmm1, -", param_off_move, "(%rbp)"); }
@@ -6615,6 +7522,33 @@ fn x86_emit_fn(ctx: *x86_ctx, n: *tnode) void = {
 				e_nl(&g.em);
 				x86_emit_ins_pre_i_suf(&g.em, "movsd %xmm0, -", param_off_move, "(%rbp)");
 				stack_off += 8;
+			};
+		} else if (x86_type_is_struct(g, param_type_move) && x86_type_slot_size(g, param_type_move) == 16) {
+			// Small struct (16 bytes) - passed in 2 registers, store contiguously
+			if (int_idx <= 4) {
+				if (int_idx == 0) { x86_emit_ins_pre_i_suf(&g.em, "movq %rdi, -", param_off_move, "(%rbp)"); }
+				else if (int_idx == 1) { x86_emit_ins_pre_i_suf(&g.em, "movq %rsi, -", param_off_move, "(%rbp)"); }
+				else if (int_idx == 2) { x86_emit_ins_pre_i_suf(&g.em, "movq %rdx, -", param_off_move, "(%rbp)"); }
+				else if (int_idx == 3) { x86_emit_ins_pre_i_suf(&g.em, "movq %rcx, -", param_off_move, "(%rbp)"); }
+				else if (int_idx == 4) { x86_emit_ins_pre_i_suf(&g.em, "movq %r8, -", param_off_move, "(%rbp)"); };
+				if (int_idx == 0) { x86_emit_ins_pre_i_suf(&g.em, "movq %rsi, -", param_off_move - 8, "(%rbp)"); }
+				else if (int_idx == 1) { x86_emit_ins_pre_i_suf(&g.em, "movq %rdx, -", param_off_move - 8, "(%rbp)"); }
+				else if (int_idx == 2) { x86_emit_ins_pre_i_suf(&g.em, "movq %rcx, -", param_off_move - 8, "(%rbp)"); }
+				else if (int_idx == 3) { x86_emit_ins_pre_i_suf(&g.em, "movq %r8, -", param_off_move - 8, "(%rbp)"); }
+				else if (int_idx == 4) { x86_emit_ins_pre_i_suf(&g.em, "movq %r9, -", param_off_move - 8, "(%rbp)"); };
+				int_idx += 2;
+			} else {
+				emit_s(&g.em, "\tmovq ");
+				e_i(&g.em, stack_off);
+				emit_s(&g.em, "(%rbp), %r10");
+				e_nl(&g.em);
+				x86_emit_ins_pre_i_suf(&g.em, "movq %r10, -", param_off_move, "(%rbp)");
+				emit_s(&g.em, "\tmovq ");
+				e_i(&g.em, stack_off + 8);
+				emit_s(&g.em, "(%rbp), %r10");
+				e_nl(&g.em);
+				x86_emit_ins_pre_i_suf(&g.em, "movq %r10, -", param_off_move - 8, "(%rbp)");
+				stack_off += 16;
 			};
 		} else {
 			if (int_idx == 0) { x86_emit_ins_pre_i_suf(&g.em, "movq %rdi, -", param_off_move, "(%rbp)"); }
@@ -6640,7 +7574,7 @@ fn x86_emit_fn(ctx: *x86_ctx, n: *tnode) void = {
 	// Emit body
 	if (use_ir) {
 		match (ir_func_ptr) {
-		case let f_emit: *ir_func => x86_emit_ir_body(ctx, f_emit);
+		case let f_emit_body: *ir_func => x86_emit_ir_body(ctx, f_emit_body);
 		case null => x86_stmt(ctx, body);
 		};
 	} else {
@@ -6748,13 +7682,16 @@ fn pkgen_generate_x86_64(g: *codegen) void = {
 	spill_offsets = [0...],
 	spill_count = 0,
 	spill_base = 0,
-		sret_off = 0,
-		static_count = 0,
-		static_names = [bref { pos = 0, length = 0 }...],
-		static_owner = [bref { pos = 0, length = 0 }...],
-		static_label = [0...],
-		static_ty = [0...],
-		static_init = [0...],
+	sret_off = 0,
+	static_count = 0,
+	static_names = [bref { pos = 0, length = 0 }...],
+	static_owner = [bref { pos = 0, length = 0 }...],
+	static_label = [0...],
+	static_ty = [0...],
+	static_init = [0...],
+	arr_len_names = [bref { pos = 0, length = 0 }...],
+	arr_len_value = [0...],
+	arr_len_count = 0,
 	};
 	// Collect static locals before emitting globals.
 	let scan = t_first(unwrap(unit));

@@ -1,0 +1,18 @@
+// Regression: tagged return via sret with pointer parameter (no warnings, correct ABI).
+
+type err = !void;
+type number = (i32 | err);
+
+fn make_number(p: *i32) number = {
+	if (*p != 0) {
+		return *p;
+	};
+	let e: err = err;
+	return e;
+};
+
+export fn main() void = {
+	let val: i32 = 5;
+	let _ = make_number(&val);
+	// If ABI is wrong this would crash before returning.
+};

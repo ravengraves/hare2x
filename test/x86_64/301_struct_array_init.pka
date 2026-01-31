@@ -1,0 +1,67 @@
+// Test struct and array initialization in the x86_64 backend
+// - Struct{...} should zero-initialize all fields
+// - [struct{...}...] should work for array fill
+// - [0...] should work for numeric arrays
+
+use rt;
+
+type point = struct {
+	x: i32,
+	y: i32,
+};
+
+type triple = struct {
+	a: i64,
+	b: i64,
+	c: i64,
+};
+
+export fn main() void = {
+	// Test 1: Struct zero-fill with {...}
+	let p1 = point { ... };
+	assert(p1.x == 0, "struct fill x should be 0");
+	assert(p1.y == 0, "struct fill y should be 0");
+
+	// Test 2: Struct partial init + fill
+	let p2 = point { x = 42, ... };
+	assert(p2.x == 42, "struct partial x should be 42");
+	assert(p2.y == 0, "struct partial y should be 0");
+
+	// Test 3: Numeric array fill [0...]
+	let arr1: [4]i32 = [0...];
+	assert(arr1[0] == 0, "numeric fill [0]");
+	assert(arr1[3] == 0, "numeric fill [3]");
+
+	// Test 4: Numeric array fill [val...]
+	let arr2: [4]i64 = [123...];
+	assert(arr2[0] == 123, "value fill [0]");
+	assert(arr2[3] == 123, "value fill [3]");
+
+	// Test 5: Array of structs with struct literal fill
+	let arr3: [3]point = [point{x=1, y=2}...];
+	assert(arr3[0].x == 1, "struct arr[0].x");
+	assert(arr3[0].y == 2, "struct arr[0].y");
+	assert(arr3[2].x == 1, "struct arr[2].x");
+	assert(arr3[2].y == 2, "struct arr[2].y");
+
+	// Test 6: Array of structs with zero-init struct fill
+	let arr4: [3]point = [point{...}...];
+	assert(arr4[0].x == 0, "zero struct arr[0].x");
+	assert(arr4[0].y == 0, "zero struct arr[0].y");
+	assert(arr4[2].x == 0, "zero struct arr[2].x");
+	assert(arr4[2].y == 0, "zero struct arr[2].y");
+
+	// Test 7: Mixed array init with variadic fill
+	let arr5: [5]i32 = [10, 20, 30...];
+	assert(arr5[0] == 10, "mixed [0]");
+	assert(arr5[1] == 20, "mixed [1]");
+	assert(arr5[2] == 30, "mixed [2]");
+	assert(arr5[3] == 30, "mixed [3] fill");
+	assert(arr5[4] == 30, "mixed [4] fill");
+
+	// Test 8: Larger struct with fill
+	let t1 = triple { a = 100, ... };
+	assert(t1.a == 100, "triple a");
+	assert(t1.b == 0, "triple b fill");
+	assert(t1.c == 0, "triple c fill");
+};

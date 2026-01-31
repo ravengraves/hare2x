@@ -188,3 +188,29 @@ Phase 3:
 - Struct return-by-value and nested struct copies are not implemented yet; keep struct literals in `let` initializers for now.
 - Arrays are limited to fixed-size locals with array literals and indexing (bounds checks are emitted for fixed-size array accesses; no slices/len yet in x86_64).
 - Strings/slices/nullable/tagged unions require Phase 3+ work before full suite coverage.
+
+## Immediate Fix Plan (Jan 30, 2026)
+Status: `./test/test_pika2x86_64.sh` now passes 126/126. Next steps focus on polish, perf, and coverage expansion.
+
+Priority order and steps:
+1) **Clean warnings & ABI hygiene** (p1): remove the unused `has_tagged_param` local; add a small regression test ensuring tagged sret + pointer params stay warning-free.
+2) **Struct-return support** (p1): implement real return-by-value for small structs (<=16 bytes) and sret for larger ones; add x86_64 tests that return structs to unblock future Hare parity.
+3) **Enum lowering** (p2): add enum → integer lowering in x86_64 backend so main-suite enum usages can move off the C backend; mirror the gnuc11 path for tags.
+4) **IR path re-enable** (p3): re-enable `use_ir` where supported, gate with feature flag, and add a smoke test that exercises the virtreg allocator on x86_64.
+5) **Performance sweep** (p3): compare matmul unrolled against clang -O2 via `x86_64/assembler.sh`; tighten float math lowering to reduce stack traffic (leverage `xmm` temporaries).
+6) **Self-hosting ladder** (p4): run `test/test_pika2c.sh` self-hosting sections (gen1→gen3), record deltas, and fix any asm/C parity gaps found.
+
+### Immediate Checklist
+- [x] Drop `has_tagged_param` unused local and add a tagged sret+pointer regression test (x86_64).
+- [x] Implement struct return-by-value: <=16 bytes in registers, larger via sret; add targeted x86_64 struct-return tests.
+- [x] Lower enums to integers in x86_64 backend (mirror gnuc11 tag handling) and add a minimal enum-return/call test.
+
+Status (Jan 30, 2026): `./test/test_pika2x86_64.sh` is green (129/129). `./test/test_pika2c.sh` self-host ladder (gen1→gen3) now passes; only residual warnings are the existing int→u8 truncation notes in generated C during gen* builds.
+
+### ABI parity notes (System V)
+- Strings/slices: passed by pointer+len (+cap for slices) in int registers/stack (matches C structs used by pika C backend).
+- Tagged unions: passed/returned by pointer (sret for returns); this differs from C aggregates-by-value but matches our C path which also uses pointers for tags.
+- Struct returns: <=16 bytes now returned in `rax`/`rdx` per SysV; larger use sret. Struct params still passed by address (C passes small structs by value) – acceptable for now but keep in mind for interop.
+- Enums: lowered to their integer base size for layout/ABI; treated as ints in calls/returns.
+- Interop gaps vs C ABI: struct *parameters* are still by-address (C would pass small structs by value), and tagged unions stay pointer-based; both match the C backend but differ from plain C code.
+- IR path remains disabled for x86_64; codegen is direct (`pkgen_x86_64`). `pkgen_virtreg.pka` is only used by the C backend today; re-enabling IR+virtreg for x86_64 needs allocator coverage and feature-gating.

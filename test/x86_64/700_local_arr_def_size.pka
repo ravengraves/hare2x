@@ -1,0 +1,13 @@
+-T x86_64
+// Test local array with def constant size
+def ARR_SIZE: size = 8z;
+
+fn test_len() size = {
+    let arr: [ARR_SIZE]u8 = [0...];
+    return len(arr);
+};
+
+export fn main() void = {
+    let sz = test_len();
+    assert(sz == 8);
+};

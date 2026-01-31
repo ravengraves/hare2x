@@ -109,18 +109,23 @@ type ir_func = struct {
 };
 
 // IR context (static pools)
+def IR_MAX_FUNCS: size = 4096z;
+def IR_MAX_OPS: size = 65536z;
+def IR_MAX_PARAMS: size = 4096z;
+def IR_MAX_ARGS: size = 65536z;
+def IR_MAX_VREGS: size = 65536z;
 
 type ir_ctx = struct {
-	funcs: [256]ir_func,
+		funcs: [IR_MAX_FUNCS]ir_func,
 	func_count: size,
-	ops: [65536]ir_op,
+	ops: [IR_MAX_OPS]ir_op,
 	op_count: size,
-	params: [4096]ir_vreg,
+	params: [IR_MAX_PARAMS]ir_vreg,
 	param_count: size,
-	args: [8192]ir_vreg,
+	args: [IR_MAX_ARGS]ir_vreg,
 	arg_count: size,
-	vreg_types: [8192]u16,
-	vreg_widths: [8192]u8,
+	vreg_types: [IR_MAX_VREGS]u16,
+	vreg_widths: [IR_MAX_VREGS]u8,
 	next_vreg_id: u32,
 	current_fn: size,
 	src: *[*]u8,
@@ -163,12 +168,7 @@ let ir_ctx_global: ir_ctx = ir_ctx {
 	unsupported_reason = 0,
 };
 
-let ir_ops_tmp: [65536]ir_op = [ir_op { kind = 0, aux = 0, dst = ir_vreg { id = 0, ty = 0, width = 0 },
-	a = ir_vreg { id = 0, ty = 0, width = 0 },
-	b = ir_vreg { id = 0, ty = 0, width = 0 },
-	imm = 0, cond = 0, target = 0, target2 = 0,
-	arg_start = 0, arg_count = 0, sym = bref { pos = 0, length = 0 },
-	sym2 = bref { pos = 0, length = 0 } }...];
+let ir_ops_tmp: [65536]ir_op = [0...];
 
 let ir_vec_marks: [65536]u8 = [0...];
 let ir_vec_chunk: [65536]u32 = [0...];
@@ -203,7 +203,7 @@ fn ir_reset(ctx: *ir_ctx, src: *[*]u8, src_len: size) void = {
 
 fn ir_begin_func(ctx: *ir_ctx, name: bref, result_ty: u16, has_result: bool) *ir_func = {
 	let idx = ctx.func_count;
-	if (idx >= 256) { abort("ir: too many functions"); };
+	if (idx >= 4096) { abort("ir: too many functions"); };
 	ctx.func_count += 1;
 	let f: *ir_func = &ctx.funcs[idx];
 	f.name = name;
@@ -447,7 +447,7 @@ fn ir_struct_field_type(g: *codegen, ty: *tnode, field: bref) nullable *tnode = 
 // IR builder (phase 1: minimal lowering for arithmetic + control flow)
 // --------------------------------------------------------------------------
 
-let ir_vars_entries: [2048]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let ir_vars_entries: [2048]dict_entry = [0...];
 
 fn ir_vars_init(d: *dict, src: *[*]u8) void = {
 	d.cap = 2048;
@@ -1846,7 +1846,7 @@ fn ir_graph_optimize(ctx: *ir_ctx) void = {
 		let f: *ir_func = &ctx.funcs[func_idx];
 		let old_start = f.ops_start;
 		let old_end = old_start + f.ops_len;
-		let last_def: [8192]u32 = [IR_DEP_NONE...];
+		let last_def: [IR_MAX_VREGS]u32 = [IR_DEP_NONE...];
 		let v = 0u32;
 		for (v < f.next_vreg) {
 			let id = f.vreg_base + v;
@@ -1932,7 +1932,7 @@ fn ir_vectorize(ctx: *ir_ctx) void = {
 		};
 		f.ops_start = new_op_count;
 		let v = 0u32;
-		let last_def: [8192]u32 = [IR_DEP_NONE...];
+		let last_def: [IR_MAX_VREGS]u32 = [IR_DEP_NONE...];
 		for (v < f.next_vreg) {
 			let id = f.vreg_base + v;
 			last_def[id: size] = IR_DEP_NONE;
@@ -2304,10 +2304,10 @@ fn ir_reindex_map(ctx: *ir_ctx, old_id: u32, map: *[*]u32, mark: *[*]u8,
 };
 
 fn ir_reindex_vregs(ctx: *ir_ctx) void = {
-	let new_types: [8192]u16 = [0...];
-	let new_widths: [8192]u8 = [0...];
-	let map: [8192]u32 = [0...];
-	let mark: [8192]u8 = [0...];
+	let new_types: [IR_MAX_VREGS]u16 = [0...];
+	let new_widths: [IR_MAX_VREGS]u8 = [0...];
+	let map: [IR_MAX_VREGS]u32 = [0...];
+	let mark: [IR_MAX_VREGS]u8 = [0...];
 	let next_id: u32 = 0;
 	let func_idx = 0z;
 	for (func_idx < ctx.func_count) {

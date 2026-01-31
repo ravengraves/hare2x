@@ -9,14 +9,14 @@ use strings;
 def NODE_POOL_SIZE: size = 512*1024;
 def OUTBUF_SIZE: size = 33554432;    // 32MB output
 def SRCBUF_SIZE: size = 1048576;    // 1MB input
-def DICT_SIZE: size = 1048576;
+def DICT_SIZE: size = 16384;
 
 // Node pool (allocated in tree.ha since it needs tnode type)
 // Here we just track the index
 let node_idx: size = 0;
 
 // Output buffer
-let outbuf: [4194304]u8 = [0...];
+let outbuf: [OUTBUF_SIZE]u8 = [0...];
 
 // Source buffer (read from stdin)
 let srcbuf: [1048576]u8 = [0...];
@@ -248,15 +248,15 @@ type dict_entry = struct {
 };
 
 // Separate dict pools: types, vars, funcs, globals
-let types_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let vars_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let funcs_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let globals_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let exported_funcs_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let exported_types_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let symbol_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let static_vars_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
-let aliases_dict_entries: [1048576]dict_entry = [dict_entry { key_hash = 0, key = bref { pos = 0, length = 0 }, value = 0, occupied = false }...];
+let types_dict_entries: [DICT_SIZE]dict_entry = [0...];
+let vars_dict_entries: [DICT_SIZE]dict_entry = [0...];
+let funcs_dict_entries: [DICT_SIZE]dict_entry = [0...];
+let globals_dict_entries: [DICT_SIZE]dict_entry = [0...];
+let exported_funcs_entries: [DICT_SIZE]dict_entry = [0...];
+let exported_types_entries: [DICT_SIZE]dict_entry = [0...];
+let symbol_dict_entries: [DICT_SIZE]dict_entry = [0...];
+let static_vars_entries: [DICT_SIZE]dict_entry = [0...];
+let aliases_dict_entries: [DICT_SIZE]dict_entry = [0...];
 
 type dict = struct {
 	entries: *[*]dict_entry,
@@ -700,7 +700,7 @@ type binop_entry = struct {
 	ref_pos: size,
 	ref_len: size,
 };
-let expr_operators: [256]binop_entry = [binop_entry { op = 0, ref_pos = 0, ref_len = 0 }...];
+let expr_operators: [256]binop_entry = [0...];
 let expr_operator_top: size = 0;
 
 // Unary operator stack - holds (operator_kind, bref)
@@ -709,7 +709,7 @@ type unop_entry = struct {
 	ref_pos: size,
 	ref_len: size,
 };
-let unary_operators: [64]unop_entry = [unop_entry { op = 0, ref_pos = 0, ref_len = 0 }...];
+let unary_operators: [64]unop_entry = [0...];
 let unary_op_top: size = 0;
 
 // Stack operations
@@ -798,10 +798,10 @@ type type_frame = struct {
 };
 
 // Static stacks for type parsing
-let type_wrappers: [64]type_wrapper = [type_wrapper { kind = 0, flags = 0, size_node = 0 }...];
+let type_wrappers: [64]type_wrapper = [0...];
 let type_wrapper_top: size = 0;
 
-let type_frames: [32]type_frame = [type_frame { state = 0, wrappers_start = 0, tagged_node = 0 }...];
+let type_frames: [32]type_frame = [0...];
 let type_frame_top: size = 0;
 
 // ============================================================================
@@ -826,7 +826,7 @@ type get_type_frame = struct {
 	field_ref: bref,  // For GTS_FIELD: the field name to look up
 };
 
-let get_type_frames: [32]get_type_frame = [get_type_frame { state = 0, node = 0, field_ref = bref { pos = 0, length = 0 } }...];
+let get_type_frames: [32]get_type_frame = [0...];
 let get_type_frame_top: size = 0;
 
 // ============================================================================

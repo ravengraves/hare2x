@@ -1,0 +1,14 @@
+// Large struct (>16 bytes) should use sret.
+
+type triple = struct { a: i64, b: i64, c: i32 };
+
+fn make_triple(a: i64, b: i64, c: i32) triple = {
+	return triple { a = a, b = b, c = c };
+};
+
+export fn main() void = {
+	let t = make_triple(1, 2, 3);
+	assert(t.a == 1);
+	assert(t.b == 2);
+	assert(t.c == 3);
+};
