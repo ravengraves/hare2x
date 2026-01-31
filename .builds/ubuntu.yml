@@ -11,7 +11,7 @@ packages:
   - python3
   - python3-pip
 sources:
-  - https://git.sr.ht/~alecgraves/hare2c
+  - https://git.sr.ht/~alecgraves/hare2x
   - git://c9x.me/qbe.git
   - https://git.sr.ht/~sircmpwn/harec
   - https://git.sr.ht/~sircmpwn/hare
@@ -41,5 +41,5 @@ tasks:
       sed -i 's/^ld[[:space:]]*=.*/ld = ld.lld/' hare/config.mk
       sudo make -j"$(nproc)" -C hare install
   - test: |
-      cd hare2c
+      cd hare2x
       make check
