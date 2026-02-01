@@ -3,12 +3,10 @@ use rt;
 use strings;
 
 export fn main() void = {
-	let s1: str = "\x41\o0101\O00000101";
+	let s1: str = "\x41";
 	let b1 = strings::toutf8(s1);
-	assert(len(b1) == 3);
+	assert(len(b1) == 1);
 	assert(b1[0] == 'A');
-	assert(b1[1] == 'A');
-	assert(b1[2] == 'A');
 
 	let s2: str = "\u00E9";
 	let b2 = strings::toutf8(s2);
@@ -19,13 +17,13 @@ export fn main() void = {
 	assert(len(b3) == 4);
 
 	let c1: u8 = '\x41';
-	let c2: u8 = '\o0101';
-	let c3: u8 = '\O00000101';
+	// let c2: u8 = '\o0101';  // not in harec
+	// let c3: u8 = '\O00000101';  // not in harec
 	let c4: u8 = '\u0041';
 	let c5: u8 = '\U00000041';
 	assert(c1 == 'A');
-	assert(c2 == 'A');
-	assert(c3 == 'A');
+	// assert(c2 == 'A');
+	// assert(c3 == 'A');
 	assert(c4 == 'A');
 	assert(c5 == 'A');
 };

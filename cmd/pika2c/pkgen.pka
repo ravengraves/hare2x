@@ -911,8 +911,27 @@ fn exhaustive_expected(g: *codegen, val: *tnode, require_enum: bool) size = {
 	};
 };
 
+// Check if match has exactly one null case and one binding case (exhaustive nullable pattern)
+fn match_is_nullable_exhaustive(n: *tnode) bool = {
+	let has_null = false;
+	let has_binding = false;
+	let cn = case_list_first(n);
+	for (cn != null) {
+		let case_n: *tnode = unwrap(cn);
+		if (node_is_kind(t_first(case_n), N_NULL)) {
+			has_null = true;
+		} else if (case_has_binding(case_n)) {
+			has_binding = true;
+		};
+		cn = case_n.next;
+	};
+	return has_null && has_binding;
+};
+
 fn match_is_exhaustive(g: *codegen, n: *tnode) bool = {
 	if (case_has_default(n)) { return true; };
+	// Check for nullable pattern (null + binding case)
+	if (match_is_nullable_exhaustive(n)) { return true; };
 	let val = t_first_nn(n);
 	let expected = exhaustive_expected(g, val, false);
 	return expected > 0 && case_total_cases(n) >= expected;
@@ -1364,6 +1383,8 @@ fn resolve_exhaustive_type(g: *codegen, val: *tnode) nullable *tnode = {
 	if (resolved == null) { return null; };
 	let rty: *tnode = unwrap(resolved);
 	if (rty.kind == N_T_ENUM || rty.kind == N_T_TAGGED) { return rty; };
+	// Nullable pointers are exhaustive with 2 cases (null + non-null)
+	if (rty.kind == N_T_PTR && (rty.flags & F_NULLABLE) != 0) { return rty; };
 	return null;
 };
 
@@ -1380,6 +1401,10 @@ fn count_expected_cases(ty: *tnode) size = {
 	};
 	if (ty.kind == N_T_TAGGED) {
 		return t_child_count(ty);
+	};
+	// Nullable pointers have 2 cases: null and non-null
+	if (ty.kind == N_T_PTR && (ty.flags & F_NULLABLE) != 0) {
+		return 2;
 	};
 	return 0;
 };

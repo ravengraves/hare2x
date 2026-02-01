@@ -98,7 +98,7 @@ run_fail_test() {
     local cfile="$TMPDIR/${name}.c"
     local ofile="$TMPDIR/${name}.o"
 
-    if ! python3 ../cmd/hare2c.py "$file" -o "$cfile" >/dev/null 2>&1; then
+    if ! python3 ../cmd/hare2c.py "$file" -o "$cfile" &>/dev/null; then
         pass
         return
     fi

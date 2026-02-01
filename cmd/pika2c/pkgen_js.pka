@@ -2024,6 +2024,10 @@ fn js_fn(g: *codegen, n: *tnode) void = {
 	let ret_type = g_skip_to_ret(n);
 	g.cur_ret_type = ret_type;
 	let body = t_next_nn(unwrap(ret_type));
+	if (ret_type != null && !type_is_void(unwrap(ret_type), g.t.src) && !stmt_always_terminates(g, body)) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"function with return type must return a value");
+	};
 	js_block(g, body);
 	e_nl(&g.em);
 	e_nl(&g.em);

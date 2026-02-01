@@ -54,7 +54,7 @@ run_fail_test() {
     local cfile="$TMPDIR/${name}.c"
 
     # First check: does pika2c reject it?
-    if ! "$TMPDIR/pika2c" < "$file" > "$cfile"; then
+    if ! "$TMPDIR/pika2c" < "$file" > "$cfile" 2> /dev/null; then
         pass; return
     fi
 

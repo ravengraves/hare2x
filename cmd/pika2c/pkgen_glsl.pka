@@ -1956,6 +1956,11 @@ fn glsl_fn(g: *codegen, n: *tnode) void = {
 	glsl_param_list(g, n);
 	e_sp(&g.em);
 	let body = t_next_nn(ret);
+	g.cur_ret_type = ret;
+	if (!type_is_void(ret, g.t.src) && !stmt_always_terminates(g, body)) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"function with return type must return a value");
+	};
 	glsl_block(g, body);
 	e_nl(&g.em);
 	e_nl(&g.em);

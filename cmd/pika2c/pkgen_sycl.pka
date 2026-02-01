@@ -902,6 +902,10 @@ fn sycl_emit_device_function(g: *codegen, fn_node: *tnode) void = {
 	let prev_error_ref = sycl_current_error_ref;
 	g.cur_fn = fn_node.ref;
 	g.cur_ret_type = ret_type;
+	if (!type_is_void(ret_type, g.t.src) && !stmt_always_terminates(g, body)) {
+		err_bref(fn_node.ref, g.t.src, g.t.src_len,
+			"function with return type must return a value");
+	};
 	g.match_expected = null;
 	g.nullable_narrowed = bref_empty();
 	vars_clear(g);

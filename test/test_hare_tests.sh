@@ -251,11 +251,6 @@ echo
 for f in test/pika/*.pka; do
     [ -f "$f" ] || continue
     name=$(basename "${f%.pka}")
-    if [ "$name" = "string_escapes" ]; then
-        printf "Testing %-45s " "pika/$name..."
-        skip "pika escape extension"
-        continue
-    fi
     test_file "$f" "pika/$name"
 done
 

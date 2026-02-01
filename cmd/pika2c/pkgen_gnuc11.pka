@@ -1815,6 +1815,10 @@ fn g_fn(g: *codegen, n: *tnode) void = {
 	let ret_type: *tnode = unwrap(g_skip_to_ret(n));
 	g.cur_ret_type = ret_type;  // Track for return type checking
 	let body: *tnode = t_next_nn(ret_type);
+	if (!type_is_void(ret_type, g.t.src) && !stmt_always_terminates(g, body)) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"function with return type must return a value");
+	};
 
 	let exported = (n.flags & F_EXPORTED) != 0;
 	if (!exported) {

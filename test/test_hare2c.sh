@@ -114,7 +114,7 @@ run_fail_test() {
     local c="$TMPDIR/${safe_name}.c"
     local o="$TMPDIR/${safe_name}.o"
 
-    if ! cat "$file" | "$TMPDIR/hare2c_meta" > "$c"; then
+    if ! cat "$file" | "$TMPDIR/hare2c_meta" > "$c" 2> /dev/null; then
         pass
         return
     fi
