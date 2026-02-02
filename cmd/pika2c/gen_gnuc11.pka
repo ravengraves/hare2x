@@ -389,24 +389,9 @@ fn c_str_content(em: *emitter, r: bref, src: *[*]u8) size = {
 		let c = src[r.pos + i];
 		if (c == '\\' && i + 1 < end) {
 			let next = src[r.pos + i + 1];
-			if (next == 'o' && i + 6 <= end) {
-				let cp_o4 = parse_oct(src, r.pos + i + 2, 4);
-				c_emit_utf8(em, cp_o4);
-				slen += utf8_len(cp_o4);
-				i += 6;
-				if (i < end && is_hex_digit(src[r.pos + i])) {
-					e_raw(em, "\"\"");
-				};
-				continue;
-			};
-			if (next == 'O' && i + 10 <= end) {
-				let cp_O8 = parse_oct(src, r.pos + i + 2, 8);
-				c_emit_utf8(em, cp_O8);
-				slen += utf8_len(cp_O8);
-				i += 10;
-				if (i < end && is_hex_digit(src[r.pos + i])) {
-					e_raw(em, "\"\"");
-				};
+			if (next == 'o' || next == 'O') {
+				err_at(r.pos + i, src, r.length, "octal escape sequences not supported");
+				i += 2;
 				continue;
 			};
 			e_raw_c(em, '\\');

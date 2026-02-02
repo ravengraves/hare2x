@@ -1565,36 +1565,8 @@ export fn emit_node(ctx: *transform_ctx, n_nullable: nullable *node) void = {
 							strbuf_append(sb, "\" \"");
 						};
 						runtime_len += 1;
-					} else if (next == 'o') {
-						// Octal escape \oNNNN - variable UTF-8 bytes
-						i += 2;
-						let codepoint: u32 = 0;
-						for (let j = 0z;
-							j < 4 && i < d.length &&
-							d_bytes[i] >= '0' && d_bytes[i] <= '7';
-							j += 1) {
-							codepoint = (codepoint << 3) | ((d_bytes[i] - '0'): u32);
-							i += 1;
-						};
-						runtime_len += emit_utf8(sb, codepoint);
-						if (i < d.length && is_hex_digit(d_bytes[i])) {
-							strbuf_append(sb, "\" \"");
-						};
-					} else if (next == 'O') {
-						// Octal escape \ONNNNNNNN - variable UTF-8 bytes
-						i += 2;
-						let codepoint: u32 = 0;
-						for (let j = 0z;
-							j < 8 && i < d.length &&
-							d_bytes[i] >= '0' && d_bytes[i] <= '7';
-							j += 1) {
-							codepoint = (codepoint << 3) | ((d_bytes[i] - '0'): u32);
-							i += 1;
-						};
-						runtime_len += emit_utf8(sb, codepoint);
-						if (i < d.length && is_hex_digit(d_bytes[i])) {
-							strbuf_append(sb, "\" \"");
-						};
+					} else if (next == 'o' || next == 'O') {
+						die_at("octal escape sequences not supported", n.line, n.col);
 					} else if (next == 'u') {
 						// Unicode escape \uNNNN - variable UTF-8 bytes
 						i += 2;

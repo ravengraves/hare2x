@@ -249,8 +249,8 @@ fn read_rune(r: *reader) token = {
 			r_advance(r);
 			let count = 0z;
 			if (esc == 'x') { count = 2; }
-			else if (esc == 'u' || esc == 'o') { count = 4; }
-			else if (esc == 'U' || esc == 'O') { count = 8; };
+			else if (esc == 'u') { count = 4; }
+			else if (esc == 'U') { count = 8; };
 			for (count > 0 && !at_end(r)) {
 				r_advance(r);
 				count -= 1;

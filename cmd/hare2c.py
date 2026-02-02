@@ -24,7 +24,7 @@ TOKENS = [
     ('FLOAT', r'(?:\d(?:_*\d)*\.\d(?:_*\d)*(?:[eE][+\-]?\d(?:_*\d)*)?(?:f(?:32|64))?|\d(?:_*\d)*(?:[eE][+\-]?\d(?:_*\d)*)(?:f(?:32|64))?|\d(?:_*\d)*f(?:32|64))'),
     ('INT', r'(?:0x[0-9a-fA-F](?:_*[0-9a-fA-F])*|0o[0-7](?:_*[0-7])*|0b[01](?:_*[01])*|\d(?:_*\d)*)(?:z|i(?:8|16|32|64)?|u(?:8|16|32|64)?)?'),
     ('STR', r'"(?:[^"\\]|\\.)*"'), ('RAWSTR', r'`[^`]*`'),
-    ('RUNE', r"'(?:[^'\\]|\\(?:x[0-9a-fA-F]{2}|o[0-7]{4}|O[0-7]{8}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.))'"),
+    ('RUNE', r"'(?:[^'\\]|\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.))'"),
     ('OP3', r'\&\.\.|\.\.\.|\>\>=|\<\<='),
     ('OP2', r'\.\.|=\>|==|!=|<=|>=|<<|>>|&&|\|\||\^\^|\+=|-=|\*=|/=|%=|&=|\|=|\^='),
     ('OP', r'[+\-*/%&|^~!<>=@?:;,.\[\](){}#]'),
@@ -52,16 +52,16 @@ def process_string_escapes(s):
             return ESCAPE[esc]
         if esc[0] == 'x' and len(esc) == 3:
             return chr(int(esc[1:], 16))
-        if esc[0] == 'o' and len(esc) == 5:
-            return chr(int(esc[1:], 8))
-        if esc[0] == 'O' and len(esc) == 9:
-            return chr(int(esc[1:], 8))
+        if esc[0] in 'oO':
+            CTX.error(f"octal escape sequences not supported: '\\{esc}'")
+        if esc[0] == '0' and len(esc) > 1:
+            CTX.error(f"C-style octal escape sequences not supported: '\\{esc}' (use \\x{int(esc, 8):02x} for hex)")
         if esc[0] == 'u' and len(esc) == 5:
             return chr(int(esc[1:], 16))
         if esc[0] == 'U' and len(esc) == 9:
             return chr(int(esc[1:], 16))
         return esc
-    return re.sub(r'\\(x[0-9a-fA-F]{2}|o[0-7]{4}|O[0-7]{8}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)', replace_escape, s)
+    return re.sub(r'\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|0[0-7]+|.)', replace_escape, s)
 
 C_ESCAPE = str.maketrans({'\\': '\\\\', '"': '\\"', '\t': '\\t', '\r': '\\r', '\0': '\\0', '\n': '\\n'})
 escape_c_string = lambda s: s.translate(C_ESCAPE)

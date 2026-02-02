@@ -1,0 +1,4 @@
+// ERROR: module not imported (use 'use' statement)
+export fn _main() void = {
+	let x = foo::bar();
+};

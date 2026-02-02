@@ -87,8 +87,10 @@ fn g_char_val(r: bref, src: *[*]u8) u32 = {
 		if (next == '\\') { return '\\': u32; };
 		if (next == '\'') { return '\'': u32; };
 		if (next == 'x' && i + 3 < end) { return parse_hex(src, r.pos + i + 2, 2); };
-		if (next == 'o' && i + 5 < end) { return parse_oct(src, r.pos + i + 2, 4); };
-		if (next == 'O' && i + 9 < end) { return parse_oct(src, r.pos + i + 2, 8); };
+		if (next == 'o' || next == 'O') {
+			err_at(r.pos, src, r.length, "octal escape sequences not supported");
+			return 0;
+		};
 		if (next == 'u' && i + 5 < end) { return parse_hex(src, r.pos + i + 2, 4); };
 		if (next == 'U' && i + 9 < end) { return parse_hex(src, r.pos + i + 2, 8); };
 		return next: u32;
@@ -145,6 +147,11 @@ fn g_expr_simple(g: *codegen, n: *tnode, k: u16) bool = {
 		let mod_ref = bref_empty();
 		let member_ref = bref_empty();
 		if (!qual_id_parts(g, n, &mod_ref, &member_ref)) { return true; };
+		// Check if this is a module reference that wasn't properly imported
+		// Allow: registered module aliases (via 'use') and local types (enums, etc.)
+		if (!is_registered_module(g, n.ref) && dict_get_bref(&g.types, n.ref) == 0) {
+			err_bref(n.ref, g.t.src, g.t.src_len, "module not imported (use 'use' statement)");
+		};
 		emit_path_mangled(g, mod_ref);
 		e_c(&g.em, '_');
 		e_bref(&g.em, member_ref);

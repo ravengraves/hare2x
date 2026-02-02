@@ -1387,6 +1387,10 @@ fn sycl_expr_impl(g: *codegen, n: *tnode) void = {
 
 	// Qualified identifiers (module::name) - for non-call contexts
 	if (k == N_QUAL_ID) {
+		// Check if this is a module reference that wasn't properly imported
+		if (!is_registered_module(g, n.ref) && dict_get_bref(&g.types, n.ref) == 0) {
+			sycl_err(g, n.ref, "module not imported (use 'use' statement)");
+		};
 		let mod_ref = alias_expand_module(g, n.ref);
 		if (bref_match(mod_ref, "sycl", g.t.src)) {
 			let qual_member_opt = t_first(n);

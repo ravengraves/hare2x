@@ -440,16 +440,9 @@ fn js_emit_str_content(em: *emitter, r: bref, src: *[*]u8) void = {
 				i += 4;
 				continue;
 			};
-			if (next == 'o' && i + 5 < end) {
-				let cp_o4 = js_parse_oct(src, r.pos + i + 2, 4);
-				js_emit_codepoint(em, cp_o4);
-				i += 6;
-				continue;
-			};
-			if (next == 'O' && i + 9 < end) {
-				let cp_O8 = js_parse_oct(src, r.pos + i + 2, 8);
-				js_emit_codepoint(em, cp_O8);
-				i += 10;
+			if (next == 'o' || next == 'O') {
+				err_at(r.pos + i, src, r.length, "octal escape sequences not supported");
+				i += 2;
 				continue;
 			};
 			if (next == 'u' && i + 5 < end) {

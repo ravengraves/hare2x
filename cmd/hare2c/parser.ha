@@ -257,13 +257,14 @@ fn parse_primary(p: *parser) *node = {
 			else if (c == '\\') { d.val = 92; }
 			else if (c == '\'') { d.val = 39; }
 			else if (c == '0') { d.val = 0; }
-			else if (c == 'x' || c == 'o' || c == 'O' ||
-				c == 'u' || c == 'U') {
+			else if (c == 'o' || c == 'O') {
+				die_at("octal escape sequences not supported", line, col);
+			}
+			else if (c == 'x' || c == 'u' || c == 'U') {
 				let base: i64 = 16;
 				let count = 2z;
-				if (c == 'u' || c == 'o') { count = 4; }
-				else if (c == 'U' || c == 'O') { count = 8; };
-				if (c == 'o' || c == 'O') { base = 8; };
+				if (c == 'u') { count = 4; }
+				else if (c == 'U') { count = 8; };
 				let val: i64 = 0;
 				let ok = true;
 				for (let i = 0z; i < count; i += 1) {
