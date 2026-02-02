@@ -76,8 +76,8 @@ fn lex(t: *tree) void = {
 				let esc = src[pos + 1];
 				pos += 2;
 				if (esc == 'x') { pos += 2; }
-				else if (esc == 'u' || esc == 'o') { pos += 4; }
-				else if (esc == 'U' || esc == 'O') { pos += 8; };
+				else if (esc == 'u') { pos += 4; }
+				else if (esc == 'U') { pos += 8; };
 			} else if (pos < slen) {
 				pos += 1;
 			};

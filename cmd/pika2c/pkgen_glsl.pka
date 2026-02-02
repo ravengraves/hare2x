@@ -64,6 +64,56 @@ fn glsl_parse_qualifier(r: bref, src: *[*]u8) glsl_qual_info = {
 	return info;
 };
 
+// Extract module and member from "mod::member" bref
+fn glsl_split_qualified(r: bref, src: *[*]u8, mod_out: *bref, member_out: *bref) bool = {
+	let i = 0z;
+	for (i + 1 < r.length) {
+		if (src[r.pos + i] == ':' && src[r.pos + i + 1] == ':') {
+			mod_out.pos = r.pos;
+			mod_out.length = i;
+			member_out.pos = r.pos + i + 2;
+			member_out.length = r.length - i - 2;
+			return true;
+		};
+		i += 1;
+	};
+	return false;
+};
+
+// Check if module was registered as an alias for 'gl'
+// Returns true only if mod_ref is a registered alias pointing to "gl"
+fn glsl_is_gl_alias(g: *codegen, mod_ref: bref) bool = {
+	let packed = dict_get_bref(&g.aliases, mod_ref);
+	if (packed == 0) {
+		return false;  // Not a registered alias
+	};
+	let target = bref_unpack(packed);
+	return bref_match(target, "gl", g.t.src);
+};
+
+// Strip gl:: prefix with alias support - strict mode
+// Only accepts module refs that were explicitly registered via 'use'
+fn glsl_strip_gl_type_aliased(g: *codegen, r: bref, out: *bref) bool = {
+	let mod_part = bref_empty();
+	let member_part = bref_empty();
+	if (glsl_split_qualified(r, g.t.src, &mod_part, &member_part)) {
+		if (glsl_is_gl_alias(g, mod_part)) {
+			*out = member_part;
+			return true;
+		};
+	};
+	// Fallback: check for gl_ prefix (internal names)
+	if (r.length > 3 &&
+		g.t.src[r.pos] == 'g' && g.t.src[r.pos + 1] == 'l' &&
+		g.t.src[r.pos + 2] == '_') {
+		out.pos = r.pos + 3;
+		out.length = r.length - 3;
+		return true;
+	};
+	return false;
+};
+
+// Legacy: strip gl:: without alias support (for contexts without codegen)
 fn glsl_strip_gl_type(r: bref, src: *[*]u8, out: *bref) bool = {
 	if (r.length > 4 &&
 		src[r.pos] == 'g' && src[r.pos + 1] == 'l' &&
@@ -152,7 +202,7 @@ fn glsl_is_sampler_name(r: bref, src: *[*]u8) bool = {
 
 fn glsl_emit_type_name(g: *codegen, r: bref) void = {
 	let gl_base = bref_empty();
-	if (glsl_strip_gl_type(r, g.t.src, &gl_base)) {
+	if (glsl_strip_gl_type_aliased(g, r, &gl_base)) {
 		if (glsl_is_vec_type(gl_base, g.t.src) ||
 			glsl_is_ivec_type(gl_base, g.t.src) ||
 			glsl_is_bvec_type(gl_base, g.t.src) ||
@@ -533,7 +583,7 @@ fn glsl_gl_type_ref_from_member(g: *codegen, member: bref) bref = {
 
 fn glsl_resolve_gl_type_ref(g: *codegen, r: bref) bref = {
 	let member = bref_empty();
-	if (glsl_strip_gl_type(r, g.t.src, &member)) {
+	if (glsl_strip_gl_type_aliased(g, r, &member)) {
 		let gl_ref = glsl_gl_type_ref_from_member(g, member);
 		if (gl_ref.length != 0) { return gl_ref; };
 	};
@@ -596,7 +646,7 @@ fn glsl_bvec_from_type(g: *codegen, ty: *tnode) nullable *tnode = {
 		base = t_first_nn(ty).ref;
 	};
 	let stripped = bref_empty();
-	if (glsl_strip_gl_type(base, g.t.src, &stripped)) { base = stripped; };
+	if (glsl_strip_gl_type_aliased(g, base, &stripped)) { base = stripped; };
 	if (bref_match(base, "vec2", g.t.src) ||
 		bref_match(base, "ivec2", g.t.src) ||
 		bref_match(base, "bvec2", g.t.src)) {
@@ -1225,7 +1275,8 @@ fn glsl_emit_zero_for_type(g: *codegen, ty: *tnode) void = {
 	let t = ty;
 	for (true) {
 		if (t.kind != N_T_QUAL) { break; };
-		if (!bref_match(t.ref, "gl", g.t.src)) {
+		let expanded_mod = get_registered_module(g, t.ref);
+		if (expanded_mod.length == 0 || !bref_match(expanded_mod, "gl", g.t.src)) {
 			glsl_err(g, t.ref, "qualified types are not supported in GLSL");
 		};
 		let member = t_first_nn(t);
@@ -1623,7 +1674,7 @@ fn glsl_base_type_ref(g: *codegen, ty: *tnode) bref = {
 	};
 	if (ref.length == 0) { ref = ty.ref; };
 	let stripped = bref_empty();
-	if (glsl_strip_gl_type(ref, g.t.src, &stripped)) { return stripped; };
+	if (glsl_strip_gl_type_aliased(g, ref, &stripped)) { return stripped; };
 	return ref;
 };
 
@@ -2074,24 +2125,40 @@ fn glsl_register_gl_types(g: *codegen) void = {
 	glsl_register_gl_type(g, "gl_samplerCube");
 };
 
+// Check if 'use gl;' or 'use x = gl;' is present in the unit
+fn glsl_check_use_gl(g: *codegen, unit: *tnode) bool = {
+	let has_gl = false;
+	let decl = t_first(unit);
+	for (decl != null) {
+		let d: *tnode = unwrap(decl);
+		if (d.kind == N_USE) {
+			// d.ref is the full path (e.g., "gl")
+			if (bref_match(d.ref, "gl", g.t.src)) {
+				register_use_alias(g, d);
+				has_gl = true;
+			};
+		};
+		decl = t_next(d);
+	};
+	return has_gl;
+};
+
 fn pkgen_generate_glsl(g: *codegen, is_fragment: bool) void = {
 	glsl_set_stage(is_fragment);
 	let unit = t_first(g.t.root);
 	if (unit == null) { return; };
 	let uw = unwrap(unit);
 
+	// Check for 'use gl;' before processing
+	if (!glsl_check_use_gl(g, uw)) {
+		glsl_err(g, uw.ref, "GLSL target requires 'use gl;' (or 'use g = gl;' for alias)");
+	};
+
 	glsl_collect_fns(g, uw);
 	glsl_collect_defs(g, uw);
 
 	emit_s(&g.em, "#version 100\n");
 	emit_s(&g.em, "precision mediump float;\n\n");
-
-	let decl = t_first(uw);
-	for (decl != null) {
-		let use_decl = unwrap(decl);
-		if (use_decl.kind == N_USE) { glsl_use(g, use_decl); };
-		decl = use_decl.next;
-	};
 	let type_decl = t_first(uw);
 	for (type_decl != null) {
 		let type_decl_node = unwrap(type_decl);

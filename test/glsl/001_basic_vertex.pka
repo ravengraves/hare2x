@@ -1,4 +1,6 @@
 // Basic vertex shader: position -> gl_Position
+use gl;
+
 #[attribute] let position = gl::vec2 { ... };
 #[builtin] let gl_Position = gl::vec4 { ... };
 

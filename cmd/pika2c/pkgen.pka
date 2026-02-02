@@ -94,6 +94,21 @@ fn alias_expand_module(g: *codegen, mod: bref) bref = {
 	return mod;
 };
 
+// Check if a module reference is a registered alias (strict Hare semantics)
+// Returns true only if mod is explicitly registered via 'use'
+fn is_registered_module(g: *codegen, mod: bref) bool = {
+	return dict_get_bref(&g.aliases, mod) != 0;
+};
+
+// Get the target module for a registered alias, or empty bref if not registered
+fn get_registered_module(g: *codegen, mod: bref) bref = {
+	let packed = dict_get_bref(&g.aliases, mod);
+	if (packed != 0) {
+		return bref_unpack(packed);
+	};
+	return bref_empty();
+};
+
 // Emit module path with :: replaced by _
 fn emit_path_mangled(g: *codegen, path: bref) void = {
 	let i = 0z;
@@ -110,29 +125,47 @@ fn emit_path_mangled(g: *codegen, path: bref) void = {
 };
 
 // Extract alias-expanded module and member from a qualified identifier.
+// Expands module aliases (e.g., s:: -> strings::) but also allows local types (enums).
 fn qual_id_parts(g: *codegen, n: *tnode, mod_out: *bref, member_out: *bref) bool = {
 	if (n.kind != N_QUAL_ID) { return false; };
 	let member_opt = t_first(n);
 	if (member_opt == null) { return false; };
-	*mod_out = alias_expand_module(g, n.ref);
+	// Try to expand as a registered module alias
+	let expanded = get_registered_module(g, n.ref);
+	if (expanded.length != 0) {
+		*mod_out = expanded;
+	} else {
+		// Not a module alias - could be a local type (enum, etc.)
+		*mod_out = n.ref;
+	};
 	*member_out = unwrap(member_opt).ref;
 	return true;
 };
 
 // Extract alias-expanded module and member from a qualified type.
+// Expands module aliases (e.g., s:: -> strings::) but also allows local types.
 fn tqual_parts(g: *codegen, n: *tnode, mod_out: *bref, member_out: *bref) bool = {
 	if (n.kind != N_T_QUAL) { return false; };
 	let member_opt = t_first(n);
 	if (member_opt == null) { return false; };
-	*mod_out = alias_expand_module(g, n.ref);
+	// Try to expand as a registered module alias
+	let expanded = get_registered_module(g, n.ref);
+	if (expanded.length != 0) {
+		*mod_out = expanded;
+	} else {
+		// Not a module alias - could be a local type
+		*mod_out = n.ref;
+	};
 	*member_out = unwrap(member_opt).ref;
 	return true;
 };
 
 fn qual_id_matches_alias(g: *codegen, n: *tnode, module: str, member: str) bool = {
 	if (n.kind != N_QUAL_ID) { return false; };
-	let mod_ref = alias_expand_module(g, n.ref);
-	if (!bref_match(mod_ref, module, g.t.src)) { return false; };
+	// Must be a registered module alias to match
+	let expanded = get_registered_module(g, n.ref);
+	if (expanded.length == 0) { return false; };
+	if (!bref_match(expanded, module, g.t.src)) { return false; };
 	let member_node = t_first(n);
 	if (member_node == null) { return false; };
 	return bref_match(unwrap(member_node).ref, member, g.t.src);
@@ -621,7 +654,8 @@ fn get_expr_type_call(g: *codegen, expr: *tnode) nullable *tnode = {
 		return type_prim_dummy(g.t, TK_STR);
 	};
 	if (call_fn.kind == N_QUAL_ID) {
-		let mod_ref = alias_expand_module(g, call_fn.ref);
+		let mod_ref = get_registered_module(g, call_fn.ref);
+		if (mod_ref.length == 0) { return null; };  // Not a registered alias
 		if (!bref_match(mod_ref, "gl", g.t.src)) { return null; };
 		let member = t_first(call_fn);
 		if (member != null) {

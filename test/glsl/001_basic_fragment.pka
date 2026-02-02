@@ -1,4 +1,6 @@
 // Basic fragment shader: solid color
+use gl;
+
 #[builtin] let gl_FragColor = gl::vec4 { ... };
 
 export fn main() void = {

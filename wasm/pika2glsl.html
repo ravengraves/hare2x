@@ -250,6 +250,8 @@
         let animationId = null;
         let startTime = Date.now();
         let vertexBuffer = null;
+        let lastCanvasWidth = 0;
+        let lastCanvasHeight = 0;
 
         el.vertexInput.value = DEFAULT_VERTEX;
         el.fragmentInput.value = DEFAULT_FRAGMENT;
@@ -383,9 +385,15 @@
         function resizeCanvas() {
             const rect = el.canvas.getBoundingClientRect();
             const dpr = window.devicePixelRatio || 1;
-            el.canvas.width = rect.width * dpr;
-            el.canvas.height = rect.height * dpr;
-            gl.viewport(0, 0, el.canvas.width, el.canvas.height);
+            const newWidth = Math.floor(rect.width * dpr);
+            const newHeight = Math.floor(rect.height * dpr);
+            if (newWidth !== lastCanvasWidth || newHeight !== lastCanvasHeight) {
+                lastCanvasWidth = newWidth;
+                lastCanvasHeight = newHeight;
+                el.canvas.width = newWidth;
+                el.canvas.height = newHeight;
+                gl.viewport(0, 0, newWidth, newHeight);
+            }
         }
 
         function renderFrame() {
@@ -415,7 +423,7 @@
                 gl.vertexAttribPointer(colorLoc, 3, gl.FLOAT, false, 20, 8);
             }
             const timeLoc = gl.getUniformLocation(program, 'u_time');
-            if (timeLoc) {
+            if (timeLoc !== null) {
                 gl.uniform1f(timeLoc, time);
             }
             gl.drawArrays(gl.TRIANGLES, 0, 3);

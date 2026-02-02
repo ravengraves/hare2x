@@ -226,14 +226,15 @@ export fn _main() void = {
 	let n: i32 = 7;
 	let p: nullable *i32 = &n;
 	let v: i32 = match (p) {
-case let ptr: *i32 =>
+    case let ptr: *i32 =>
 		yield *ptr;
-case null =>
+    case null =>
 		abort();
 	};
 
 	rt::write(1, strings::toutf8(greeting): *[*]u8, len(greeting));
-	rt::write(1, strings::toutf8("\n"): *[*]u8, 1);
+	rt::write(1, strings::toutf8("\\n"): *[*]u8, 1);
+
 	if (v == 7) {
 		let msg: str = "match ok";
 		rt::write(1, strings::toutf8(msg): *[*]u8, len(msg));

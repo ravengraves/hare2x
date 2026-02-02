@@ -43,7 +43,7 @@ if ! command -v "$WASM_CC" > /dev/null 2>&1; then
     exit 1
 fi
 
-WASM_CFLAGS="$CFLAGS -Oz -ffreestanding -nostdlib -fno-builtin -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector -fno-ident -fno-PIC -flto"
+WASM_CFLAGS="$CFLAGS -Oz -ffreestanding -nostdlib"
 WASM_LDFLAGS="-Wl,--gc-sections,--build-id=none,--strip-all -static -Wl,-s"
 WASM_EXPORTS="['_main','_get_stdin_ptr','_set_stdin_len','_get_stdout_ptr','_get_stdout_len','_get_stderr_ptr','_get_stderr_len','_get_error_flag']"
 $WASM_CC $WASM_CFLAGS \
