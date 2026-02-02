@@ -1,0 +1,6 @@
+// FAIL: if expression without else clause
+export fn test() i32 = {
+    let x = 5;
+    let y = if (x > 0) { yield 1; };
+    return y;
+};

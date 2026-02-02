@@ -578,6 +578,8 @@ echo && echo "=== hare2c Hare/Pika Success Tests ===" && echo
 for f in test/pika/*.pka; do
     [ -f "$f" ] || continue
     basename_name=$(basename "${f%.pka}")
+    # Skip pika-prefixed tests (pika2c-only features)
+    case "$basename_name" in pika_*) continue;; esac
     name="pika_${basename_name}"
     printf "Testing %-40s " "pika/$basename_name..."
 

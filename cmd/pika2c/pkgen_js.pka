@@ -1231,6 +1231,72 @@ fn js_match_expr(g: *codegen, n: *tnode) void = {
 	emit_s(&g.em, "return __r; })()");
 };
 
+fn js_if_expr(g: *codegen, n: *tnode) void = {
+	emit_s(&g.em, "(() => { let __r; ");
+	let if_cur: *tnode = n;
+	for (true) {
+		let if_cond: *tnode = t_first_nn(if_cur);
+		let if_then: *tnode = t_next_nn(if_cond);
+		e_if(&g.em);
+		js_expr(g, if_cond);
+		emit_s(&g.em, ") ");
+		js_block(g, if_then);
+		match (if_then.next) {
+		case let if_else: *tnode =>
+			e_sp(&g.em);
+			emit_s(&g.em, "else ");
+			if (if_else.kind == N_IF) {
+				if_cur = if_else;
+			} else {
+				js_block(g, if_else);
+				break;
+			};
+		case null => break;
+		};
+	};
+	e_nl(&g.em);
+	emit_s(&g.em, "return __r; })()");
+};
+
+fn js_switch_expr(g: *codegen, n: *tnode) void = {
+	emit_s(&g.em, "(() => { let __r; ");
+	let switch_val: *tnode = t_first_nn(n);
+	let case_total = case_value_total(n);
+	let has_default = case_has_default(n);
+	validate_switch_type(g, switch_val);
+	check_switch_exhaustiveness(g, switch_val, case_total, has_default);
+	emit_s(&g.em, "switch (");
+	js_expr(g, switch_val);
+	emit_s(&g.em, ") ");
+	e_block_start(&g.em);
+	let switch_case_node = case_list_first(n);
+	for (switch_case_node != null) {
+		let switch_case: *tnode = unwrap(switch_case_node);
+		if (case_is_default(switch_case)) {
+			emit_s(&g.em, "default");
+			e_colon_nl(&g.em);
+		} else {
+			let switch_body_start = case_body_start(switch_case);
+			let switch_child = t_first(switch_case);
+			for (switch_child != null && switch_child != switch_body_start) {
+				let switch_expr: *tnode = unwrap(switch_child);
+				emit_s(&g.em, "case ");
+				js_expr(g, switch_expr);
+				e_colon_nl(&g.em);
+				switch_child = switch_expr.next;
+			};
+		};
+		e_indent(&g.em);
+		js_case_body(g, switch_case);
+		e_break_stmt_end(&g.em);
+		e_dedent(&g.em);
+		switch_case_node = switch_case.next;
+	};
+	e_block_end(&g.em);
+	e_nl(&g.em);
+	emit_s(&g.em, "return __r; })()");
+};
+
 fn js_match(g: *codegen, n: *tnode) void = {
 	let val: *tnode = t_first_nn(n);
 	let resolved: nullable *tnode = null;
@@ -1530,6 +1596,14 @@ fn js_expr_complex(g: *codegen, n: *tnode, k: u16) bool = {
 		if (abort_msg != null) { js_expr(g, unwrap(abort_msg)); }
 		else { emit_s(&g.em, "\"abort\""); };
 		emit_s(&g.em, ")");
+		return true;
+	};
+	if (k == N_IF) {
+		js_if_expr(g, n);
+		return true;
+	};
+	if (k == N_SWITCH) {
+		js_switch_expr(g, n);
 		return true;
 	};
 	if (k == N_MATCH) {

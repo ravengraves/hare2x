@@ -1323,6 +1323,23 @@ fn sycl_expr_impl(g: *codegen, n: *tnode) void = {
 		return;
 	};
 
+	// If expression (with yield) - only for block-based if, not ternary
+	if (k == N_IF) {
+		let if_cond_check = t_first_nn(n);
+		let if_then_check = t_next_nn(if_cond_check);
+		if (if_then_check.kind == N_BLOCK) {
+			sycl_if_expr(g, n);
+			return;
+		};
+		// Otherwise fall through to ternary handling below
+	};
+
+	// Switch expression (with yield)
+	if (k == N_SWITCH) {
+		sycl_switch_expr(g, n);
+		return;
+	};
+
 	// Match expression
 	if (k == N_MATCH) {
 		sycl_match_expr(g, n);
@@ -2106,6 +2123,139 @@ fn sycl_match_expr(g: *codegen, n: *tnode) void = {
 	emit_s(&g.em, " __r{};");
 	e_nl(&g.em);
 	sycl_match(g, n);
+	emit_s(&g.em, "return __r;");
+	e_nl(&g.em);
+	e_block_end(&g.em);
+	emit_s(&g.em, ")()");
+
+	g.cur_ret_type = prev_ret;
+	g.match_expected = prev_match_expected;
+};
+
+fn sycl_if_expr(g: *codegen, n: *tnode) void = {
+	let ty_opt = get_expr_type(g, n);
+	let prev_ret = g.cur_ret_type;
+	let prev_match_expected = g.match_expected;
+	if (ty_opt != null) { g.cur_ret_type = unwrap(ty_opt); };
+	g.match_expected = ty_opt;
+
+	emit_s(&g.em, "([&]() -> ");
+	match (ty_opt) {
+	case let ret_ty: *tnode => sycl_emit_type(g, ret_ty);
+	case null => emit_s(&g.em, "auto");
+	};
+	e_sp(&g.em);
+	e_block_start(&g.em);
+	match (ty_opt) {
+	case let match_ty: *tnode => sycl_emit_type(g, match_ty);
+	case null => emit_s(&g.em, "auto");
+	};
+	emit_s(&g.em, " __r{};");
+	e_nl(&g.em);
+	// Inline if generation
+	emit_s(&g.em, "if (");
+	let cond = t_first_nn(n);
+	sycl_expr(g, cond);
+	e_c(&g.em, ')');
+	e_sp(&g.em);
+	let then_block = t_next_nn(cond);
+	sycl_block(g, then_block);
+	let else_opt = then_block.next;
+	if (else_opt != null) {
+		let else_node: *tnode = unwrap(else_opt);
+		e_sp(&g.em);
+		emit_s(&g.em, "else ");
+		if (else_node.kind == N_IF) {
+			// Handle else-if chain
+			sycl_stmt(g, else_node);
+		} else {
+			sycl_block(g, else_node);
+		};
+	};
+	e_nl(&g.em);
+	emit_s(&g.em, "return __r;");
+	e_nl(&g.em);
+	e_block_end(&g.em);
+	emit_s(&g.em, ")()");
+
+	g.cur_ret_type = prev_ret;
+	g.match_expected = prev_match_expected;
+};
+
+fn sycl_switch_expr(g: *codegen, n: *tnode) void = {
+	// SYCL doesn't support switch statements, emit as if-else chain
+	let ty_opt = get_expr_type(g, n);
+	let prev_ret = g.cur_ret_type;
+	let prev_match_expected = g.match_expected;
+	if (ty_opt != null) { g.cur_ret_type = unwrap(ty_opt); };
+	g.match_expected = ty_opt;
+
+	emit_s(&g.em, "([&]() -> ");
+	match (ty_opt) {
+	case let ret_ty: *tnode => sycl_emit_type(g, ret_ty);
+	case null => emit_s(&g.em, "auto");
+	};
+	e_sp(&g.em);
+	e_block_start(&g.em);
+	match (ty_opt) {
+	case let match_ty: *tnode => sycl_emit_type(g, match_ty);
+	case null => emit_s(&g.em, "auto");
+	};
+	emit_s(&g.em, " __r{};");
+	e_nl(&g.em);
+
+	let switch_val: *tnode = t_first_nn(n);
+	let case_total = case_value_total(n);
+	let has_default = case_has_default(n);
+	validate_switch_type(g, switch_val);
+	check_switch_exhaustiveness(g, switch_val, case_total, has_default);
+
+	// Generate temporary for switch value
+	emit_s(&g.em, "auto __switch_val = ");
+	sycl_expr(g, switch_val);
+	emit_s(&g.em, ";");
+	e_nl(&g.em);
+
+	// Generate if-else chain for cases
+	let case_node = case_list_first(n);
+	let first_case = true;
+	for (case_node != null) {
+		let cn: *tnode = unwrap(case_node);
+		if (case_is_default(cn)) {
+			if (!first_case) {
+				emit_s(&g.em, " else ");
+			};
+			e_block_start(&g.em);
+			sycl_case_body(g, cn);
+			e_block_end(&g.em);
+		} else {
+			if (!first_case) {
+				emit_s(&g.em, " else ");
+			};
+			emit_s(&g.em, "if (");
+			let body_start = case_body_start(cn);
+			let case_child = t_first(cn);
+			let first_cond = true;
+			for (case_child != null && case_child != body_start) {
+				let case_expr: *tnode = unwrap(case_child);
+				if (!first_cond) {
+					emit_s(&g.em, " || ");
+				};
+				emit_s(&g.em, "__switch_val == ");
+				sycl_expr(g, case_expr);
+				first_cond = false;
+				case_child = case_expr.next;
+			};
+			emit_s(&g.em, ") ");
+			e_block_start(&g.em);
+			sycl_case_body(g, cn);
+			e_block_end(&g.em);
+		};
+		first_case = false;
+		case_node = cn.next;
+	};
+	e_nl(&g.em);
+
 	emit_s(&g.em, "return __r;");
 	e_nl(&g.em);
 	e_block_end(&g.em);

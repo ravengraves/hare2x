@@ -26,7 +26,8 @@ fn is_lit_kind(k: u16) bool = {
 fn is_stmt_start_kind(k: u16) bool = {
 	return k == N_BLOCK || k == N_RET || k == N_EXPR_STMT || k == N_LET ||
 		k == N_IF || k == N_FOR || k == N_SWITCH || k == N_MATCH ||
-		k == N_BREAK || k == N_CONTINUE || k == N_ASGN || k == N_ASSERT;
+		k == N_BREAK || k == N_CONTINUE || k == N_ASGN || k == N_ASSERT ||
+		k == N_YIELD;
 };
 
 fn tok_is_unary(k: u16) bool = {

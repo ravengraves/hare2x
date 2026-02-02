@@ -168,6 +168,8 @@ fn g_expr_complex(g: *codegen, n: *tnode, k: u16) bool = {
 	if (k == N_SIZE) { g_size(g, n); return true; };
 	if (k == N_ASSERT) { g_assert(g, n); return true; };
 	if (k == N_ABORT) { g_abort(g, n); return true; };
+	if (k == N_IF) { g_if_expr(g, n); return true; };
+	if (k == N_SWITCH) { g_switch_expr(g, n); return true; };
 	if (k == N_MATCH) { g_match_expr(g, n); return true; };
 	return false;
 };
@@ -1041,7 +1043,12 @@ fn g_stmt_simple(g: *codegen, n: *tnode, k: u16) bool = {
 		let yield_expr: *tnode = t_first_nn(n);
 		check_yield_never(g, yield_expr);
 		emit_bounds_checks(g, yield_expr);
-		emit_s(&g.em, "__r = ");
+		if (!bref_is_empty(g.yield_var)) {
+			e_bref(&g.em, g.yield_var);
+		} else {
+			emit_s(&g.em, "__r");
+		};
+		emit_s(&g.em, " = ");
 		g_expr(g, yield_expr);
 		e_stmt_end(&g.em);
 		return true;
@@ -1152,6 +1159,33 @@ fn g_let(g: *codegen, n: *tnode) void = {
 	} else {
 		c_auto(&g.em);
 		ef1_b_raw(&g.em, " %", n.ref);
+	};
+	// Check for if/switch expression - emit as statement for better optimization
+	if (init != null && !varr.is_variadic) {
+		let init_expr: *tnode = unwrap(init);
+		let is_if_switch_expr = false;
+		if (init_expr.kind == N_IF) {
+			let if_cond = t_first_nn(init_expr);
+			let if_then = t_next_nn(if_cond);
+			if (if_then.kind == N_BLOCK) { is_if_switch_expr = true; };
+		} else if (init_expr.kind == N_SWITCH) {
+			is_if_switch_expr = true;
+		};
+		if (is_if_switch_expr) {
+			e_stmt_end(&g.em);
+			let prev_yield_var = g.yield_var;
+			let prev_match_result = g.match_result;
+			g.yield_var = n.ref;
+			if (has_type) { g.match_result = ty; };
+			if (init_expr.kind == N_IF) {
+				g_if(g, init_expr);
+			} else {
+				g_switch(g, init_expr);
+			};
+			g.yield_var = prev_yield_var;
+			g.match_result = prev_match_result;
+			return;
+		};
 	};
 	e_assign(&g.em);
 	if (varr.is_variadic && var_is_static) {
@@ -1572,6 +1606,44 @@ fn g_match_expr(g: *codegen, n: *tnode) void = {
 	emit_s(&g.em, " __r; ");
 	g.match_result = match_ty;
 	g_match(g, n);
+	g.match_result = prev_match;
+	emit_s(&g.em, "__r; })");
+};
+
+fn g_if_expr(g: *codegen, n: *tnode) void = {
+	emit_s(&g.em, "({ ");
+	let prev_match = g.match_result;
+	let if_ty: nullable *tnode = null;
+	match (get_expr_type(g, n)) {
+	case let ty: *tnode =>
+		if_ty = ty;
+		g_type(g, ty);
+	case null =>
+		emit_s(&g.em, "int");
+		if_ty = type_prim_dummy(g.t, TK_PRIM_INT);
+	};
+	emit_s(&g.em, " __r; ");
+	g.match_result = if_ty;
+	g_if(g, n);
+	g.match_result = prev_match;
+	emit_s(&g.em, "__r; })");
+};
+
+fn g_switch_expr(g: *codegen, n: *tnode) void = {
+	emit_s(&g.em, "({ ");
+	let prev_match = g.match_result;
+	let switch_ty: nullable *tnode = null;
+	match (get_expr_type(g, n)) {
+	case let ty: *tnode =>
+		switch_ty = ty;
+		g_type(g, ty);
+	case null =>
+		emit_s(&g.em, "int");
+		switch_ty = type_prim_dummy(g.t, TK_PRIM_INT);
+	};
+	emit_s(&g.em, " __r; ");
+	g.match_result = switch_ty;
+	g_switch(g, n);
 	g.match_result = prev_match;
 	emit_s(&g.em, "__r; })");
 };

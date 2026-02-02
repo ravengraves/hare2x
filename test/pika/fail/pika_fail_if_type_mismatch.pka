@@ -1,0 +1,6 @@
+// FAIL: if expression branches yield different types
+export fn test() i32 = {
+    let x = 5;
+    let y: i32 = if (x > 0) { yield 1; } else { yield "hello"; };
+    return y;
+};

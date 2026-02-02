@@ -752,6 +752,14 @@ fn p_primary(p: *parser) *tnode = {
 		return p_match(p);
 	};
 
+	if (k == TK_IF) {
+		return p_if(p);
+	};
+
+	if (k == TK_SWITCH) {
+		return p_switch(p);
+	};
+
 	err_cursor(&p.c, "expected expression");
 	return t_new(p.t, N_NULL);
 };

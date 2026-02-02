@@ -1,0 +1,6 @@
+// FAIL: switch expression without default (non-enum)
+export fn test() i32 = {
+    let x = 5;
+    let y = switch (x) { case 1 => yield 10; case 2 => yield 20; };
+    return y;
+};

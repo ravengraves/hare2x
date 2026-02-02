@@ -19,6 +19,7 @@ type codegen = struct {
 	cur_ret_type: nullable *tnode, // current function's return type for checking
 	match_expected: nullable *tnode, // expected type for match expressions in context
 	match_result: nullable *tnode, // current match expression result type (C codegen)
+	yield_var: bref,     // variable name for yield assignment (empty = use __r)
 	nullable_narrowed: bref,
 	in_global_init: bool,
 	use_rt: bool,
@@ -665,6 +666,12 @@ fn get_expr_type_eval(g: *codegen, expr: *tnode, k: u16) type_eval = {
 	if (k == N_MATCH) {
 		return type_eval { handled = true, ty = get_match_type(g, expr, g.match_expected) };
 	};
+	if (k == N_IF) {
+		return type_eval { handled = true, ty = get_if_type(g, expr, g.match_expected) };
+	};
+	if (k == N_SWITCH) {
+		return type_eval { handled = true, ty = get_switch_type(g, expr, g.match_expected) };
+	};
 	if (k == N_ARR_LIT) {
 		let first = t_first(expr);
 		if (first == null) {
@@ -1254,6 +1261,221 @@ fn get_match_type(g: *codegen, n: *tnode, expected_in: nullable *tnode) nullable
 		if (bref_is_empty(untyped_ref)) { untyped_ref = n.ref; };
 		err_bref(untyped_ref, g.t.src, g.t.src_len,
 			"match yield type must be explicit; use a cast or type annotation");
+	};
+	return state.expected;
+};
+
+// Scan yields in an if branch, updating the expected type state
+fn if_branch_yield_type(
+	g: *codegen,
+	body: *tnode,
+	state: *match_yield_state
+) void = {
+	let stack: [256]uintptr = [0...];
+	let top: size = 0;
+	stack[top] = body: uintptr;
+	top += 1;
+	for (top > 0) {
+		top -= 1;
+		let node: *tnode = stack[top]: *tnode;
+		// Don't descend into nested match/if/switch expressions
+		if (node.kind == N_MATCH || node.kind == N_IF || node.kind == N_SWITCH) { continue; };
+		if (node.kind == N_YIELD) {
+			let expr = t_first(node);
+			if (expr != null) {
+				let expr_nn: *tnode = unwrap(expr);
+				check_yield_never(g, expr_nn);
+				match (get_expr_type(g, unwrap(expr))) {
+				case let ty: *tnode =>
+					if (state.expected != null) {
+						if (!type_eq(g, unwrap(state.expected), ty)) {
+							let type_err_ref = node_ref_first(unwrap(expr));
+							if (bref_is_empty(type_err_ref)) { type_err_ref = node.ref; };
+							err_bref(type_err_ref, g.t.src, g.t.src_len,
+								"if yields different types; use a cast or type annotation");
+						};
+					} else {
+						state.expected = ty;
+					};
+				case null =>
+					if (!state.saw_untyped && state.require_explicit) {
+						let untyped_err_ref = node_ref_first(expr_nn);
+						if (bref_is_empty(untyped_err_ref)) { untyped_err_ref = node.ref; };
+						state.untyped_ref = untyped_err_ref;
+					};
+					state.saw_untyped = true;
+				};
+			};
+		};
+		let child = t_first(node);
+		for (child != null) {
+			let c: *tnode = unwrap(child);
+			if (top >= 256) {
+				abort("if branch too complex (yield scan overflow)");
+			};
+			stack[top] = c: uintptr;
+			top += 1;
+			child = c.next;
+		};
+	};
+};
+
+// Get type from an if expression and verify yield types are consistent
+fn get_if_type(g: *codegen, n: *tnode, expected_in: nullable *tnode) nullable *tnode = {
+	let state = match_yield_state {
+		expected = expected_in,
+		require_explicit = expected_in == null,
+		saw_untyped = false,
+		untyped_ref = bref_empty()
+	};
+
+	// Walk the if-else chain
+	let if_cur: *tnode = n;
+	let has_else = false;
+	for (true) {
+		let if_cond: *tnode = t_first_nn(if_cur);
+		let if_then: *tnode = t_next_nn(if_cond);
+		// Check if this branch terminates
+		if (!stmt_always_terminates(g, if_then)) {
+			let err_ref = node_ref_first(if_then);
+			if (bref_is_empty(err_ref)) { err_ref = if_cur.ref; };
+			err_bref(err_ref, g.t.src, g.t.src_len,
+				"all paths must yield or terminate");
+		};
+		if_branch_yield_type(g, if_then, &state);
+		match (if_then.next) {
+		case let if_else: *tnode =>
+			if (if_else.kind == N_IF) {
+				if_cur = if_else;
+			} else {
+				// Final else block
+				has_else = true;
+				if (!stmt_always_terminates(g, if_else)) {
+					let else_err_ref = node_ref_first(if_else);
+					if (bref_is_empty(else_err_ref)) { else_err_ref = if_else.ref; };
+					err_bref(else_err_ref, g.t.src, g.t.src_len,
+						"all paths must yield or terminate");
+				};
+				if_branch_yield_type(g, if_else, &state);
+				break;
+			};
+		case null =>
+			break;
+		};
+	};
+
+	// If expression requires else clause
+	if (!has_else) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"if expression requires else clause");
+	};
+
+	if (state.require_explicit && state.saw_untyped) {
+		let untyped_ref = state.untyped_ref;
+		if (bref_is_empty(untyped_ref)) { untyped_ref = n.ref; };
+		err_bref(untyped_ref, g.t.src, g.t.src_len,
+			"if yield type must be explicit; use a cast or type annotation");
+	};
+	return state.expected;
+};
+
+// Scan yields in a switch case, updating the expected type state
+fn switch_case_yield_type(
+	g: *codegen,
+	cn: *tnode,
+	state: *match_yield_state
+) void = {
+	let body = case_body_node(cn);
+	if (body == null) { return; };
+	let stack: [256]uintptr = [0...];
+	let top: size = 0;
+	stack[top] = unwrap(body): uintptr;
+	top += 1;
+	for (top > 0) {
+		top -= 1;
+		let node: *tnode = stack[top]: *tnode;
+		// Don't descend into nested match/if/switch expressions
+		if (node.kind == N_MATCH || node.kind == N_IF || node.kind == N_SWITCH) { continue; };
+		if (node.kind == N_YIELD) {
+			let expr = t_first(node);
+			if (expr != null) {
+				let expr_nn: *tnode = unwrap(expr);
+				check_yield_never(g, expr_nn);
+				match (get_expr_type(g, unwrap(expr))) {
+				case let ty: *tnode =>
+					if (state.expected != null) {
+						if (!type_eq(g, unwrap(state.expected), ty)) {
+							let type_err_ref = node_ref_first(unwrap(expr));
+							if (bref_is_empty(type_err_ref)) { type_err_ref = node.ref; };
+							if (bref_is_empty(type_err_ref)) { type_err_ref = cn.ref; };
+							err_bref(type_err_ref, g.t.src, g.t.src_len,
+								"switch yields different types; use a cast or type annotation");
+						};
+					} else {
+						state.expected = ty;
+					};
+				case null =>
+					if (!state.saw_untyped && state.require_explicit) {
+						let untyped_err_ref = node_ref_first(expr_nn);
+						if (bref_is_empty(untyped_err_ref)) { untyped_err_ref = node.ref; };
+						if (bref_is_empty(untyped_err_ref)) { untyped_err_ref = cn.ref; };
+						state.untyped_ref = untyped_err_ref;
+					};
+					state.saw_untyped = true;
+				};
+			};
+		};
+		let child = t_first(node);
+		for (child != null) {
+			let c: *tnode = unwrap(child);
+			if (top >= 256) {
+				abort("switch case too complex (yield scan overflow)");
+			};
+			stack[top] = c: uintptr;
+			top += 1;
+			child = c.next;
+		};
+	};
+};
+
+// Get type from a switch expression and verify yield types are consistent
+fn get_switch_type(g: *codegen, n: *tnode, expected_in: nullable *tnode) nullable *tnode = {
+	let state = match_yield_state {
+		expected = expected_in,
+		require_explicit = expected_in == null,
+		saw_untyped = false,
+		untyped_ref = bref_empty()
+	};
+
+	// Check exhaustiveness
+	if (!switch_is_exhaustive(g, n)) {
+		err_bref(n.ref, g.t.src, g.t.src_len,
+			"switch expression must be exhaustive (add default case)");
+	};
+
+	// Check each case
+	let cn = case_list_first(n);
+	for (cn != null) {
+		let c: *tnode = unwrap(cn);
+		if (!case_body_all_paths_terminate(g, c)) {
+			let err_ref = bref_empty();
+			match (case_body_node(c)) {
+			case let body: *tnode => err_ref = node_ref_first(body);
+			case null => void;
+			};
+			if (bref_is_empty(err_ref)) { err_ref = c.ref; };
+			err_bref(err_ref, g.t.src, g.t.src_len,
+				"all paths must yield or terminate");
+		};
+		switch_case_yield_type(g, c, &state);
+		cn = c.next;
+	};
+
+	if (state.require_explicit && state.saw_untyped) {
+		let untyped_ref = state.untyped_ref;
+		if (bref_is_empty(untyped_ref)) { untyped_ref = n.ref; };
+		err_bref(untyped_ref, g.t.src, g.t.src_len,
+			"switch yield type must be explicit; use a cast or type annotation");
 	};
 	return state.expected;
 };

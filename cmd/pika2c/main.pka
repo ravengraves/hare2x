@@ -219,6 +219,7 @@ export fn main() void = {
 		cur_ret_type = null,
 		match_expected = null,
 		match_result = null,
+		yield_var = bref { pos = 0, length = 0 },
 		nullable_narrowed = bref { pos = 0, length = 0 },
 		in_global_init = false,
 		use_rt = false,

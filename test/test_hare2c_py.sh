@@ -170,8 +170,11 @@ echo && echo "=== hare2c.py Pika Success Tests ===" && echo
 
 for f in pika/*.pka; do
     [ -f "$f" ] || continue
-    name="pika_$(basename "${f%.pka}")"
-    printf "Testing %-40s " "pika/$(basename "${f%.pka}")..."
+    basename_name=$(basename "${f%.pka}")
+    # Skip pika-prefixed tests (pika2c-only features)
+    case "$basename_name" in pika_*) continue;; esac
+    name="pika_${basename_name}"
+    printf "Testing %-40s " "pika/${basename_name}..."
 
     cfile="$TMPDIR/${name}.c"
     ofile="$TMPDIR/${name}.o"

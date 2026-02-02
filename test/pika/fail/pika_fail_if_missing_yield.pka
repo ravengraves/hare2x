@@ -1,0 +1,6 @@
+// FAIL: if expression branch doesn't yield or terminate
+export fn test() i32 = {
+    let x = 5;
+    let y = if (x > 0) { let z = 1; } else { yield 0; };
+    return y;
+};
