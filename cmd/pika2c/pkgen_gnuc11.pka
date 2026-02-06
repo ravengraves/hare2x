@@ -1901,7 +1901,7 @@ fn g_fn(g: *codegen, n: *tnode) void = {
 
 	let exported = (n.flags & F_EXPORTED) != 0;
 	if (!exported) {
-		emit_s(&g.em, "static ");
+		emit_s(&g.em, "static inline ");
 	};
 
 	g_type(g, ret_type);
@@ -2241,7 +2241,7 @@ fn g_fn_decl(g: *codegen, n: *tnode) void = {
 		check_fn_type_visibility(g, n);
 	};
 	if (!exported && !extern_fn) {
-		emit_s(&g.em, "static ");
+		emit_s(&g.em, "static inline ");
 	};
 
 	g_type(g, unwrap(g_skip_to_ret(n)));
