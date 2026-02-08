@@ -1,5 +1,5 @@
 .POSIX:
-.PHONY: all clean check hare2c pika2c wasm help optimize optimize-hare2c optimize-pika2c check-glsl check-sycl
+.PHONY: all clean check hare2c pika2c wasm help optimize optimize-hare2c optimize-pika2c check-glsl check-sycl check-module
 
 # Compiler settings
 CC = gcc
@@ -118,6 +118,10 @@ check-js: pika2c
 # WASM demo smoke test
 check-wasm:
 	bash $(WASM_DIR)/test_wasm.sh
+
+# Run cross-module compilation tests
+check-module: pika2c
+	@bash $(TEST_DIR)/test_modules.sh
 
 # Run GLSL backend tests
 check-glsl: pika2c

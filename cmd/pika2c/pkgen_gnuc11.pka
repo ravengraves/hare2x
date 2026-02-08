@@ -118,7 +118,9 @@ fn g_expr_simple(g: *codegen, n: *tnode, k: u16) bool = {
 				match (resolve_alias_type(g, type_def: uintptr: *tnode)) {
 				case let resolved: *tnode =>
 					if (resolved.kind == N_T_ERR) {
-						ef1_b(&g.em, "((%)0)", n.ref);
+						emit_s(&g.em, "((");
+						e_prefixed_id(g, n.ref);
+						emit_s(&g.em, ")0)");
 						return true;
 					};
 				case null => void;
@@ -151,6 +153,11 @@ fn g_expr_simple(g: *codegen, n: *tnode, k: u16) bool = {
 		// Allow: registered module aliases (via 'use') and local types (enums, etc.)
 		if (!is_registered_module(g, n.ref) && dict_get_bref(&g.types, n.ref) == 0) {
 			err_bref(n.ref, g.t.src, g.t.src_len, "module not imported (use 'use' statement)");
+		};
+		if (g.prefix.length > 0 && !is_registered_module(g, n.ref)) {
+			do_indent(&g.em);
+			sb_bref(&g.em.buf, g.prefix, g.prefix_src);
+			sb_char(&g.em.buf, '_');
 		};
 		emit_path_mangled(g, mod_ref);
 		e_c(&g.em, '_');
@@ -423,6 +430,14 @@ fn g_call(g: *codegen, n: *tnode) void = {
 					arg = a.next;
 				};
 			};
+		};
+	};
+	if (func.kind == N_QUAL_ID) {
+		let qfn = g_find_qual_fn(g, func);
+		match (qfn) {
+		case let qfn_def: *tnode =>
+			param_emit = g_skip_symbol(qfn_def);
+		case null => void;
 		};
 	};
 	g_expr(g, func);
@@ -925,7 +940,9 @@ fn g_struct_lit(g: *codegen, n: *tnode) void = {
 			if (g.in_global_init) {
 				e_c(&g.em, '{');
 			} else {
-				ef1_b(&g.em, "(%){", n.ref);
+				emit_s(&g.em, "(");
+				e_prefixed_id(g, n.ref);
+				emit_s(&g.em, "){");
 			};
 			let fill_el = el_start(&g.em);
 			let fill_field_opt = t_first(struct_ty);
@@ -948,7 +965,9 @@ fn g_struct_lit(g: *codegen, n: *tnode) void = {
 		if (g.in_global_init) {
 			e_c(&g.em, '{');
 		} else {
-			ef1_b(&g.em, "(%){", n.ref);
+			emit_s(&g.em, "(");
+			e_prefixed_id(g, n.ref);
+			emit_s(&g.em, "){");
 		};
 		let el = el_start(&g.em);
 		let field_opt = t_first(n);
@@ -1931,12 +1950,19 @@ fn g_typedef(g: *codegen, n: *tnode) void = {
 			};
 		};
 	};
+	sb_s(&g.em.buf, "#ifndef PIKA_TYPEDEF_");
+	e_prefixed_id_raw(g, n.ref);
+	sb_s(&g.em.buf, "\n#define PIKA_TYPEDEF_");
+	e_prefixed_id_raw(g, n.ref);
+	sb_char(&g.em.buf, '\n');
 	if (ty.kind == N_T_STRUCT) {
 		c_struct(&g.em);
 		if ((ty.flags & F_PACKED) != 0) {
 			emit_s(&g.em, " __attribute__((packed))");
 		};
-		ef1_b_raw(&g.em, " % ", n.ref);
+		sb_char(&g.em.buf, ' ');
+		e_prefixed_id_raw(g, n.ref);
+		sb_char(&g.em.buf, ' ');
 		e_block_start(&g.em);
 		let field = t_first(ty);
 		for (field != null) {
@@ -1953,6 +1979,7 @@ fn g_typedef(g: *codegen, n: *tnode) void = {
 		};
 		e_block_end(&g.em);
 		e_stmt_end(&g.em);
+		emit_s(&g.em, "#endif\n");
 		e_nl(&g.em);
 		return;
 	};
@@ -1966,7 +1993,9 @@ fn g_typedef(g: *codegen, n: *tnode) void = {
 			member = unwrap(member).next;
 		};
 			for (member != null) {
-				ef2_b(&g.em, "%_%", n.ref, unwrap(member).ref);
+				e_prefixed_id(g, n.ref);
+			e_c(&g.em, '_');
+			e_bref(&g.em, unwrap(member).ref);
 				if (unwrap(member).ival != 0 || t_prev(unwrap(member)) == null) {
 					ef1_i(&g.em, " = %", unwrap(member).ival);
 				};
@@ -1998,8 +2027,10 @@ fn g_typedef(g: *codegen, n: *tnode) void = {
 	} else {
 		g_type(g, ty);
 	};
-	ef1_b_raw(&g.em, " %", n.ref);
+	sb_char(&g.em.buf, ' ');
+	e_prefixed_id_raw(g, n.ref);
 	e_stmt_end(&g.em);
+	emit_s(&g.em, "#endif\n");
 	e_nl(&g.em);
 };
 
@@ -2009,7 +2040,9 @@ fn g_def(g: *codegen, n: *tnode) void = {
 	};
 	dict_set_bref(&g.globals, n.ref, 0);
 	c_define(&g.em);
-	ef1_b_raw(&g.em, " % ", n.ref);
+	sb_char(&g.em.buf, ' ');
+	e_prefixed_id_raw(g, n.ref);
+	sb_char(&g.em.buf, ' ');
 	let child: *tnode = t_first_nn(n);
 	if (is_type_kind(child.kind)) { child = t_next_nn(child); };
 	g_expr(g, child);
@@ -2055,21 +2088,29 @@ fn g_global(g: *codegen, n: *tnode) void = {
 						"inferred array requires array literal initializer");
 				};
 				g_type(g, elem);
-				ef1_b_raw(&g.em, " %[", n.ref);
+				sb_char(&g.em.buf, ' ');
+				e_prefixed_id_raw(g, n.ref);
+				sb_char(&g.em.buf, '[');
 				e_u(&g.em, arr_lit_count(init): u64);
 				e_c(&g.em, ']');
 			} else {
 				let size_node: *tnode = t_next_nn(elem);
 				g_type(g, elem);
-				ef2_b_raw(&g.em, " %[%]", n.ref, size_node.ref);
+				sb_char(&g.em.buf, ' ');
+				e_prefixed_id_raw(g, n.ref);
+				sb_char(&g.em.buf, '[');
+				sb_bref(&g.em.buf, size_node.ref, g.t.src);
+				sb_char(&g.em.buf, ']');
 			};
 		} else {
 			g_type(g, unwrap(ty));
-			ef1_b_raw(&g.em, " %", n.ref);
+			sb_char(&g.em.buf, ' ');
+			e_prefixed_id_raw(g, n.ref);
 		};
 	} else {
 		c_auto(&g.em);
-		ef1_b_raw(&g.em, " %", n.ref);
+		sb_char(&g.em.buf, ' ');
+		e_prefixed_id_raw(g, n.ref);
 	};
 	e_assign(&g.em);
 	g.in_global_init = true;
@@ -2146,6 +2187,15 @@ fn pkgen_generate_gnuc11(g: *codegen) void = {
 		use_scan = use_scan_node.next;
 	};
 
+	let type_prescan = t_first(uw);
+	for (type_prescan != null) {
+		let tpd: *tnode = unwrap(type_prescan);
+		if (tpd.kind == N_TYPEDEF) {
+			dict_set_bref(&g.types, tpd.ref, t_first_nn(tpd): uintptr: u64);
+		};
+		type_prescan = tpd.next;
+	};
+
 	let struct_decl = t_first(uw);
 	for (struct_decl != null) {
 		let struct_d: *tnode = unwrap(struct_decl);
@@ -2155,7 +2205,10 @@ fn pkgen_generate_gnuc11(g: *codegen) void = {
 				c_typedef(&g.em);
 				e_sp(&g.em);
 				c_struct(&g.em);
-				ef2_b_raw(&g.em, " % %", struct_d.ref, struct_d.ref);
+				sb_char(&g.em.buf, ' ');
+			e_prefixed_id_raw(g, struct_d.ref);
+			sb_char(&g.em.buf, ' ');
+			e_prefixed_id_raw(g, struct_d.ref);
 				e_stmt_end(&g.em);
 			};
 		};
@@ -2177,6 +2230,8 @@ fn pkgen_generate_gnuc11(g: *codegen) void = {
 	};
 	e_nl(&g.em);
 
+	emit_s(&g.em, "#ifndef PIKA_SLICE_DEFS_H\n");
+	emit_s(&g.em, "#define PIKA_SLICE_DEFS_H\n");
 	emit_s(&g.em, "// Slice type definitions\n");
 	emit_s(&g.em, "HARE_DEFINE_SLICE(int8_t, hare_slice_int8_t);\n");
 	emit_s(&g.em, "HARE_DEFINE_SLICE(int16_t, hare_slice_int16_t);\n");
@@ -2192,6 +2247,7 @@ fn pkgen_generate_gnuc11(g: *codegen) void = {
 	emit_s(&g.em, "HARE_DEFINE_SLICE(float, hare_slice_float);\n");
 	emit_s(&g.em, "HARE_DEFINE_SLICE(double, hare_slice_double);\n");
 	emit_s(&g.em, "HARE_DEFINE_SLICE(_Bool, hare_slice__Bool);\n");
+	emit_s(&g.em, "#endif // PIKA_SLICE_DEFS_H\n");
 	g_emit_custom_slice_defs(g);
 	e_nl(&g.em);
 

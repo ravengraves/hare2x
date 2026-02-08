@@ -1214,7 +1214,7 @@ fn p_decl(p: *parser) *tnode = {
 
 	if (m_peek_is(&p.c, TK_FN)) { return p_fn_with_symbol(p, exported, symbol_name, is_kernel); };
 	if (m_peek_is(&p.c, TK_TYPE)) { return p_typedef(p, exported, packed); };
-	if (m_peek_is(&p.c, TK_DEF)) { return p_def(p); };
+	if (m_peek_is(&p.c, TK_DEF)) { return p_def(p, exported); };
 	if (m_peek_is(&p.c, TK_USE)) { return p_use(p); };
 	if (m_peek_is(&p.c, TK_LET) || m_peek_is(&p.c, TK_CONST)) {
 		return p_global(p, exported, glsl_qual);
@@ -1385,10 +1385,11 @@ fn p_typedef(p: *parser, exported: bool, packed: bool) *tnode = {
 	return n;
 };
 
-fn p_def(p: *parser) *tnode = {
+fn p_def(p: *parser, exported: bool) *tnode = {
 	m_kind(&p.c, TK_DEF);
 	let name_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
 	let n: *tnode = t_new_ref(p.t, N_DEF, name_nn.ref);
+	if (exported) { n.flags |= F_EXPORTED; };
 	if (m_peek_is(&p.c, TK_COLON)) {
 		m_kind(&p.c, TK_COLON);
 		let ty = p_type(p);

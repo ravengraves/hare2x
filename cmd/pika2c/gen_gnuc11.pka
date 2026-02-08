@@ -164,6 +164,8 @@ fn c_cond_close(em: *emitter) void = { emit_s(em, ") "); };
 // ============================================================================
 
 fn c_prelude(em: *emitter) void = {
+	emit_s(em, "#ifndef PIKA_PRELUDE_H\n");
+	emit_s(em, "#define PIKA_PRELUDE_H\n");
 	emit_s(em, "#include <stdint.h>\n");
 	emit_s(em, "#include <stddef.h>\n");
 	emit_s(em, "#ifndef NULL\n");
@@ -173,7 +175,9 @@ fn c_prelude(em: *emitter) void = {
 	emit_s(em, "static hare_str __hare_file __attribute__((unused)) = {.data=(uint8_t*)\"<stdin>\",.len=7};\n");
 	e_nl(em);
 	// Slice support
+	emit_s(em, "#ifndef HARE_DEFINE_SLICE\n");
 	emit_s(em, "#define HARE_DEFINE_SLICE(T, name) typedef struct { T* data; size_t len; size_t cap; } name\n");
+	emit_s(em, "#endif\n");
 	e_nl(em);
 	emit_s(em, "extern void rt_abort(hare_str*,uint64_t,uint64_t,hare_str) __attribute__((noreturn));\n");
 	emit_s(em, "extern void rt_abort_fixed(hare_str*,uint64_t,uint64_t,uint64_t) __attribute__((noreturn));\n");
@@ -181,10 +185,13 @@ fn c_prelude(em: *emitter) void = {
 	emit_s(em, "extern void rt_memset(void* dst, int val, size_t n);\n");
 	emit_s(em, "#define HARE_BOUNDS_CHECK(i,len) ((void)((size_t)(i)>=(size_t)(len)?(rt_abort_fixed(&__hare_file,0,0,0),0):0))\n");
 	emit_s(em, "#define HARE_ARRAY_LEN(x) (sizeof(x)/sizeof((x)[0]))\n");
+	emit_s(em, "#endif // PIKA_PRELUDE_H\n");
 	e_nl(em);
 };
 
 fn c_rt_decls(em: *emitter) void = {
+	emit_s(em, "#ifndef PIKA_RT_DECLS_H\n");
+	emit_s(em, "#define PIKA_RT_DECLS_H\n");
 	emit_s(em, "// Runtime declarations\n");
 	emit_s(em, "extern void rt_memcpy(void* dst, const void* src, size_t n);\n");
 	emit_s(em, "extern void rt_memmove(void* dst, const void* src, size_t n);\n");
@@ -197,13 +204,17 @@ fn c_rt_decls(em: *emitter) void = {
 	emit_s(em, "#define HARE_ASSERT_FIXED(c,i) do { if (!(c)) rt_abort_fixed(&__hare_file,0,0,(i)); } while(0)\n");
 	emit_s(em, "#define HARE_ARRAY_LEN(x) (sizeof(x)/sizeof((x)[0]))\n");
 	emit_s(em, "#define HARE_BOUNDS_CHECK(i,len) ((void)((size_t)(i)>=(size_t)(len)?(rt_abort_fixed(&__hare_file,0,0,0),0):0))\n");
+	emit_s(em, "#endif // PIKA_RT_DECLS_H\n");
 	e_nl(em);
 };
 
 fn c_strings_decls(em: *emitter) void = {
+	emit_s(em, "#ifndef PIKA_STRINGS_DECLS_H\n");
+	emit_s(em, "#define PIKA_STRINGS_DECLS_H\n");
 	emit_s(em, "// strings:: module - function prototypes (implementations in lib/pika/rt.c)\n");
 	emit_s(em, "extern hare_slice_uint8_t strings_toutf8(hare_str s);\n");
 	emit_s(em, "extern hare_str strings_fromutf8_unsafe(hare_slice_uint8_t in);\n");
+	emit_s(em, "#endif // PIKA_STRINGS_DECLS_H\n");
 	e_nl(em);
 };
 
@@ -548,13 +559,7 @@ fn bref_str(g: *codegen, r: bref) str = {
 	return bref_to_str(r, g.t.src);
 };
 
-fn g_type_wrapped(g: *codegen, n: *tnode, k: u16) bool = {
-	if (k == N_T_PTR) { g_type_ptr(g, n); return true; };
-	if (k == N_T_SLICE) { g_type_slice(g, n); return true; };
-	if (k == N_T_UARR) { g_type_elem_ptr(g, n); return true; };
-	if (k == N_T_ARR) { g_type_arr(g, n); return true; };
-	return false;
-};
+// g_type_wrapped removed: logic inlined into iterative g_type
 
 fn g_type_named(g: *codegen, n: *tnode, k: u16) bool = {
 	if (k == N_T_PRIM) { g_type_prim(g, n); return true; };
@@ -562,7 +567,7 @@ fn g_type_named(g: *codegen, n: *tnode, k: u16) bool = {
 		if (bref_match(n.ref, "opaque", g.t.src)) {
 			c_void(&g.em);
 		} else {
-			e_bref(&g.em, n.ref);
+			e_prefixed_id(g, n.ref);
 		};
 		return true;
 	};
@@ -574,12 +579,22 @@ fn g_type_named(g: *codegen, n: *tnode, k: u16) bool = {
 		let mod_ref = bref_empty();
 		let member_ref = bref_empty();
 		if (!tqual_parts(g, n, &mod_ref, &member_ref)) { return false; };
+		if (g.prefix.length > 0 && !is_registered_module(g, n.ref)) {
+			do_indent(&g.em);
+			sb_bref(&g.em.buf, g.prefix, g.prefix_src);
+			sb_char(&g.em.buf, '_');
+		};
 		emit_path_mangled(g, mod_ref);
 		e_c(&g.em, '_');
 		e_bref(&g.em, member_ref);
 		return true;
 	};
 	if (k == N_T_TAGGED) {
+		if (g.prefix.length > 0) {
+			do_indent(&g.em);
+			sb_bref(&g.em.buf, g.prefix, g.prefix_src);
+			sb_char(&g.em.buf, '_');
+		};
 		ef1(&g.em, "__tagged_%", i_to_s(g.tagged_count));
 		return true;
 	};
@@ -587,9 +602,53 @@ fn g_type_named(g: *codegen, n: *tnode, k: u16) bool = {
 };
 
 fn g_type(g: *codegen, n: *tnode) void = {
-	let k = n.kind;
-	if (g_type_wrapped(g, n, k)) { return; };
-	if (g_type_named(g, n, k)) { return; };
+	let cur: *tnode = n;
+	let ptrs: i64 = 0;
+	// Iteratively unwrap wrapper types (PTR, UARR, ARR)
+	for (true) {
+		let wk = cur.kind;
+		if (wk == N_T_PTR) {
+			let ptr_ch = t_first(cur);
+			if (ptr_ch == null) { break; };
+			let ptr_inner: *tnode = unwrap(ptr_ch);
+			if (ptr_inner.kind == N_T_UARR) {
+				let uarr_ch = t_first(ptr_inner);
+				if (uarr_ch == null) { break; };
+				cur = unwrap(uarr_ch);
+				ptrs += 1;
+				continue;
+			};
+			cur = ptr_inner;
+			ptrs += 1;
+			continue;
+		};
+		if (wk == N_T_UARR) {
+			let uarr_el = t_first(cur);
+			if (uarr_el == null) { break; };
+			cur = unwrap(uarr_el);
+			ptrs += 1;
+			continue;
+		};
+		if (wk == N_T_ARR) {
+			let arr_el = t_first(cur);
+			if (arr_el == null) { break; };
+			cur = unwrap(arr_el);
+			continue;
+		};
+		break;
+	};
+	// Emit base type
+	let bk = cur.kind;
+	if (bk == N_T_SLICE) {
+		g_type_slice(g, cur);
+	} else {
+		g_type_named(g, cur, bk);
+	};
+	// Emit pointer suffixes
+	for (ptrs > 0) {
+		c_ptr(&g.em);
+		ptrs -= 1;
+	};
 };
 
 fn g_type_prim(g: *codegen, n: *tnode) void = {
@@ -598,30 +657,7 @@ fn g_type_prim(g: *codegen, n: *tnode) void = {
 	e_bref(&g.em, n.ref);
 };
 
-fn g_type_ptr(g: *codegen, n: *tnode) void = {
-	match (t_first(n)) {
-	case let inner: *tnode =>
-		if (inner.kind == N_T_UARR) {
-			match (t_first(inner)) {
-			case let elem: *tnode => g_type(g, elem);
-			case null => void;
-			};
-			c_ptr(&g.em);
-			return;
-		};
-		g_type(g, inner);
-	case null => void;
-	};
-	c_ptr(&g.em);
-};
-
-fn g_type_elem_ptr(g: *codegen, n: *tnode) void = {
-	match (t_first(n)) {
-	case let elem: *tnode => g_type(g, elem);
-	case null => void;
-	};
-	c_ptr(&g.em);
-};
+// g_type_ptr and g_type_elem_ptr removed: logic in iterative g_type
 
 fn g_type_slice_from_elem(g: *codegen, elem_node: *tnode) void = {
 	emit_s(&g.em, "hare_slice_");
@@ -635,7 +671,7 @@ fn g_type_slice_from_elem(g: *codegen, elem_node: *tnode) void = {
 		};
 		emit_s(&g.em, "_ptr");
 	} else if (elem_node.kind == N_T_ALIAS) {
-		e_bref(&g.em, elem_node.ref);
+		e_prefixed_id(g, elem_node.ref);
 	} else {
 		g_type(g, elem_node);
 	};
@@ -697,13 +733,23 @@ fn g_ptr_array_decl(g: *codegen, ptr_type: *tnode, var_name: bref) void = {
 };
 
 fn e_prefixed_id(g: *codegen, ref: bref) void = {
-	if (g.prefix.length > 0 && dict_has_bref(&g.exported_funcs, ref)) {
+	if (g.prefix.length > 0 && (dict_has_bref(&g.globals, ref) || dict_has_bref(&g.types, ref))) {
 		do_indent(&g.em);
 		sb_bref(&g.em.buf, g.prefix, g.prefix_src);
 		sb_char(&g.em.buf, '_');
 		sb_bref(&g.em.buf, ref, g.t.src);
 	} else {
 		e_bref(&g.em, ref);
+	};
+};
+
+fn e_prefixed_id_raw(g: *codegen, ref: bref) void = {
+	if (g.prefix.length > 0 && (dict_has_bref(&g.globals, ref) || dict_has_bref(&g.types, ref))) {
+		sb_bref(&g.em.buf, g.prefix, g.prefix_src);
+		sb_char(&g.em.buf, '_');
+		sb_bref(&g.em.buf, ref, g.t.src);
+	} else {
+		sb_bref(&g.em.buf, ref, g.t.src);
 	};
 };
 
@@ -941,10 +987,14 @@ fn g_call_builtin(g: *codegen, func: *tnode) bool = {
 fn g_emit_custom_slice_defs(g: *codegen) void = {
 	for (let i = 0z; i < slice_elem_len; i += 1) {
 		let elem: *tnode = slice_elem_list[i]: *tnode;
-		emit_s(&g.em, "HARE_DEFINE_SLICE(");
+		emit_s(&g.em, "#ifndef PIKA_SLICE_DEF_");
+		g_type_slice_from_elem(g, elem);
+		emit_s(&g.em, "\n#define PIKA_SLICE_DEF_");
+		g_type_slice_from_elem(g, elem);
+		emit_s(&g.em, "\nHARE_DEFINE_SLICE(");
 		g_type(g, elem);
 		emit_s(&g.em, ", ");
 		g_type_slice_from_elem(g, elem);
-		emit_s(&g.em, ");\n");
+		emit_s(&g.em, ");\n#endif\n");
 	};
 };

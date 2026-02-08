@@ -1,0 +1,594 @@
+// pkgen_hdr.pka - Pika header/declaration emitter (-H mode)
+// Emits pika extern declarations for all exported symbols.
+// Output is pika source code consumed by downstream modules.
+
+// ============================================================================
+// Stack frame types for iterative type/expr emission
+// ============================================================================
+
+def HTS_TYPE: u16 = 0;
+def HTS_STRUCT_FIELD: u16 = 1;
+def HTS_TAGGED_VARIANT: u16 = 2;
+
+type ht_frame = struct {
+	state: u16,
+	node: uintptr,
+	first: bool,
+};
+
+def HES_EXPR: u16 = 0;
+def HES_CLOSE_PAREN: u16 = 1;
+def HES_BIN_RHS: u16 = 2;
+def HES_CAST_TYPE: u16 = 3;
+
+type he_frame = struct {
+	state: u16,
+	node: uintptr,
+	ival: i64,
+};
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn h_prim_from_ival(g: *codegen, ival: i64) void = {
+	let v = ival: u16;
+	if (v == TK_I8) { sb_s(&g.em.buf, "i8"); }
+	else if (v == TK_I16) { sb_s(&g.em.buf, "i16"); }
+	else if (v == TK_I32) { sb_s(&g.em.buf, "i32"); }
+	else if (v == TK_I64) { sb_s(&g.em.buf, "i64"); }
+	else if (v == TK_U8) { sb_s(&g.em.buf, "u8"); }
+	else if (v == TK_U16) { sb_s(&g.em.buf, "u16"); }
+	else if (v == TK_U32) { sb_s(&g.em.buf, "u32"); }
+	else if (v == TK_U64) { sb_s(&g.em.buf, "u64"); }
+	else if (v == TK_SIZE) { sb_s(&g.em.buf, "size"); }
+	else if (v == TK_UINTPTR) { sb_s(&g.em.buf, "uintptr"); }
+	else if (v == TK_PRIM_INT) { sb_s(&g.em.buf, "int"); }
+	else if (v == TK_PRIM_UINT) { sb_s(&g.em.buf, "uint"); }
+	else if (v == TK_PRIM_BOOL) { sb_s(&g.em.buf, "bool"); }
+	else if (v == TK_F32) { sb_s(&g.em.buf, "f32"); }
+	else if (v == TK_F64) { sb_s(&g.em.buf, "f64"); }
+	else if (v == TK_STR) { sb_s(&g.em.buf, "str"); }
+	else if (v == TK_VOID) { sb_s(&g.em.buf, "void"); }
+	else { sb_s(&g.em.buf, "void"); };
+};
+
+fn h_prefixed_name(g: *codegen, ref: bref) void = {
+	if (g.prefix.length > 0) {
+		sb_bref(&g.em.buf, g.prefix, g.prefix_src);
+		sb_char(&g.em.buf, '_');
+	};
+	sb_bref(&g.em.buf, ref, g.t.src);
+};
+
+fn h_unop(g: *codegen, ival: i64) void = {
+	let v = ival: u16;
+	if (v == TK_MINUS) { sb_char(&g.em.buf, '-'); }
+	else if (v == TK_BANG) { sb_char(&g.em.buf, '!'); }
+	else if (v == TK_TILDE) { sb_char(&g.em.buf, '~'); }
+	else if (v == TK_STAR) { sb_char(&g.em.buf, '*'); }
+	else if (v == TK_AMP) { sb_char(&g.em.buf, '&'); };
+};
+
+fn h_binop(g: *codegen, ival: i64) void = {
+	let v = ival: u16;
+	if (v == TK_PLUS) { sb_s(&g.em.buf, " + "); }
+	else if (v == TK_MINUS) { sb_s(&g.em.buf, " - "); }
+	else if (v == TK_STAR) { sb_s(&g.em.buf, " * "); }
+	else if (v == TK_SLASH) { sb_s(&g.em.buf, " / "); }
+	else if (v == TK_PERCENT) { sb_s(&g.em.buf, " % "); }
+	else if (v == TK_AMP) { sb_s(&g.em.buf, " & "); }
+	else if (v == TK_PIPE) { sb_s(&g.em.buf, " | "); }
+	else if (v == TK_CARET) { sb_s(&g.em.buf, " ^ "); }
+	else if (v == TK_SHL) { sb_s(&g.em.buf, " << "); }
+	else if (v == TK_SHR) { sb_s(&g.em.buf, " >> "); }
+	else if (v == TK_EQ_EQ) { sb_s(&g.em.buf, " == "); }
+	else if (v == TK_NE) { sb_s(&g.em.buf, " != "); }
+	else if (v == TK_LT) { sb_s(&g.em.buf, " < "); }
+	else if (v == TK_GT) { sb_s(&g.em.buf, " > "); }
+	else if (v == TK_LE) { sb_s(&g.em.buf, " <= "); }
+	else if (v == TK_GE) { sb_s(&g.em.buf, " >= "); }
+	else if (v == TK_AND) { sb_s(&g.em.buf, " && "); }
+	else if (v == TK_OR) { sb_s(&g.em.buf, " || "); };
+};
+
+// ============================================================================
+// Pika Type Emission (iterative, no recursion)
+// ============================================================================
+
+fn h_type(g: *codegen, root_ty: *tnode) void = {
+	let stack: [64]ht_frame = [ht_frame { state = 0, node = 0, first = false }...];
+	let top: size = 0;
+
+	stack[top] = ht_frame { state = HTS_TYPE, node = root_ty: uintptr, first = false };
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let f = stack[top];
+
+		if (f.state == HTS_TYPE) {
+			let cur: *tnode = f.node: *tnode;
+
+			// Iteratively unwrap prefix types (PTR, SLICE, ARR, UARR, ERR)
+			for (true) {
+				let pk = cur.kind;
+				if (pk == N_T_PTR) {
+					if ((cur.flags & F_NULLABLE) != 0) {
+						sb_s(&g.em.buf, "nullable ");
+					};
+					let ptr_ch = t_first(cur);
+					if (ptr_ch == null) { sb_char(&g.em.buf, '*'); break; };
+					let ptr_i: *tnode = unwrap(ptr_ch);
+					if (ptr_i.kind == N_T_UARR) {
+						sb_s(&g.em.buf, "*[*]");
+						let ptr_el = t_first(ptr_i);
+						if (ptr_el == null) { break; };
+						cur = unwrap(ptr_el);
+						continue;
+					};
+					sb_char(&g.em.buf, '*');
+					cur = ptr_i;
+					continue;
+				};
+				if (pk == N_T_SLICE) {
+					sb_s(&g.em.buf, "[]");
+					let sl_el = t_first(cur);
+					if (sl_el == null) { break; };
+					cur = unwrap(sl_el);
+					continue;
+				};
+				if (pk == N_T_ARR) {
+					sb_char(&g.em.buf, '[');
+					let ar_el = t_first(cur);
+					if (ar_el != null) {
+						let ar_sz = unwrap(ar_el).next;
+						if (ar_sz != null) {
+							let sn: *tnode = unwrap(ar_sz);
+							if (sn.ref.length > 0) {
+								sb_bref(&g.em.buf, sn.ref, g.t.src);
+							} else {
+								sb_int(&g.em.buf, sn.ival);
+							};
+						};
+					};
+					sb_char(&g.em.buf, ']');
+					if (ar_el == null) { break; };
+					cur = unwrap(ar_el);
+					continue;
+				};
+				if (pk == N_T_UARR) {
+					sb_s(&g.em.buf, "[*]");
+					let ua_el = t_first(cur);
+					if (ua_el == null) { break; };
+					cur = unwrap(ua_el);
+					continue;
+				};
+				if (pk == N_T_ERR) {
+					sb_char(&g.em.buf, '!');
+					let err_ch = t_first(cur);
+					if (err_ch == null) { break; };
+					cur = unwrap(err_ch);
+					continue;
+				};
+				break;
+			};
+
+			// Leaf and compound types
+			let kk = cur.kind;
+			if (kk == N_T_PRIM) {
+				if (cur.ref.length > 0) {
+					sb_bref(&g.em.buf, cur.ref, g.t.src);
+				} else {
+					h_prim_from_ival(g, cur.ival);
+				};
+			} else if (kk == N_T_ALIAS) {
+				if (bref_match(cur.ref, "opaque", g.t.src)) {
+					sb_s(&g.em.buf, "opaque");
+				} else {
+					h_prefixed_name(g, cur.ref);
+				};
+			} else if (kk == N_T_QUAL) {
+				sb_bref(&g.em.buf, cur.ref, g.t.src);
+				sb_s(&g.em.buf, "::");
+				let q_mem = t_first(cur);
+				if (q_mem != null) {
+					sb_bref(&g.em.buf, unwrap(q_mem).ref, g.t.src);
+				};
+			} else if (kk == N_T_ENUM) {
+				sb_s(&g.em.buf, "enum ");
+				let e_ch = t_first(cur);
+				if (e_ch != null && unwrap(e_ch).kind != N_ENUM_MEM) {
+					let ut: *tnode = unwrap(e_ch);
+					if (ut.ref.length > 0) {
+						sb_bref(&g.em.buf, ut.ref, g.t.src);
+					} else {
+						h_prim_from_ival(g, ut.ival);
+					};
+					sb_char(&g.em.buf, ' ');
+					e_ch = unwrap(e_ch).next;
+				};
+				sb_s(&g.em.buf, "{ ");
+				let ehf = true;
+				let em = e_ch;
+				for (em != null) {
+					let m: *tnode = unwrap(em);
+					if (!ehf) { sb_s(&g.em.buf, ", "); };
+					ehf = false;
+					sb_bref(&g.em.buf, m.ref, g.t.src);
+					sb_s(&g.em.buf, " = ");
+					sb_int(&g.em.buf, m.ival);
+					em = m.next;
+				};
+				sb_s(&g.em.buf, " }");
+			} else if (kk == N_T_STRUCT) {
+				sb_s(&g.em.buf, "struct { ");
+				let s_fld = t_first(cur);
+				if (s_fld == null) {
+					sb_s(&g.em.buf, " }");
+				} else {
+					if (top >= 64) { abort("header type too deep"); };
+					stack[top] = ht_frame {
+						state = HTS_STRUCT_FIELD,
+						node = s_fld: uintptr,
+						first = true
+					};
+					top += 1;
+				};
+			} else if (kk == N_T_TAGGED) {
+				sb_char(&g.em.buf, '(');
+				let t_var = t_first(cur);
+				if (t_var == null) {
+					sb_char(&g.em.buf, ')');
+				} else {
+					if (top >= 64) { abort("header type too deep"); };
+					stack[top] = ht_frame {
+						state = HTS_TAGGED_VARIANT,
+						node = t_var: uintptr,
+						first = true
+					};
+					top += 1;
+				};
+			} else if (cur.ref.length > 0) {
+				sb_bref(&g.em.buf, cur.ref, g.t.src);
+			};
+
+		} else if (f.state == HTS_STRUCT_FIELD) {
+			if (f.node == 0) {
+				sb_s(&g.em.buf, " }");
+				continue;
+			};
+			let sf: *tnode = f.node: *tnode;
+			if (!f.first) { sb_s(&g.em.buf, ", "); };
+			sb_bref(&g.em.buf, sf.ref, g.t.src);
+			sb_s(&g.em.buf, ": ");
+			// Push continuation for next field
+			if (top + 1 >= 64) { abort("header type too deep"); };
+			stack[top] = ht_frame {
+				state = HTS_STRUCT_FIELD,
+				node = sf.next: uintptr,
+				first = false
+			};
+			top += 1;
+			// Push field type
+			let fty = t_first(sf);
+			if (fty != null) {
+				stack[top] = ht_frame {
+					state = HTS_TYPE,
+					node = unwrap(fty): uintptr,
+					first = false
+				};
+				top += 1;
+			};
+
+		} else if (f.state == HTS_TAGGED_VARIANT) {
+			if (f.node == 0) {
+				sb_char(&g.em.buf, ')');
+				continue;
+			};
+			let tv: *tnode = f.node: *tnode;
+			if (!f.first) { sb_s(&g.em.buf, " | "); };
+			// Push continuation for next variant
+			if (top + 1 >= 64) { abort("header type too deep"); };
+			stack[top] = ht_frame {
+				state = HTS_TAGGED_VARIANT,
+				node = tv.next: uintptr,
+				first = false
+			};
+			top += 1;
+			// Push variant type
+			stack[top] = ht_frame {
+				state = HTS_TYPE,
+				node = tv: uintptr,
+				first = false
+			};
+			top += 1;
+		};
+	};
+};
+
+// ============================================================================
+// Pika Expression Emission (iterative, for default values)
+// ============================================================================
+
+fn h_expr(g: *codegen, root_expr: *tnode) void = {
+	let stack: [64]he_frame = [he_frame { state = 0, node = 0, ival = 0 }...];
+	let top: size = 0;
+
+	stack[top] = he_frame { state = HES_EXPR, node = root_expr: uintptr, ival = 0 };
+	top += 1;
+
+	for (top > 0) {
+		top -= 1;
+		let f = stack[top];
+
+		if (f.state == HES_EXPR) {
+			let en: *tnode = f.node: *tnode;
+			let k = en.kind;
+
+			if (k == N_INT || k == N_FLOAT || k == N_CHAR || k == N_STR || k == N_RAWSTR) {
+				if (en.ref.length > 0) {
+					sb_bref(&g.em.buf, en.ref, g.t.src);
+				} else {
+					sb_int(&g.em.buf, en.ival);
+				};
+				continue;
+			};
+			if (k == N_BOOL) {
+				if (en.ival != 0) { sb_s(&g.em.buf, "true"); }
+				else { sb_s(&g.em.buf, "false"); };
+				continue;
+			};
+			if (k == N_NULL) {
+				sb_s(&g.em.buf, "null");
+				continue;
+			};
+			if (k == N_ID) {
+				if (dict_has_bref(&g.globals, en.ref) || dict_has_bref(&g.types, en.ref)) {
+					h_prefixed_name(g, en.ref);
+				} else {
+					sb_bref(&g.em.buf, en.ref, g.t.src);
+				};
+				continue;
+			};
+			if (k == N_QUAL_ID) {
+				if (dict_has_bref(&g.types, en.ref) || dict_has_bref(&g.globals, en.ref)) {
+					h_prefixed_name(g, en.ref);
+				} else {
+					sb_bref(&g.em.buf, en.ref, g.t.src);
+				};
+				sb_s(&g.em.buf, "::");
+				let member = t_first(en);
+				if (member != null) {
+					sb_bref(&g.em.buf, unwrap(member).ref, g.t.src);
+				};
+				continue;
+			};
+			if (k == N_UN) {
+				h_unop(g, en.ival);
+				sb_char(&g.em.buf, '(');
+				let operand = t_first(en);
+				if (operand != null) {
+					if (top + 1 >= 64) { abort("header expr too deep"); };
+					stack[top] = he_frame { state = HES_CLOSE_PAREN, node = 0, ival = 0 };
+					top += 1;
+					stack[top] = he_frame { state = HES_EXPR, node = unwrap(operand): uintptr, ival = 0 };
+					top += 1;
+				} else {
+					sb_char(&g.em.buf, ')');
+				};
+				continue;
+			};
+			if (k == N_BIN) {
+				sb_char(&g.em.buf, '(');
+				let lhs = t_first(en);
+				if (lhs != null) {
+					if (top + 2 >= 64) { abort("header expr too deep"); };
+					stack[top] = he_frame { state = HES_CLOSE_PAREN, node = 0, ival = 0 };
+					top += 1;
+					let rhs = unwrap(lhs).next;
+					if (rhs != null) {
+						stack[top] = he_frame {
+							state = HES_BIN_RHS,
+							node = unwrap(rhs): uintptr,
+							ival = en.ival
+						};
+						top += 1;
+					};
+					stack[top] = he_frame { state = HES_EXPR, node = unwrap(lhs): uintptr, ival = 0 };
+					top += 1;
+				} else {
+					sb_char(&g.em.buf, ')');
+				};
+				continue;
+			};
+			if (k == N_CAST) {
+				let expr = t_first(en);
+				if (expr != null) {
+					let cast_ty = unwrap(expr).next;
+					if (cast_ty != null) {
+						if (top + 1 >= 64) { abort("header expr too deep"); };
+						stack[top] = he_frame {
+							state = HES_CAST_TYPE,
+							node = unwrap(cast_ty): uintptr,
+							ival = 0
+						};
+						top += 1;
+					};
+					stack[top] = he_frame { state = HES_EXPR, node = unwrap(expr): uintptr, ival = 0 };
+					top += 1;
+				};
+				continue;
+			};
+			if (is_type_kind(k)) {
+				h_type(g, en);
+				continue;
+			};
+			// Fallback
+			if (en.ref.length > 0) {
+				sb_bref(&g.em.buf, en.ref, g.t.src);
+			} else {
+				sb_int(&g.em.buf, en.ival);
+			};
+
+		} else if (f.state == HES_CLOSE_PAREN) {
+			sb_char(&g.em.buf, ')');
+		} else if (f.state == HES_BIN_RHS) {
+			h_binop(g, f.ival);
+			if (f.node != 0) {
+				if (top >= 64) { abort("header expr too deep"); };
+				stack[top] = he_frame { state = HES_EXPR, node = f.node, ival = 0 };
+				top += 1;
+			};
+		} else if (f.state == HES_CAST_TYPE) {
+			sb_s(&g.em.buf, ": ");
+			if (f.node != 0) {
+				h_type(g, f.node: *tnode);
+			};
+		};
+	};
+};
+
+// ============================================================================
+// Declaration Emission
+// ============================================================================
+
+fn h_fn(g: *codegen, n: *tnode) void = {
+	if (is_pika_main(g, n)) { return; };
+	if ((n.flags & F_EXPORTED) == 0) { return; };
+
+	// Emit @symbol annotation with the C symbol name
+	sb_s(&g.em.buf, "@symbol(\"");
+	if ((n.flags & F_SYMBOL) != 0) {
+		let sym: *tnode = t_first_nn(n);
+		let r: bref = sym.ref;
+		if (r.length > 2) {
+			let inner = bref { pos = r.pos + 1, length = r.length - 2 };
+			sb_bref(&g.em.buf, inner, g.t.src);
+		};
+	} else {
+		h_prefixed_name(g, n.ref);
+	};
+	sb_s(&g.em.buf, "\") fn ");
+	h_prefixed_name(g, n.ref);
+
+	// Parameters
+	sb_char(&g.em.buf, '(');
+	let param = g_skip_symbol(n);
+	let hf = true;
+	for (param != null && unwrap(param).kind == N_PARAM) {
+		let p: *tnode = unwrap(param);
+		if (!hf) { sb_s(&g.em.buf, ", "); };
+		hf = false;
+		sb_bref(&g.em.buf, p.ref, g.t.src);
+		sb_s(&g.em.buf, ": ");
+		let pty = t_first(p);
+		if (pty != null) { h_type(g, unwrap(pty)); };
+		match (param_default(p)) {
+		case let def_val: *tnode =>
+			sb_s(&g.em.buf, " = ");
+			h_expr(g, def_val);
+		case null => void;
+		};
+		param = p.next;
+	};
+	sb_s(&g.em.buf, ") ");
+
+	// Return type
+	let ret_type = g_skip_to_ret(n);
+	if (ret_type != null) {
+		h_type(g, unwrap(ret_type));
+	};
+	sb_s(&g.em.buf, ";\n");
+};
+
+fn h_typedef(g: *codegen, n: *tnode) void = {
+	if ((n.flags & F_EXPORTED) == 0) { return; };
+	sb_s(&g.em.buf, "type ");
+	h_prefixed_name(g, n.ref);
+	sb_s(&g.em.buf, " = ");
+	let ty: *tnode = t_first_nn(n);
+	h_type(g, ty);
+	sb_s(&g.em.buf, ";\n");
+};
+
+fn h_def(g: *codegen, n: *tnode) void = {
+	if ((n.flags & F_EXPORTED) == 0) { return; };
+	sb_s(&g.em.buf, "def ");
+	h_prefixed_name(g, n.ref);
+	let child: *tnode = t_first_nn(n);
+	if (is_type_kind(child.kind)) {
+		sb_s(&g.em.buf, ": ");
+		h_type(g, child);
+		child = t_next_nn(child);
+	};
+	sb_s(&g.em.buf, " = ");
+	h_expr(g, child);
+	sb_s(&g.em.buf, ";\n");
+};
+
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+
+fn pkgen_generate_header(g: *codegen) void = {
+	let unit = t_first(g.t.root);
+	if (unit == null) { return; };
+	let uw = unwrap(unit);
+
+	// Pre-scan use statements for alias resolution
+	let use_scan = t_first(uw);
+	for (use_scan != null) {
+		let un: *tnode = unwrap(use_scan);
+		if (un.kind == N_USE) { register_use_alias_only(g, un); };
+		use_scan = un.next;
+	};
+
+	// Pre-scan typedefs to register in g.types
+	let type_scan = t_first(uw);
+	for (type_scan != null) {
+		let tn: *tnode = unwrap(type_scan);
+		if (tn.kind == N_TYPEDEF) {
+			dict_set_bref(&g.types, tn.ref, t_first_nn(tn): uintptr: u64);
+		};
+		type_scan = tn.next;
+	};
+
+	// Pre-scan functions/defs/globals to register in g.globals
+	let fn_scan = t_first(uw);
+	for (fn_scan != null) {
+		let gn: *tnode = unwrap(fn_scan);
+		if (gn.kind == N_FN) {
+			dict_set_bref(&g.globals, gn.ref, gn: uintptr: u64);
+		} else if (gn.kind == N_DEF) {
+			dict_set_bref(&g.globals, gn.ref, 0);
+		} else if (gn.kind == N_GLOBAL) {
+			dict_set_bref(&g.globals, gn.ref, 0);
+		};
+		fn_scan = gn.next;
+	};
+
+	// Emit exported type declarations
+	let decl = t_first(uw);
+	for (decl != null) {
+		let td: *tnode = unwrap(decl);
+		if (td.kind == N_TYPEDEF) { h_typedef(g, td); };
+		decl = td.next;
+	};
+
+	// Emit exported def constants
+	decl = t_first(uw);
+	for (decl != null) {
+		let dn: *tnode = unwrap(decl);
+		if (dn.kind == N_DEF) { h_def(g, dn); };
+		decl = dn.next;
+	};
+
+	// Emit exported function prototypes
+	decl = t_first(uw);
+	for (decl != null) {
+		let fe: *tnode = unwrap(decl);
+		if (fe.kind == N_FN) { h_fn(g, fe); };
+		decl = fe.next;
+	};
+};
