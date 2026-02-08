@@ -1607,10 +1607,11 @@ fn g_switch(g: *codegen, n: *tnode) void = {
 				child = ch.next;
 			};
 		};
-		e_indent(&g.em);
+		e_block_start(&g.em);
 		g_case_body(g, cn);
 		c_break(&g.em);
-		e_stmt_end_dedent(&g.em);
+		e_stmt_end_block_end(&g.em);
+		e_nl(&g.em);
 		case_node = cn.next;
 	};
 	e_block_end(&g.em);
@@ -1712,10 +1713,11 @@ fn g_match(g: *codegen, n: *tnode) void = {
 		if (case_is_default(cn)) {
 			c_default(&g.em);
 			e_colon_nl(&g.em);
-			e_indent(&g.em);
+			e_block_start(&g.em);
 			g_case_body(g, cn);
 			c_break(&g.em);
-			e_stmt_end_dedent(&g.em);
+			e_stmt_end_block_end(&g.em);
+			e_nl(&g.em);
 		} else {
 			let case_type = t_first(cn);
 			let binding: nullable *tnode = null;
@@ -1741,7 +1743,7 @@ fn g_match(g: *codegen, n: *tnode) void = {
 			e_sp(&g.em);
 			e_i(&g.em, tag_idx);
 			e_colon_nl(&g.em);
-			e_indent(&g.em);
+			e_block_start(&g.em);
 			g.match_case_idx = tag_idx;
 			if (use_tagged && binding != null && case_type != null) {
 				let bind = unwrap(binding);
@@ -1764,7 +1766,8 @@ fn g_match(g: *codegen, n: *tnode) void = {
 			};
 			g.match_case_idx = -1;
 			c_break(&g.em);
-			e_stmt_end_dedent(&g.em);
+			e_stmt_end_block_end(&g.em);
+			e_nl(&g.em);
 		};
 		case_node = cn.next;
 		case_idx += 1;
