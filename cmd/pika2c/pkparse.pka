@@ -1015,7 +1015,6 @@ fn p_case_head_match(p: *parser, root: *tnode, case_node: *tnode) void = {
 		t_append(binding, bind_type);
 		t_append(case_node, binding);
 		case_node.flags |= F_MUTABLE;  // mark as having binding
-		root.flags |= F_NULLABLE;  // case let binding indicates nullable match
 		return;
 	};
 	if (k == TK_ARROW) {
