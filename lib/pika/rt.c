@@ -432,7 +432,7 @@ void _start(void) {
 	__asm__ volatile (
 		"mov x29, #0\n"            // Clear frame pointer
 		"mov x30, #0\n"            // Clear link register
-		"and sp, sp, #-16\n"       // Align stack to 16 bytes
+//		"and sp, sp, #-16\n"       // Align stack to 16 bytes
 		"bl rt_start_c\n"
 		"mov x8, #93\n"            // SYS_exit
 		"svc #0\n"
