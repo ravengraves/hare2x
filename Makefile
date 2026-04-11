@@ -1,5 +1,5 @@
 .POSIX:
-.PHONY: all clean check hare2c pika2c wasm help optimize optimize-hare2c optimize-pika2c check-glsl check-sycl check-module
+.PHONY: all clean check hare2c pika2c wasm help install uninstall optimize optimize-hare2c optimize-pika2c check-glsl check-sycl check-module
 
 # Compiler settings
 CC = gcc
@@ -30,6 +30,8 @@ LIB_DIR = lib
 TEST_DIR = test
 WASM_DIR = wasm
 
+PREFIX ?= /usr/local
+
 # Outputs
 HARE2C = $(BUILD_DIR)/hare2c
 PIKA2C = $(BUILD_DIR)/pika2c
@@ -52,6 +54,8 @@ help:
 	@echo "  make check-sycl   - Run SYCL tests (Intel + CUDA if available)"
 	@echo "  make check-glsl   - Run GLSL backend tests"
 	@echo "  make wasm         - Build both WASM versions"
+	@echo "  make install      - install to PREFIX/bin"
+	@echo "  make uninstall    - Remove from PREFIX/bin"
 	@echo "  make clean        - Remove build artifacts"
 	@echo ""
 	@echo "BOLT optimization uses perf profiling for better code layout."
@@ -195,9 +199,19 @@ optimize-pika2c: $(BUILD_DIR)
 	@echo "Optimized: $(PIKA2C)"
 	@ls -la $(PIKA2C)
 
+install:
+	install -m755 $(BUILD_DIR)/hare2c $(PREFIX)/bin/hare2c
+	install -m755 $(BUILD_DIR)/pika2c $(PREFIX)/bin/pika2c
+
+uninstall:
+	rm $(PREFIX)/bin/hare2c
+	rm $(PREFIX)/bin/pika2c
+
 # Clean build artifacts
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(TEST_DIR)/*.o $(TEST_DIR)/*.c $(TEST_DIR)/*.out
 	rm -f *.o *.out
 	@echo "Cleaned build artifacts"
+
+.PHONY: 

@@ -56,6 +56,26 @@ fn test_param() void = {
 	assert(result == 50, "param sum");
 };
 
+fn test_direct_array_param() void = {
+	let arr: [4]i32 = [10, 20, 30, 40];
+	let result = sum(arr);
+	assert(result == 100, "direct array param");
+};
+
+fn test_array_init() void = {
+	let arr: [3]i32 = [11, 12, 13];
+	let s: []i32 = arr;
+	assert(len(s) == 3, "array init len");
+	assert(s[1] == 12, "array init value");
+};
+
+fn test_array_cast() void = {
+	let arr: [3]i32 = [5, 6, 7];
+	let s = arr: []i32;
+	assert(len(s) == 3, "array cast len");
+	assert(s[2] == 7, "array cast value");
+};
+
 // Test full array slice
 fn test_full_slice() void = {
 	let arr: [3]i32 = [7, 8, 9];
@@ -71,5 +91,8 @@ export fn main() void = {
 	test_zero_slice();
 	test_reslice();
 	test_param();
+	test_direct_array_param();
+	test_array_init();
+	test_array_cast();
 	test_full_slice();
 };

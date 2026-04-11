@@ -194,9 +194,58 @@ fn g_expr(g: *codegen, n: *tnode) void = {
 	if (g_expr_complex(g, n, k)) { return; };
 };
 
+fn g_emit_array_to_slice(g: *codegen, expr: *tnode, target_ty: *tnode) bool = {
+	let slice_ty = target_ty;
+	match (resolve_alias_type(g, target_ty)) {
+	case let resolved: *tnode => slice_ty = resolved;
+	case null => void;
+	};
+	if (slice_ty.kind != N_T_SLICE) { return false; };
+	if (expr.kind == N_ARR_LIT) {
+		g_arr_lit_slice(g, expr, slice_ty);
+		return true;
+	};
+	let src_ty: *tnode = match (get_expr_type(g, expr)) {
+	case let ty: *tnode => yield ty;
+	case null => return false;
+	};
+	match (resolve_alias_type(g, src_ty)) {
+	case let resolved_src: *tnode => src_ty = resolved_src;
+	case null => void;
+	};
+	if (src_ty.kind != N_T_ARR) { return false; };
+	let slice_elem: *tnode = match (t_first(slice_ty)) {
+	case let elem: *tnode => yield elem;
+	case null => return false;
+	};
+	let arr_elem: *tnode = match (t_first(src_ty)) {
+	case let elem: *tnode => yield elem;
+	case null => return false;
+	};
+	if (!type_eq(g, slice_elem, arr_elem)) { return false; };
+
+	e_c(&g.em, '(');
+	g_type_slice_from_elem(g, slice_elem);
+	emit_s(&g.em, "){.data=(");
+	g_type(g, slice_elem);
+	g_emit_expr_paren(g, "*)(", expr);
+	emit_s(&g.em, ",.len=");
+	g_emit_expr_paren(g, "HARE_ARRAY_LEN(", expr);
+	emit_s(&g.em, ",.cap=");
+	g_emit_expr_paren(g, "HARE_ARRAY_LEN(", expr);
+	e_c(&g.em, '}');
+	return true;
+};
+
 fn g_expr_expected(g: *codegen, n: *tnode, expected: nullable *tnode) void = {
 	let prev = g.match_expected;
-	if (expected != null) { g.match_expected = expected; };
+	if (expected != null) {
+		if (g_emit_array_to_slice(g, n, unwrap(expected))) {
+			g.match_expected = prev;
+			return;
+		};
+		g.match_expected = expected;
+	};
 	g_expr(g, n);
 	g.match_expected = prev;
 };
@@ -476,6 +525,9 @@ fn g_call(g: *codegen, n: *tnode) void = {
 						if (emit_tagged_wrap(g, emit_param_type_arg, cur_arg)) {
 							handled = true;
 						};
+					} else {
+						g_expr_expected(g, cur_arg, emit_param_type_arg);
+						handled = true;
 					};
 				case null => void;
 				};

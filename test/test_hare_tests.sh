@@ -251,6 +251,7 @@ echo
 for f in test/pika/*.pka; do
     [ -f "$f" ] || continue
     name=$(basename "${f%.pka}")
+    case "$name" in pika_*) skip "pika-only feature test"; continue;; esac
     test_file "$f" "pika/$name"
 done
 

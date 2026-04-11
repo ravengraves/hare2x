@@ -558,6 +558,45 @@ def p_for(p):
     after = p_expr(p) if not p.at(')') else None
     p.need(')')
     return ('for', init, cond, after, p_expr(p))
+
+
+def _parse_stmt_annotations(p):
+    attrs = []
+    while p.eat('#'):
+        p.need('[')
+        annot = p.val('ID')
+        p.need(']')
+        if annot == 'ivdep':
+            if annot in attrs:
+                raise SyntaxError(f"line {p.pk()[2]}: duplicate #[ivdep] annotation")
+            attrs.append(annot)
+        else:
+            raise SyntaxError(f"line {p.pk()[2]}: unknown statement annotation")
+    return attrs
+
+
+def _parse_param_annotations(p):
+    attrs = []
+    while p.at('#') or p.at('@'):
+        if p.eat('#'):
+            p.need('[')
+            annot = p.val('ID')
+            p.need(']')
+            if annot == 'restrict':
+                if annot in attrs:
+                    raise SyntaxError(f"line {p.pk()[2]}: duplicate #[restrict] annotation")
+                attrs.append(annot)
+            else:
+                raise SyntaxError(f"line {p.pk()[2]}: unknown parameter annotation")
+            continue
+        p.need('@')
+        attr = p.val('ID')
+        if attr == 'restrict':
+            raise SyntaxError(f"line {p.pk()[2]}: parameter annotations use #[name], not @name")
+        raise SyntaxError(f"line {p.pk()[2]}: unknown parameter attribute")
+
+    return attrs
+
 def _p_case_body(p):
     if p.at('{'):
         body = p_expr(p)
@@ -663,6 +702,13 @@ def p_stmt(p):
         v = p_expr(p)
         p.need(';')
         return ('yield', v)
+    if p.at('#'):
+        attrs = _parse_stmt_annotations(p)
+        if not p.eat('for'):
+            raise SyntaxError(f"line {p.pk()[2]}: #[ivdep] must be used with a for loop")
+        r = p_for(p)
+        p.eat(';')
+        return ('for', r[1], r[2], r[3], r[4], attrs)
     if p.eat('if'):
         r = p_if(p)
         p.eat(';')
@@ -702,6 +748,7 @@ def p_fn(p, exp):
     while not p.eat(')'):
         if ps:
             p.need(',')
+        pattrs = _parse_param_annotations(p)
         pn = p_ident(p)
         p.need(':')
         pt = p_type(p)
@@ -709,7 +756,7 @@ def p_fn(p, exp):
             va = True
             pt = ('T:slice', pt)
         df = p_expr(p) if p.eat('=') else None
-        ps.append((pn, pt, df))
+        ps.append((pn, pt, df, pattrs))
     ret = p_type(p)
     p.need('=')
     body = p_expr(p)
@@ -953,6 +1000,38 @@ def is_untyped_float_lit(n):
 
 def strip_const(t):
     return t[1] if t and t[0] == 'T:const' else t
+
+
+def param_name(param):
+    return param[0]
+
+
+def param_type(param):
+    return param[1]
+
+
+def param_default(param):
+    return param[2]
+
+
+def param_attrs(param):
+    return param[3] if len(param) > 3 else []
+
+
+def param_has_attr(param, attr):
+    return attr in param_attrs(param)
+
+
+def param_supports_restrict(ty):
+    resolved = resolve_aliases(strip_const(ty)) or strip_const(ty)
+    if not resolved:
+        return False
+    if resolved[0] == 'T:uarr':
+        return True
+    if resolved[0] != 'T:ptr':
+        return False
+    inner = resolve_aliases(strip_const(resolved[1])) or strip_const(resolved[1])
+    return inner[0] != 'T:fn'
 
 # Memoized cache for common type resolution (no cycles)
 _alias_cache = {}
@@ -1508,11 +1587,14 @@ def validate_array_size_inference(ty, init, var_name):
                 ty = ('T:arr', ty[1], count, True)
     return ty
 
-def g_decl(ty, name, const=False):
+def g_decl(ty, name, const=False, restrict=False):
     type_const = False
     if ty[0] == 'T:const':
         type_const = True
         ty = ty[1]
+    use_restrict = restrict and param_supports_restrict(ty)
+    if restrict and not use_restrict:
+        CTX.error("#[restrict] requires a pointer parameter")
     const_kw = 'const ' if const else ''
     if ty[0] == 'T:arr':
         dims = []
@@ -1541,18 +1623,25 @@ def g_decl(ty, name, const=False):
                 inner = inner[1]
             elem_str = g(('T:const', inner)) if type_const else g(inner)
             stars = '*' * ptr_depth
-            return f'{elem_str} ({stars}{const_kw}{name})' + ''.join(f'[{d}]' for d in dims)
+            qual = 'restrict ' if use_restrict else ''
+            return f'{elem_str} ({stars}{const_kw}{qual}{name})' + ''.join(f'[{d}]' for d in dims)
         if ptr_depth == 1 and inner[0] == 'T:fn':
             return f'{g(inner[2])} (*{const_kw}{name})({", ".join(g(t) for _, t in inner[1]) or "void"})'
         ptr_str = g(ty)
         if type_const:
             ptr_str = f'const {ptr_str}'
-        return f'{ptr_str} {const_kw}{name}'
+        qual = 'restrict ' if use_restrict else ''
+        return f'{ptr_str} {const_kw}{qual}{name}'
     if ty[0] == 'T:fn':
         return f'{g(ty[2])} (*{const_kw}{name})({", ".join(g(t) for _, t in ty[1]) or "void"})'
     if type_const and const:
         const_kw = ''
-    return f'{const_kw}{g(ty)} {name}'
+    qual = 'restrict ' if use_restrict else ''
+    return f'{const_kw}{g(ty)} {qual}{name}'
+
+
+def g_param_decl(param):
+    return g_decl(param_type(param), param_name(param), restrict=param_has_attr(param, 'restrict'))
 
 def is_packed_struct(ty):
     return ty and ty[0] == 'T:struct' and len(ty) > 2 and bool(ty[2])
@@ -1687,6 +1776,29 @@ def g_bin(n):
         cmp = f'rt_strcmp({g(left)}, {g(right)})'
         return cmp if op == '==' else f'(!{cmp})'
     return f'({g(left)} {op} {g(right)})'
+def coerce_array_to_slice(expr, target_ty):
+    target_resolved = resolve_aliases(strip_const(target_ty))
+    if not target_resolved or target_resolved[0] != 'T:slice':
+        return None
+    target_c = g(strip_const(target_ty))
+    elem_ty = target_resolved[1]
+    elem_c = g(elem_ty)
+    if expr[0] == 'arr_lit' and expr[2] is None:
+        elems = expr[1]
+        count = len(elems)
+        if count == 0:
+            return f'(({target_c}){{.data = NULL, .len = 0, .cap = 0}})'
+        init = ', '.join(g(e) for e in elems)
+        return f'(({target_c}){{.data = ({elem_c}[]){{{init}}}, .len = {count}, .cap = {count}}})'
+    expr_ty = infer_expr_type(expr)
+    expr_ty = resolve_aliases(strip_const(expr_ty)) if expr_ty else None
+    if not expr_ty or expr_ty[0] != 'T:arr':
+        return None
+    if not types_match(expr_ty[1], elem_ty, resolve_aliases=True):
+        return None
+    expr_s = g(expr)
+    return f'(({target_c}){{.data = ({elem_c}*)({expr_s}), .len = HARE_ARRAY_LEN({expr_s}), .cap = HARE_ARRAY_LEN({expr_s})}})'
+
 def g_call(n):
     func, args = n[1], n[2]
     fn_name = func[1] if func[0] == 'id' else None
@@ -1704,15 +1816,10 @@ def g_call(n):
         'c_name', mangle_name(fn_name) if fn_name else g(func))
     info = CTX.funcs.get(fn_name)
     def coerce_arg(arg, param_ty):
+        slice_coerced = coerce_array_to_slice(arg, param_ty)
+        if slice_coerced is not None:
+            return slice_coerced
         pt = resolve_aliases(strip_const(param_ty))
-        if pt and pt[0] == 'T:slice' and arg[0] == 'arr_lit' and arg[2] is None:
-            elems = arg[1]
-            count = len(elems)
-            if count == 0:
-                return f'(({g(pt)}){{.data = NULL, .len = 0, .cap = 0}})'
-            elem_c = g(pt[1])
-            init = ', '.join(g(e) for e in elems)
-            return f'(({g(pt)}){{.data = ({elem_c}[]){{{init}}}, .len = {count}, .cap = {count}}})'
         if pt and pt[0] == 'T:prim' and pt[1] == 'f32':
             if is_untyped_float_lit(arg):
                 return f'{arg[1]}f'
@@ -1817,6 +1924,9 @@ def g_cast(n):
             tag = tag_name(variant)
             arg = '' if is_void(variant) else g(val)
             return f'{tagged_name}_from_{tag}({arg})'
+    slice_coerced = coerce_array_to_slice(val, ty)
+    if slice_coerced is not None:
+        return slice_coerced
     if ty[0] == 'T:ptr' and ty[1][0] == 'T:uarr' and ty[1][1] == ('T:prim', 'u8'):
         if val[0] == 'lit' and val[2] == 'str':
             CTX.error("cannot cast str literal to *[*]u8; use strings::toutf8(\"...\") instead")
@@ -2462,7 +2572,8 @@ def g_let(n):
             CTX.arr_lit_target_size = ty[2]
         else:
             CTX.arr_lit_target_size = None
-        init_str = f' = {g(init)}' if init else ''
+        coerced_init = coerce_array_to_slice(init, ty) if init and ty else None
+        init_str = f' = {coerced_init if coerced_init is not None else g(init)}' if init else ''
         CTX.arr_lit_target_size = None
     CTX.expected_type = old_expected
     return f'{decl}{init_str};'
@@ -2503,6 +2614,9 @@ def _coerce_ret_expr(v, ret_expr):
     val_ty = resolve_aliases(strip_const(val_ty)) if val_ty else None
     if not ret_ty or not val_ty:
         return ret_expr
+    slice_coerced = coerce_array_to_slice(v, CTX.ret_type)
+    if slice_coerced is not None:
+        return slice_coerced
     if types_match(val_ty, ret_ty, resolve_aliases=True):
         return ret_expr
     if ret_ty[0] == 'T:prim' and val_ty[0] == 'T:prim':
@@ -2880,6 +2994,9 @@ def g_asgn(n):
     if op == '=' and tgt[0] == 'id' and tgt[1] in CTX.vars:
         ty = CTX.vars[tgt[1]]
         val = _strip_addr_for_uarr(val, ty)
+        coerced_val = coerce_array_to_slice(val, ty)
+        if coerced_val is not None:
+            return f'{g(tgt)} {op} {coerced_val};'
     return f'{g(tgt)} {op} {g(val)};'
 def g_break_or_continue(n, keyword):
     label = n[1]
@@ -2898,13 +3015,24 @@ def g_expr_stmt(n):
     return result
 def g_for(n):
     init, cond, after, body = n[1], n[2], n[3], n[4]
+    attrs = n[5] if len(n) > 5 else []
     CTX.push_loop()
     init_s = g(init).rstrip(';') if init else ''
     cond_s = g(cond) if cond else ''
     after_s = g(after).rstrip(';') if after else ''
     body_s = g(body)
     CTX.pop_loop()
-    return f'for ({init_s}; {cond_s}; {after_s}) {body_s}'
+    code = f'for ({init_s}; {cond_s}; {after_s}) {body_s}'
+    if 'ivdep' in attrs:
+        pragma = '\n'.join([
+            '#if defined(__clang__)',
+            '#  pragma clang loop vectorize(assume_safety)',
+            '#elif defined(__GNUC__)',
+            '#  pragma GCC ivdep',
+            '#endif',
+        ])
+        return pragma + '\n' + code
+    return code
 def _get_element_type(arr_expr):
     ty = strip_const(infer_expr_type(arr_expr))
     if ty and ty[0] == 'T:slice':
@@ -3058,7 +3186,7 @@ def register_use(n):
 # --- Declaration Generators ---
 
 def g_fn_signature(name, ps, ret, static=''):
-    params = ', '.join(g_decl(t, nm) for nm, t, _ in ps) or 'void'
+    params = ', '.join(g_param_decl(param) for param in ps) or 'void'
     if ret[0] == 'T:ptr' and ret[1][0] == 'T:arr':
         arr = ret[1]
         dims = []
@@ -3085,14 +3213,14 @@ def g_fn_impl(n):
     CTX.ret_name = ret[1] if ret[0] == 'T:alias' and ret[1] in CTX.tagged else None
     CTX.current_func = name  # Track for warning/error context
     CTX.current_file = CTX.func_files.get(name)  # Track source file for errors
-    for pn, pt, _ in ps:
-        CTX.vars[pn] = pt
+    for param in ps:
+        CTX.vars[param_name(param)] = param_type(param)
     is_main = name == 'main' and exp and not ps and ret == ('T:prim', 'void')
     static = '' if (exp or is_main or get_symbol_attr(attrs)) else 'static '
     sig = g_fn_signature(c_name, ps, ret, static)
     comment = ''
-    if any(d for _, _, d in ps):
-        comment += f'/* Defaults: {", ".join(f"{nm}={g(d)}" for nm,_,d in ps if d)} */\n'
+    if any(param_default(param) for param in ps):
+        comment += f'/* Defaults: {", ".join(f"{param_name(param)}={g(param_default(param))}" for param in ps if param_default(param))} */\n'
     if va:
         comment += '/* variadic */\n'
     for a in attrs:

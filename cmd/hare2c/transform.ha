@@ -1094,12 +1094,99 @@ fn is_prim_type_name(ptr: *u8, plen: size) bool = {
 	       type_name_is(ptr, plen, "uintptr");
 };
 
+export fn emit_array_to_slice_coercion(
+	ctx: *transform_ctx,
+	expr: *node,
+	target_type: nullable *node
+) bool = {
+	match (target_type) {
+	case let tt: *node =>
+		let target_resolved = resolve_type_alias(ctx, tt);
+		if (target_resolved.kind != node_kind::N_TSLICE) {
+			return false;
+		};
+
+		let st = target_resolved.data: *n_tarr_data;
+		let elem = st.elem;
+		let elem_resolved = resolve_type_alias(ctx, elem);
+		let elem_is_f32 = false;
+		if (elem_resolved.kind == node_kind::N_TPRIM) {
+			let ed = elem_resolved.data: *n_id_data;
+			if (type_name_is(ed.ptr, ed.length, "f32")) {
+				elem_is_f32 = true;
+			};
+		};
+
+		let sb = ctx.output;
+		if (expr.kind == node_kind::N_ARR_LIT) {
+			let ad = expr.data: *n_arr_lit_data;
+			if (ad.fill != null) {
+				return false;
+			};
+			if (ad.nelems == 0) {
+				strbuf_append(sb, "((");
+				emit_type(ctx, tt);
+				strbuf_append(sb, "){.data = NULL, .len = 0, .cap = 0})");
+				return true;
+			};
+			strbuf_append(sb, "((");
+			emit_type(ctx, tt);
+			strbuf_append(sb, "){.data = (");
+			emit_type(ctx, elem);
+			strbuf_append(sb, "[]){");
+			let prev_expect = ctx.expecting_f32;
+			if (elem_is_f32) {
+				ctx.expecting_f32 = true;
+			};
+			for (let i = 0z; i < ad.nelems; i += 1) {
+				if (i > 0) {
+					strbuf_append(sb, ", ");
+				};
+				emit_node(ctx, ad.elems[i]);
+			};
+			ctx.expecting_f32 = prev_expect;
+			strbuf_append(sb, "}, .len = ");
+			strbuf_append_uint(sb, ad.nelems);
+			strbuf_append(sb, ", .cap = ");
+			strbuf_append_uint(sb, ad.nelems);
+			strbuf_append(sb, "})");
+			return true;
+		};
+
+		match (infer_expr_type(ctx, expr)) {
+		case let expr_type0: *node =>
+			let expr_type = resolve_type_alias(ctx, expr_type0);
+			if (expr_type.kind != node_kind::N_TARR) {
+				return false;
+			};
+			let ad = expr_type.data: *n_tarr_data;
+			if (!(types_assignable(ctx, elem, ad.elem) &&
+			      types_assignable(ctx, ad.elem, elem))) {
+				return false;
+			};
+			strbuf_append(sb, "((");
+			emit_type(ctx, tt);
+			strbuf_append(sb, "){.data = (");
+			emit_type(ctx, elem);
+			strbuf_append(sb, "*)(");
+			emit_node(ctx, expr);
+			strbuf_append(sb, "), .len = HARE_ARRAY_LEN(");
+			emit_node(ctx, expr);
+			strbuf_append(sb, "), .cap = HARE_ARRAY_LEN(");
+			emit_node(ctx, expr);
+			strbuf_append(sb, ")})");
+			return true;
+		case null =>
+			return false;
+		};
+	case null =>
+		return false;
+	};
+};
+
 // Emit an argument with f32 context for float literals when needed.
 fn emit_call_arg(ctx: *transform_ctx, arg: *node, param_type: nullable *node) void = {
 	let want_f32 = false;
-	let slice_elem: nullable *node = null;
-	let slice_type: nullable *node = null;
-	let slice_elem_f32 = false;
 	let param_tagged: nullable *node = null;
 	let param_name_ptr: nullable *u8 = null;
 	let param_name_len: size = 0;
@@ -1120,19 +1207,10 @@ fn emit_call_arg(ctx: *transform_ctx, arg: *node, param_type: nullable *node) vo
 				want_f32 = true;
 			};
 		};
-		if (resolved.kind == node_kind::N_TSLICE) {
-			let sd = resolved.data: *n_tarr_data;
-			slice_elem = sd.elem;
-			slice_type = resolved;
-			let elem_resolved = resolve_type_alias(ctx, sd.elem);
-			if (elem_resolved.kind == node_kind::N_TPRIM) {
-				let ed = elem_resolved.data: *n_id_data;
-				if (type_name_is(ed.ptr, ed.length, "f32")) {
-					slice_elem_f32 = true;
-				};
-			};
-		};
 	case null => void;
+	};
+	if (emit_array_to_slice_coercion(ctx, arg, param_type)) {
+		return;
 	};
 	if (param_tagged != null && param_name_ptr != null) {
 		let arg_type = infer_expr_type(ctx, arg);
@@ -1199,40 +1277,6 @@ fn emit_call_arg(ctx: *transform_ctx, arg: *node, param_type: nullable *node) vo
 				strbuf_append(sb, ")");
 				return;
 			};
-		};
-	};
-	if (slice_elem != null && slice_type != null && arg.kind == node_kind::N_ARR_LIT) {
-		let ad = arg.data: *n_arr_lit_data;
-		if (ad.fill == null) {
-			let sb = ctx.output;
-			if (ad.nelems == 0) {
-				strbuf_append(sb, "((");
-				emit_type(ctx, unwrap(slice_type));
-				strbuf_append(sb, "){.data = NULL, .len = 0, .cap = 0})");
-				return;
-			};
-			strbuf_append(sb, "((");
-			emit_type(ctx, unwrap(slice_type));
-			strbuf_append(sb, "){.data = (");
-			emit_type(ctx, unwrap(slice_elem));
-			strbuf_append(sb, "[]){");
-			let prev_expect = ctx.expecting_f32;
-			if (slice_elem_f32) {
-				ctx.expecting_f32 = true;
-			};
-			for (let i = 0z; i < ad.nelems; i += 1) {
-				if (i > 0) {
-					strbuf_append(sb, ", ");
-				};
-				emit_node(ctx, ad.elems[i]);
-			};
-			ctx.expecting_f32 = prev_expect;
-			strbuf_append(sb, "}, .len = ");
-			strbuf_append_uint(sb, ad.nelems);
-			strbuf_append(sb, ", .cap = ");
-			strbuf_append_uint(sb, ad.nelems);
-			strbuf_append(sb, "})");
-			return;
 		};
 	};
 	let prev_expect = ctx.expecting_f32;
@@ -2811,6 +2855,10 @@ export fn emit_node(ctx: *transform_ctx, n_nullable: nullable *node) void = {
 				};
 			};
 		case null => void;
+		};
+
+		if (emit_array_to_slice_coercion(ctx, expr, target)) {
+			return;
 		};
 
 		// Check if casting to *[*]T (pointer to unbounded array)

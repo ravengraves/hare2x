@@ -1535,6 +1535,9 @@ export fn emit_fn(ctx: *transform_ctx, n: *node) void = {
 };
 
 fn emit_init_expr(ctx: *transform_ctx, init: *node, typ: nullable *node) void = {
+	if (emit_array_to_slice_coercion(ctx, init, typ)) {
+		return;
+	};
 	if (typ != null &&
 	    (init.kind == node_kind::N_MATCH || init.kind == node_kind::N_SWITCH)) {
 		let prev_in_return = ctx.in_return_expr;
@@ -4079,6 +4082,10 @@ export fn emit_stmt(ctx: *transform_ctx, n: *node) void = {
 		// Hint f32 context for float literals on RHS.
 		let want_f32 = false;
 		let target_type = infer_expr_type(ctx, target);
+		if (d.op == token_kind::EQ && emit_array_to_slice_coercion(ctx, value, target_type)) {
+			strbuf_append(sb, ";");
+			return;
+		};
 		match (target_type) {
 		case let tt: *node =>
 			if (tt.kind == node_kind::N_TPRIM) {

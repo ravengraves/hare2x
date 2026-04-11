@@ -480,6 +480,9 @@ fn h_fn(g: *codegen, n: *tnode) void = {
 		let p: *tnode = unwrap(param);
 		if (!hf) { sb_s(&g.em.buf, ", "); };
 		hf = false;
+		if (param_has_restrict(g, p)) {
+			sb_s(&g.em.buf, "#[restrict] ");
+		};
 		sb_bref(&g.em.buf, p.ref, g.t.src);
 		sb_s(&g.em.buf, ": ");
 		let pty = t_first(p);
