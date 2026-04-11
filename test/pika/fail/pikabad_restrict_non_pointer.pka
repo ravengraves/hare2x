@@ -1,0 +1,7 @@
+fn bad(#[restrict] value: int) void = {
+	return;
+};
+
+export fn main() void = {
+	bad(1);
+};

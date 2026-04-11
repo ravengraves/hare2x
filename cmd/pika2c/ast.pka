@@ -92,6 +92,14 @@ fn case_has_binding(cn: *tnode) bool = {
 	return (cn.flags & F_MUTABLE) != 0;
 };
 
+fn for_has_ivdep(n: *tnode) bool = {
+	return (n.ival & FOR_ATTR_IVDEP) != 0;
+};
+
+fn param_is_restrict(n: *tnode) bool = {
+	return (n.ival & PARAM_ATTR_RESTRICT) != 0;
+};
+
 fn case_list_first(root: *tnode) nullable *tnode = {
 	let first = t_first(root);
 	if (first == null) { return null; };

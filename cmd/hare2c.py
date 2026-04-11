@@ -560,18 +560,45 @@ def p_for(p):
     return ('for', init, cond, after, p_expr(p))
 
 
+def _parse_hash_annotation(p):
+    line = p.pk()[2]
+    p.need('#')
+    p.need('[')
+    annot = p.val('ID') if p.at('ID') else None
+    simple = p.at(']')
+    depth = 0
+    while True:
+        if p.at('EOF'):
+            raise SyntaxError(f"line {line}: unterminated annotation")
+        tok = p.pk()
+        if tok[1] == '[':
+            depth += 1
+            p.i += 1
+            continue
+        if tok[1] == ']':
+            if depth == 0:
+                p.i += 1
+                break
+            depth -= 1
+            p.i += 1
+            continue
+        p.i += 1
+    return annot, simple, line
+
+
+def _skip_hash_annotations(p):
+    while p.at('#'):
+        _parse_hash_annotation(p)
+
+
 def _parse_stmt_annotations(p):
     attrs = []
-    while p.eat('#'):
-        p.need('[')
-        annot = p.val('ID')
-        p.need(']')
-        if annot == 'ivdep':
+    while p.at('#'):
+        annot, simple, line = _parse_hash_annotation(p)
+        if simple and annot == 'ivdep':
             if annot in attrs:
-                raise SyntaxError(f"line {p.pk()[2]}: duplicate #[ivdep] annotation")
+                raise SyntaxError(f"line {line}: duplicate #[ivdep] annotation")
             attrs.append(annot)
-        else:
-            raise SyntaxError(f"line {p.pk()[2]}: unknown statement annotation")
     return attrs
 
 
@@ -579,15 +606,12 @@ def _parse_param_annotations(p):
     attrs = []
     while p.at('#') or p.at('@'):
         if p.eat('#'):
-            p.need('[')
-            annot = p.val('ID')
-            p.need(']')
-            if annot == 'restrict':
+            p.i -= 1
+            annot, simple, line = _parse_hash_annotation(p)
+            if simple and annot == 'restrict':
                 if annot in attrs:
-                    raise SyntaxError(f"line {p.pk()[2]}: duplicate #[restrict] annotation")
+                    raise SyntaxError(f"line {line}: duplicate #[restrict] annotation")
                 attrs.append(annot)
-            else:
-                raise SyntaxError(f"line {p.pk()[2]}: unknown parameter annotation")
             continue
         p.need('@')
         attr = p.val('ID')
@@ -704,11 +728,13 @@ def p_stmt(p):
         return ('yield', v)
     if p.at('#'):
         attrs = _parse_stmt_annotations(p)
-        if not p.eat('for'):
-            raise SyntaxError(f"line {p.pk()[2]}: #[ivdep] must be used with a for loop")
-        r = p_for(p)
-        p.eat(';')
-        return ('for', r[1], r[2], r[3], r[4], attrs)
+        if attrs:
+            if not p.eat('for'):
+                raise SyntaxError(f"line {p.pk()[2]}: #[ivdep] must be used with a for loop")
+            r = p_for(p)
+            p.eat(';')
+            return ('for', r[1], r[2], r[3], r[4], attrs)
+        return p_stmt(p)
     if p.eat('if'):
         r = p_if(p)
         p.eat(';')
@@ -731,6 +757,7 @@ def p_stmt(p):
 
 def p_fn(p, exp):
     attrs = []
+    _skip_hash_annotations(p)
     while p.eat('@'):
         attr_name = p.val('ID')
         if attr_name == 'symbol' and p.eat('('):
@@ -739,8 +766,10 @@ def p_fn(p, exp):
             attrs.append(('symbol', sym))
         else:
             attrs.append(attr_name)
+    _skip_hash_annotations(p)
     if p.eat('export'):
         exp = True
+    _skip_hash_annotations(p)
     p.need('fn')
     name = p.val('ID')
     p.need('(')
@@ -763,7 +792,9 @@ def p_fn(p, exp):
     p.need(';')
     return ('fn', name, ps, ret, body, exp, va, attrs)
 def p_decl(p):
+    _skip_hash_annotations(p)
     exp = bool(p.eat('export'))
+    _skip_hash_annotations(p)
     if p.at('@'):
         # Handle @packed type declarations (Pika)
         if p.pk(1)[0] == 'ID' and p.pk(1)[1] == 'packed':
@@ -772,8 +803,10 @@ def p_decl(p):
                 p.need('@')
                 p.val('ID')
                 packed = True
+            _skip_hash_annotations(p)
             if p.eat('export'):
                 exp = True
+            _skip_hash_annotations(p)
             if p.at('@'):
                 raise SyntaxError(f"line {p.pk()[2]}: unknown attribute")
             if not p.eat('type'):

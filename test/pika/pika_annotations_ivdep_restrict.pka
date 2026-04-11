@@ -1,0 +1,20 @@
+use rt;
+
+fn axpy(n: int, #[restrict] y: *[*]f32, #[restrict] x: *[*]f32, a: f32) void = {
+	#[ivdep]
+	for (let i: int = 0; i < n; i += 1) {
+		y[i] += a * x[i];
+	};
+};
+
+export fn main() void = {
+	let x: [4]f32 = [1.0f32, 2.0f32, 3.0f32, 4.0f32];
+	let y: [4]f32 = [10.0f32, 20.0f32, 30.0f32, 40.0f32];
+
+	axpy(4, &y: *[*]f32, &x: *[*]f32, 2.0f32);
+
+	assert(y[0] == 12.0f32, "y[0]");
+	assert(y[1] == 24.0f32, "y[1]");
+	assert(y[2] == 36.0f32, "y[2]");
+	assert(y[3] == 48.0f32, "y[3]");
+};

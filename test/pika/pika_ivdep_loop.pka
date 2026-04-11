@@ -1,0 +1,6 @@
+fn daxpy(n: int, y: *[*]f64, x: *[*]f64, a: f64) void = {
+	#[ivdep]
+	for (let i: int = 0; i < n; i += 1) {
+		y[i] += a * x[i];
+	};
+};

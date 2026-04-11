@@ -1,0 +1,13 @@
+fn saxpy(
+	n: int,
+	#[restrict] out: *[*]f32,
+	#[restrict] lhs: *[*]f32,
+	#[restrict] rhs: *[*]f32,
+	alpha: f32,
+	beta: f32
+) void = {
+	#[ivdep]
+	for (let i: int = 0; i < n; i += 1) {
+		out[i] = alpha * lhs[i] + beta * rhs[i];
+	};
+};

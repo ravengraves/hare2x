@@ -188,6 +188,14 @@ def N_SIZE: u16 = 354;
 // Attributes
 def N_SYMBOL_NAME: u16 = 353;
 
+// Node-local metadata stored in tnode.ival
+def FOR_PART_INIT: i64 = 1;
+def FOR_PART_COND: i64 = 2;
+def FOR_PART_AFTER: i64 = 4;
+def FOR_ATTR_IVDEP: i64 = 8;
+
+def PARAM_ATTR_RESTRICT: i64 = 1;
+
 // Node flags
 def F_EXPORTED: u16 = 1;
 def F_MUTABLE: u16 = 2;

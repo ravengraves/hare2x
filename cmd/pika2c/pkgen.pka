@@ -1717,6 +1717,30 @@ fn param_default(p: *tnode) nullable *tnode = {
 	return unwrap(ty_opt).next;
 };
 
+fn type_supports_restrict(g: *codegen, ty: *tnode) bool = {
+	let t = ty;
+	match (resolve_alias_type(g, ty)) {
+	case let resolved: *tnode => t = resolved;
+	case null => void;
+	};
+	if (t.kind == N_T_UARR) { return true; };
+	if (t.kind != N_T_PTR) { return false; };
+	match (t_first(t)) {
+	case let inner: *tnode => return inner.kind != N_T_FN;
+	case null => return false;
+	};
+};
+
+fn param_has_restrict(g: *codegen, p: *tnode) bool = {
+	if (!param_is_restrict(p)) { return false; };
+	let pty: *tnode = t_first_nn(p);
+	if (!type_supports_restrict(g, pty)) {
+		err_bref(p.ref, g.t.src, g.t.src_len,
+			"#[restrict] requires a pointer parameter");
+	};
+	return true;
+};
+
 fn call_arg_next(
 	g: *codegen,
 	callee_ref: bref,

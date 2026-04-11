@@ -604,6 +604,9 @@ fn g_cast(g: *codegen, n: *tnode) void = {
 		case null => void;
 		};
 	};
+	if (g_emit_array_to_slice(g, expr, ty)) {
+		return;
+	};
 	// Reject *[*]T -> []T cast (use slicing instead)
 	if (ty.kind == N_T_SLICE) {
 		match (get_expr_type(g, expr)) {
@@ -1394,6 +1397,9 @@ fn g_if(g: *codegen, n: *tnode) void = {
 };
 
 fn g_for(g: *codegen, n: *tnode) void = {
+	if (for_has_ivdep(n)) {
+		c_ivdep_pragma(&g.em);
+	};
 	let while_style = (n.flags & F_NULLABLE) != 0;
 	if (while_style) {
 		c_for(&g.em);
@@ -1946,9 +1952,14 @@ fn g_param_list(g: *codegen, n: *tnode) void = {
 	let param = g_skip_symbol(n);
 	for (param != null && unwrap(param).kind == N_PARAM) {
 		el_sep(&el);
-		g_type(g, t_first_nn(unwrap(param)));
-		ef1_b_raw(&g.em, " %", unwrap(param).ref);
-		param = unwrap(param).next;
+		let p: *tnode = unwrap(param);
+		g_type(g, t_first_nn(p));
+		if (param_has_restrict(g, p)) {
+			e_sp(&g.em);
+			c_restrict(&g.em);
+		};
+		ef1_b_raw(&g.em, " %", p.ref);
+		param = p.next;
 	};
 	if (el.first) { c_void(&g.em); };
 	e_c(&g.em, ')');

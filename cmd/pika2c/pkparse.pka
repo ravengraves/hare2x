@@ -796,6 +796,32 @@ fn p_stmt(p: *parser) *tnode = {
 		m_need(&p.c, TK_SEMI);
 		return result;
 	};
+	if (k == TK_HASH) {
+		let saw_ivdep = false;
+		for (m_peek_is(&p.c, TK_HASH)) {
+			m_kind(&p.c, TK_HASH);
+			m_need(&p.c, TK_LBRACKET);
+			let annot_stmt: *tnode = m_need_ident(&p.c, TK_IDENT);
+			m_need(&p.c, TK_RBRACKET);
+			if (bref_match(annot_stmt.ref, "ivdep", p.t.src)) {
+				if (saw_ivdep) {
+					err_cursor(&p.c, "duplicate #[ivdep] annotation");
+				};
+				saw_ivdep = true;
+			} else {
+				err_cursor(&p.c, "unknown statement annotation");
+			};
+		};
+		if (!m_peek_is(&p.c, TK_FOR)) {
+			err_cursor(&p.c, "#[ivdep] must be used with a for loop");
+		};
+		result = p_for(p);
+		if (saw_ivdep) {
+			result.ival |= FOR_ATTR_IVDEP;
+		};
+		m_need(&p.c, TK_SEMI);
+		return result;
+	};
 	if (k == TK_IF) { result = p_if(p); m_need(&p.c, TK_SEMI); return result; };
 	if (k == TK_FOR) { result = p_for(p); m_need(&p.c, TK_SEMI); return result; };
 	if (k == TK_SWITCH) { result = p_switch(p); m_need(&p.c, TK_SEMI); return result; };
@@ -912,14 +938,14 @@ fn p_for(p: *parser) *tnode = {
 	} else if (m_peek_is(&p.c, TK_LET)) {
 		let init = p_let(p, true);
 		t_append(n, init);
-		n.ival |= 1;
+		n.ival |= FOR_PART_INIT;
 		p_for_cond_after(p, n);
 	} else {
 		let first_expr = p_expr(p, 1);
 		if (m_peek_is(&p.c, TK_SEMI)) {
 			m_kind(&p.c, TK_SEMI);
 			t_append(n, first_expr);
-			n.ival |= 1;
+			n.ival |= FOR_PART_INIT;
 			p_for_cond_after(p, n);
 		} else {
 			n.flags |= F_NULLABLE;
@@ -936,12 +962,12 @@ fn p_for_cond_after(p: *parser, n: *tnode) void = {
 	if (!m_peek_is(&p.c, TK_SEMI)) {
 		let cond: *tnode = p_expr(p, 1);
 		t_append(n, cond);
-		n.ival |= 2;
+		n.ival |= FOR_PART_COND;
 	};
 	m_need(&p.c, TK_SEMI);
 	if (!m_peek_is(&p.c, TK_RPAREN)) {
 		p_for_after(p, n);
-		n.ival |= 4;
+		n.ival |= FOR_PART_AFTER;
 	};
 	m_need(&p.c, TK_RPAREN);
 };
@@ -1264,41 +1290,51 @@ fn p_fn_with_symbol(p: *parser, exported: bool, symbol_name: nullable *tnode, is
 	let saw_default = false;
 	for (!m_peek_is(&p.c, TK_RPAREN) && !cur_eof(&p.c)) {
 		let param_flags: u16 = 0;
+		let param_meta: i64 = 0;
 		let saw_addr_attr = false;
-		let saw_param_attr = false;
+		let saw_kernel_param_attr = false;
 		for (m_peek_is(&p.c, TK_HASH) || m_peek_is(&p.c, TK_AT)) {
-			saw_param_attr = true;
 			if (m_peek_is(&p.c, TK_HASH)) {
 				m_kind(&p.c, TK_HASH);
 				m_need(&p.c, TK_LBRACKET);
 				let annot_param: *tnode = m_need_ident(&p.c, TK_IDENT);
 				m_need(&p.c, TK_RBRACKET);
 				if (bref_match(annot_param.ref, "local", p.t.src)) {
+					saw_kernel_param_attr = true;
 					if (saw_addr_attr) {
 						err_cursor(&p.c, "duplicate address space annotation");
 					};
 					saw_addr_attr = true;
 					param_flags |= F_SYCL_LOCAL;
 				} else if (bref_match(annot_param.ref, "global", p.t.src)) {
+					saw_kernel_param_attr = true;
 					if (saw_addr_attr) {
 						err_cursor(&p.c, "duplicate address space annotation");
 					};
 					saw_addr_attr = true;
 				} else if (bref_match(annot_param.ref, "read", p.t.src)) {
+					saw_kernel_param_attr = true;
 					if ((param_flags & F_SYCL_READ) != 0) {
 						err_cursor(&p.c, "duplicate access annotation");
 					};
 					param_flags |= F_SYCL_READ;
 				} else if (bref_match(annot_param.ref, "write", p.t.src)) {
+					saw_kernel_param_attr = true;
 					if ((param_flags & F_SYCL_WRITE) != 0) {
 						err_cursor(&p.c, "duplicate access annotation");
 					};
 					param_flags |= F_SYCL_WRITE;
 				} else if (bref_match(annot_param.ref, "readwrite", p.t.src)) {
+					saw_kernel_param_attr = true;
 					if ((param_flags & (F_SYCL_READ | F_SYCL_WRITE)) != 0) {
 						err_cursor(&p.c, "duplicate access annotation");
 					};
 					param_flags |= F_SYCL_READ | F_SYCL_WRITE;
+				} else if (bref_match(annot_param.ref, "restrict", p.t.src)) {
+					if ((param_meta & PARAM_ATTR_RESTRICT) != 0) {
+						err_cursor(&p.c, "duplicate #[restrict] annotation");
+					};
+					param_meta |= PARAM_ATTR_RESTRICT;
 				} else {
 					err_cursor(&p.c, "unknown parameter annotation");
 				};
@@ -1309,14 +1345,15 @@ fn p_fn_with_symbol(p: *parser, exported: bool, symbol_name: nullable *tnode, is
 					bref_match(attr_param.ref, "global", p.t.src) ||
 					bref_match(attr_param.ref, "read", p.t.src) ||
 					bref_match(attr_param.ref, "write", p.t.src) ||
-					bref_match(attr_param.ref, "readwrite", p.t.src)) {
+					bref_match(attr_param.ref, "readwrite", p.t.src) ||
+					bref_match(attr_param.ref, "restrict", p.t.src)) {
 					err_cursor(&p.c, "kernel parameter annotations use #[name], not @name");
 				} else {
 					err_cursor(&p.c, "unknown parameter attribute");
 				};
 			};
 		};
-		if (saw_param_attr && !is_kernel) {
+		if (saw_kernel_param_attr && !is_kernel) {
 			err_cursor(&p.c, "kernel parameter annotations require #[kernel]");
 		};
 		let pname_nn: *tnode = m_need_ident(&p.c, TK_IDENT);
@@ -1336,6 +1373,9 @@ fn p_fn_with_symbol(p: *parser, exported: bool, symbol_name: nullable *tnode, is
 		let param = t_new_ref(p.t, N_PARAM, pname_nn.ref);
 		if (param_flags != 0) {
 			param.flags |= param_flags;
+		};
+		if (param_meta != 0) {
+			param.ival |= param_meta;
 		};
 		t_append(param, ptype);
 		match (default_val) {

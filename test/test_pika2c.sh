@@ -46,6 +46,25 @@ run_test() {
     pass
 }
 
+run_compile_test() {
+    local name="$1"
+    local file="$2"
+    printf "Testing %-40s " "$name (compile only)..."
+
+    local cfile="$TMPDIR/${name}.compile.c"
+    local ofile="$TMPDIR/${name}.o"
+
+    if ! "$TMPDIR/pika2c" < "$file" > "$cfile"; then
+        fail "transpile error"
+        return
+    fi
+    if ! $CC $CFLAGS -c "$cfile" -o "$ofile"; then
+        fail "compile error"
+        return
+    fi
+    pass
+}
+
 run_fail_test() {
     local name="$1"
     local file="$2"
@@ -96,7 +115,14 @@ run_runtime_test() {
 
 echo "=== pika2c  Success Tests ===" && echo
 for f in test/pika/*.pka; do
-    [ -f "$f" ] && run_test "$(basename ${f%.pka})" "$f"
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in pika_*) continue;; esac
+    run_test "$(basename ${f%.pka})" "$f"
+done
+
+echo && echo "=== pika2c  Pika-Only Compile Tests ===" && echo
+for f in test/pika/pika_*.pka; do
+    [ -f "$f" ] && run_compile_test "$(basename ${f%.pka})" "$f"
 done
 
 echo && echo "=== pika2c  Compile-Time Fail Tests ===" && echo
