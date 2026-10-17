@@ -1,5 +1,5 @@
 # Hare2X: A Hare-to-X Transpiler
-[![builds.sr.ht status](https://builds.sr.ht/~alecgraves/hare2x/commits/master/ubuntu.yml.svg)](https://builds.sr.ht/~alecgraves/hare2x/commits/master/ubuntu.yml?)
+[![Hare2X CI](https://github.com/ravengraves/hare2x/actions/workflows/ci.yml/badge.svg)](https://github.com/ravengraves/hare2x/actions/workflows/ci.yml)
 
 A family of Hare-Subset-to-GNU-C11/SYCL/JS/x86_64_AT&T_ASM transpilers with three working implementations:
 - **hare2c.py** - Python hare/pika to GNU-C11 reference/bootstrap implementation (~3,000 lines)
